@@ -1,0 +1,15 @@
+resolver/target
+resolver/.env
+resolver/Cargo.lock
+
+back/target
+back/.env
+back/Cargo.lock
+
+# Macos
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.iml
