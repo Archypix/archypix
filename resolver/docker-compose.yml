@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: archypix-resolver-db
+    environment:
+      POSTGRES_DB: archypix_resolver
+      POSTGRES_USER: archypix
+      POSTGRES_PASSWORD: archypix
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U archypix"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  resolver:
+    build: .
+    container_name: archypix-resolver
+    environment:
+      DATABASE_URL: postgres://archypix:archypix@postgres/archypix_resolver
+      MANAGED_DOMAINS: ${MANAGED_DOMAINS:-archypix.com}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-change-me-in-production}
+      LISTEN_ADDR: 0.0.0.0:8080
+      CACHE_TTL_SECS: ${CACHE_TTL_SECS:-3600}
+      CACHE_MAX_CAPACITY: ${CACHE_MAX_CAPACITY:-100000}
+      RUST_LOG: ${RUST_LOG:-info,archypix_resolver=debug}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
