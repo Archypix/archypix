@@ -1,5 +1,5 @@
 use crate::database::models::User;
-use crate::infrastructure::error::AppError;
+use crate::infrastructure::error::{AppError, map_sqlx_error};
 use sqlx::PgPool;
 
 /// User-related database operations (Repository pattern)
@@ -22,7 +22,7 @@ impl UserRepository {
         )
         .fetch_optional(pool)
         .await
-        .map_err(Into::<AppError>::into)
+        .map_err(map_sqlx_error)
     }
 
     /// Create a new user
@@ -31,7 +31,7 @@ impl UserRepository {
         username: &str,
         email: &str,
         display_name: &str,
-    ) -> anyhow::Result<User> {
+    ) -> Result<User, AppError> {
         let user = sqlx::query_as!(
             User,
             r#"
@@ -45,7 +45,7 @@ impl UserRepository {
         )
         .fetch_one(pool)
         .await
-        .map_err(Into::<AppError>::into)?;
+        .map_err(map_sqlx_error)?;
 
         Ok(user)
     }
