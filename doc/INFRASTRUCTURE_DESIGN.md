@@ -15,7 +15,7 @@
           message to job stream (NATS JetStream) including job_id, user_id,
           s3_key, snapshot_version, result_subject and ephemeral token.
         - Result consumer: durable consumer on jobs.results.<instance> — verify worker signature/token, persist results (faces, embeddings, thumbnails) into Postgres/vector index.
-        - Local caches: optional Redis / in‑process caches for hot data and sessions.
+        - Local caches: Redis (required) + in‑process caches for hot data and sessions.
         - Federation endpoints: handle inbound/outbound federation messages.
 - Workers (central pool: Rust worker processes)
     - Purpose: perform CPU/GPU work (thumbnails, ML) and publish compact results back to owning backend.
@@ -29,7 +29,7 @@
             - ml_group_location: cluster images by geo/time and return clustering data.
         - Result publisher: upload derivatives/crops to MinIO, publish compact result message to jobs.results.<instance> (job_id, s3_keys, matches, signature/token).
         - Security: use scoped credentials or presigned URLs to access MinIO; sign results or use broker auth.
-- S3 / MinIO (object storage)
+- MinIO (S3-compatible object storage)
     - Purpose: durable blob store for original images, derivatives, snapshots, and exports.
     - Roles:
         - Store originals, thumbnails, face crops, per‑user snapshot files (e.g., snapshots/{user}/{version}.bin).
