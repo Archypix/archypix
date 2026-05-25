@@ -1,7 +1,6 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use sqlx::Error;
-use sqlx::error::DatabaseError;
 use std::borrow::Cow;
 use thiserror::Error;
 use tracing::{info, warn};

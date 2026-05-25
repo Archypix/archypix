@@ -59,5 +59,15 @@ fn require_env(name: &str) -> anyhow::Result<String> {
     val
 }
 fn require_bool_env(name: &str) -> anyhow::Result<bool> {
-    require_env(name).map(|s| s.trim().parse::<bool>().unwrap())
+    require_env(name)
+        .map(|s| {
+            Ok(match s.trim().to_lowercase().as_str() {
+                "true" => true,
+                "false" => false,
+                "1" => true,
+                "0" => false,
+                _ => anyhow::bail!("Invalid boolean value: {}", s),
+            })
+        })
+        .flatten()
 }
