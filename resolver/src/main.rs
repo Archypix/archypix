@@ -3,15 +3,15 @@ mod database;
 mod error;
 mod handler;
 
-use crate::database::{init_database};
+use crate::database::init_database;
 use crate::handler::{health_handler, update_handler, webfinger_handler};
 use axum::{
-    routing::{get, post},
     Router,
+    routing::{get, post},
 };
 use config::Config;
 use moka::future::Cache;
-use sqlx::{postgres::PgPoolOptions, PgPool};
+use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::time::Duration;
 use tower_http::trace::TraceLayer;
 use tracing::info;
@@ -21,7 +21,7 @@ struct AppState {
     db: PgPool,
     cache: Cache<String, String>,
     managed_domain: String,
-    admin_token: String,
+    resolver_admin_secret: String,
 }
 
 #[tokio::main]
@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
         db: db_pool,
         managed_domain: config.managed_domain,
         cache,
-        admin_token: config.admin_token,
+        resolver_admin_secret: config.resolver_admin_secret,
     };
 
     // Build router

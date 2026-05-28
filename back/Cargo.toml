@@ -6,7 +6,8 @@ edition = "2024"
 [dependencies]
 tokio = { version = "1.42", features = ["full"] }
 axum = "0.8.8"
-tower-http = { version = "0.6", features = ["trace", "cors"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors", "request-id", "compression-full", "limit", "timeout"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sqlx = { version = "0.8", features = ["runtime-tokio-native-tls", "postgres", "migrate", "uuid", "json", "chrono"] }
@@ -17,3 +18,12 @@ thiserror = "2.0.18"
 uuid = { version = "1.0", features = ["v4", "serde"] }
 chrono = { version = "0.4.44", features = ["serde"] }
 dotenvy = "0.15.7"
+jsonwebtoken = "9.3"
+argon2 = "0.5"
+rand = "0.8"
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+aws-config = "1.5"
+aws-sdk-s3 = "1.64"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+sha2 = "0.10"
+hex = "0.4"

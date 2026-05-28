@@ -1,0 +1,125 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT id, owner_id, picture_id, owner_username, owner_instance_domain,\n                   s3_key, s3_bucket, filename, mime_type, file_size, width, height,\n                   exif_data, metadata, deleted_at, captured_at, ingested_at, updated_at\n            FROM pictures\n            WHERE owner_id = $1\n              AND picture_id = $2\n              AND owner_username IS NULL\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "owner_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "picture_id",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "owner_username",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "owner_instance_domain",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "s3_key",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 6,
+        "name": "s3_bucket",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "filename",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "mime_type",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 9,
+        "name": "file_size",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 10,
+        "name": "width",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 11,
+        "name": "height",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 12,
+        "name": "exif_data",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 13,
+        "name": "metadata",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 14,
+        "name": "deleted_at",
+        "type_info": "Timestamp"
+      },
+      {
+        "ordinal": 15,
+        "name": "captured_at",
+        "type_info": "Timestamp"
+      },
+      {
+        "ordinal": 16,
+        "name": "ingested_at",
+        "type_info": "Timestamp"
+      },
+      {
+        "ordinal": 17,
+        "name": "updated_at",
+        "type_info": "Timestamp"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "4fd58a7fc801a29b9d670591e3232f4570ce6be722bf0428028c0fc1c8a929aa"
+}

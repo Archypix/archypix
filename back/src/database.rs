@@ -1,4 +1,8 @@
+pub mod auth;
 pub mod models;
+pub mod picture;
+pub mod shares;
+pub mod tag;
 pub mod user;
 
 use crate::infrastructure::config::Config;

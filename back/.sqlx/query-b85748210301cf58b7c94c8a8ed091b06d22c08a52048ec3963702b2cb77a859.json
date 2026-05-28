@@ -1,0 +1,70 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT id, recipient_id, sender_username, sender_instance, outgoing_share_id,\n                   local_mapping_service_id, status::text as \"status!\", created_at, revoked_at\n            FROM incoming_shares\n            WHERE recipient_id = $1\n            ORDER BY created_at DESC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "recipient_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "sender_username",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 3,
+        "name": "sender_instance",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 4,
+        "name": "outgoing_share_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 5,
+        "name": "local_mapping_service_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 6,
+        "name": "status!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamp"
+      },
+      {
+        "ordinal": 8,
+        "name": "revoked_at",
+        "type_info": "Timestamp"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      null,
+      false,
+      true
+    ]
+  },
+  "hash": "b85748210301cf58b7c94c8a8ed091b06d22c08a52048ec3963702b2cb77a859"
+}

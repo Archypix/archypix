@@ -1,12 +1,15 @@
-mod user_handlers;
+mod admin;
+mod federation;
+mod middleware;
+mod resolver;
+mod user;
 
-use crate::AppState;
-use crate::api::user_handlers::{create_user, get_user};
 use crate::infrastructure::config::Config;
+use crate::infrastructure::state::AppState;
 use axum::Router;
 use axum::http::HeaderValue;
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
-use axum::routing::{get, post};
+use axum::routing::get;
 use tower_http::cors::{Any, CorsLayer};
 
 pub fn routes(config: &Config) -> Router<AppState> {
@@ -22,7 +25,11 @@ fn api_routes(config: &Config) -> Router<AppState> {
         .allow_headers([AUTHORIZATION, CONTENT_TYPE]);
 
     Router::new()
-        .route("/users/{username}", get(get_user))
-        .route("/users", post(create_user))
+        .nest("/resolver", resolver::routes())
+        .nest("/admin", admin::routes())
+        .nest("/auth", user::auth_routes())
+        .nest("/public", user::public_routes())
+        .nest("/authenticated", user::authenticated_routes())
+        .nest("/federation", federation::routes())
         .layer(cors_layer)
 }

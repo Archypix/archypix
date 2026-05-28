@@ -20,6 +20,7 @@ CREATE TYPE federation_status AS ENUM ('pending', 'sent', 'delivered', 'failed')
 CREATE TYPE safe_delete_mode AS ENUM ('singleBranch', 'fullDelete');
 CREATE TYPE service_type AS ENUM ('shared-tag-mapping', 'rule', 'segmentation');
 
+
 -- ============================================================================
 -- USERS
 -- ============================================================================
@@ -29,6 +30,7 @@ CREATE TABLE users
     username     VARCHAR(255) NOT NULL,
     email        VARCHAR(255) NOT NULL,
     display_name VARCHAR(255) NOT NULL,
+    is_admin BOOLEAN NOT NULL DEFAULT FALSE,
     created_at   TIMESTAMP    NOT NULL DEFAULT (now() at time zone 'utc'),
     updated_at   TIMESTAMP    NOT NULL DEFAULT (now() at time zone 'utc'),
 
@@ -39,6 +41,38 @@ CREATE TABLE users
 
 CREATE INDEX idx_users_username ON users (username);
 CREATE INDEX idx_users_email ON users (email);
+
+-- ============================================================================
+-- USER CREDENTIALS
+-- ============================================================================
+CREATE TABLE user_credentials
+(
+    user_id       UUID PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+    password_hash TEXT      NOT NULL,
+    created_at    TIMESTAMP NOT NULL DEFAULT (now() at time zone 'utc'),
+    updated_at    TIMESTAMP NOT NULL DEFAULT (now() at time zone 'utc')
+);
+
+CREATE INDEX idx_user_credentials_user ON user_credentials (user_id);
+
+-- ============================================================================
+-- REFRESH TOKENS
+-- ============================================================================
+CREATE TABLE refresh_tokens
+(
+    id         UUID PRIMARY KEY   DEFAULT uuid_generate_v4(),
+    user_id    UUID      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    token_hash TEXT      NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    revoked_at TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT (now() at time zone 'utc'),
+    updated_at TIMESTAMP NOT NULL DEFAULT (now() at time zone 'utc'),
+
+    CONSTRAINT uq_refresh_token_hash UNIQUE (token_hash)
+);
+
+CREATE INDEX idx_refresh_tokens_user ON refresh_tokens (user_id);
+CREATE INDEX idx_refresh_tokens_expires ON refresh_tokens (expires_at);
 
 -- ============================================================================
 -- PICTURES
@@ -67,10 +101,10 @@ CREATE TABLE pictures
     height                INTEGER,
 
     -- EXIF and other metadata (flexible JSONB)
-    exif_data             JSONB                  DEFAULT '{}',
+    exif_data JSONB NOT NULL DEFAULT '{}',
 
     -- ML/processing results
-    metadata              JSONB                  DEFAULT '{}',
+    metadata  JSONB NOT NULL DEFAULT '{}',
 
     -- Soft deletion (local only - received pictures never physically deleted)
     deleted_at            TIMESTAMP,
@@ -499,6 +533,18 @@ CREATE TRIGGER update_users_updated_at
     FOR EACH ROW
 EXECUTE FUNCTION update_updated_at_column();
 
+CREATE TRIGGER update_user_credentials_updated_at
+    BEFORE UPDATE
+    ON user_credentials
+    FOR EACH ROW
+EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_refresh_tokens_updated_at
+    BEFORE UPDATE
+    ON refresh_tokens
+    FOR EACH ROW
+EXECUTE FUNCTION update_updated_at_column();
+
 CREATE TRIGGER update_pictures_updated_at
     BEFORE UPDATE
     ON pictures
@@ -522,6 +568,8 @@ EXECUTE FUNCTION update_updated_at_column();
 -- ============================================================================
 
 COMMENT ON TABLE users IS 'User accounts with federation identity (@username:instance.com)';
+COMMENT ON TABLE user_credentials IS 'Password hashes for local authentication (Argon2)';
+COMMENT ON TABLE refresh_tokens IS 'Hashed refresh tokens with expiry and revocation';
 COMMENT ON TABLE pictures IS 'Picture metadata with composite key (owner_id, picture_id); owner_username/owner_instance_domain for received pictures';
 COMMENT ON TABLE tags IS 'Tag assignments using ltree for hierarchical paths; is_virtual marks derived ancestors';
 COMMENT ON TABLE outgoing_shares IS 'Shares created by users to share tags with other users';

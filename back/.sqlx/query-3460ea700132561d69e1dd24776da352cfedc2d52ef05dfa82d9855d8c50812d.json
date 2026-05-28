@@ -1,0 +1,59 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO tags (picture_id, tag_path, is_virtual, source)\n                VALUES ($1, $2::text::ltree, false, 'manual'::tag_source)\n                ON CONFLICT (picture_id, tag_path) DO NOTHING\n                RETURNING id, picture_id, tag_path::text as \"tag_path!\", is_virtual,\n                          source::text as \"source!\", source_id, assigned_at\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "picture_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "tag_path!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "is_virtual",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 4,
+        "name": "source!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "source_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 6,
+        "name": "assigned_at",
+        "type_info": "Timestamp"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      false,
+      null,
+      true,
+      false
+    ]
+  },
+  "hash": "3460ea700132561d69e1dd24776da352cfedc2d52ef05dfa82d9855d8c50812d"
+}

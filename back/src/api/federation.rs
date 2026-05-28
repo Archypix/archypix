@@ -1,0 +1,16 @@
+mod handlers;
+mod models;
+
+use crate::infrastructure::state::AppState;
+use axum::Router;
+use axum::routing::post;
+
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/auth/request", post(handlers::auth_request))
+        .route("/auth/grant", post(handlers::auth_grant))
+        .route("/shares/announce", post(handlers::announce_share))
+        .route("/shares/revoke", post(handlers::revoke_share))
+        .route("/pictures/announce", post(handlers::announce_pictures))
+        .route("/pictures/presign", post(handlers::presign_picture))
+}

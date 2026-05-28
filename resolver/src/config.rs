@@ -2,7 +2,7 @@
 pub struct Config {
     pub database_url: String,
     pub managed_domain: String,
-    pub admin_token: String,
+    pub resolver_admin_secret: String,
     pub listen_addr: String,
     pub cache_ttl_secs: u64,
     pub cache_max_capacity: u64,
@@ -18,7 +18,7 @@ impl Config {
             }),
             managed_domain: std::env::var("MANAGED_DOMAIN")
                 .unwrap_or_else(|_| "archypix.com".to_string()),
-            admin_token: std::env::var("ADMIN_TOKEN")
+            resolver_admin_secret: std::env::var("RESOLVER_ADMIN_SECRET")
                 .unwrap_or_else(|_| "change-me-in-production".to_string()),
             listen_addr: std::env::var("LISTEN_ADDR")
                 .unwrap_or_else(|_| "0.0.0.0:8080".to_string()),

@@ -1,9 +1,12 @@
+use crate::AppState;
 use crate::database::{get_backend_url, upsert_mapping};
 use crate::error::AppError;
-use crate::AppState;
-use axum::extract::{Query, State};
-use axum::response::IntoResponse;
 use axum::Json;
+use axum::extract::{Query, State};
+use axum::http::HeaderMap;
+use axum::http::header::AUTHORIZATION;
+use axum::response::IntoResponse;
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
@@ -24,7 +27,6 @@ pub struct WebFingerLink {
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateRequest {
-    token: String,
     username: String,
     backend_url: String,
 }
@@ -75,12 +77,27 @@ pub async fn webfinger_handler(
 
 pub async fn update_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<UpdateRequest>,
 ) -> Result<Json<UpdateResponse>, AppError> {
-    // Verify admin token
-    if payload.token != state.admin_token {
+    let token = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .ok_or(AppError::Unauthorized)?;
+
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.set_audience(&[state.managed_domain.clone()]);
+    let data = decode::<ResolverJwtClaims>(
+        token,
+        &DecodingKey::from_secret(state.resolver_admin_secret.as_bytes()),
+        &validation,
+    )
+    .map_err(|_| AppError::Unauthorized)?;
+
+    if data.claims.token_type != "resolver" {
         warn!(
-            "Invalid admin token attempt for username: {}",
+            "Invalid resolver token type for username: {}",
             payload.username
         );
         return Err(AppError::Unauthorized);
@@ -111,6 +128,17 @@ pub async fn update_handler(
         success: true,
         message: format!("Mapping updated for user {}", payload.username),
     }))
+}
+
+#[derive(Debug, Deserialize)]
+struct ResolverJwtClaims {
+    sub: String,
+    instance: String,
+    token_type: String,
+    aud: String,
+    exp: i64,
+    iat: i64,
+    jti: String,
 }
 
 pub async fn health_handler() -> impl IntoResponse {

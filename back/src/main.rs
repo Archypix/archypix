@@ -1,9 +1,12 @@
 mod api;
 mod database;
+mod domain;
 mod infrastructure;
+mod services;
 
 use crate::infrastructure::config::Config;
 use crate::infrastructure::state::AppState;
+use crate::services::auth::JwtService;
 use tracing::info;
 
 #[tokio::main]
@@ -23,7 +26,13 @@ async fn main() -> anyhow::Result<()> {
     let db_pool = database::get_database_pool(&config).await?;
     database::run_migrations(&db_pool).await?;
 
-    let state = AppState::new(config.clone(), db_pool);
+    let redis = infrastructure::redis::get_redis_manager(&config).await?;
+    let s3 = infrastructure::storage::get_s3_client(&config).await?;
+    let http = reqwest::Client::new();
+    let jwt = JwtService::new(&config.jwt_secret, &config.host);
+    let resolver_jwt = JwtService::new(&config.resolver_admin_secret, &config.host);
+
+    let state = AppState::new(config.clone(), db_pool, redis, s3, http, jwt, resolver_jwt);
 
     // Listen to listen_addr and build router with API routes
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;

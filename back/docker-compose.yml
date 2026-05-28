@@ -16,5 +16,31 @@ services:
       timeout: 5s
       retries: 5
 
+  archypix-minio:
+    image: minio/minio:latest
+    container_name: archypix-back-minio
+    environment:
+      MINIO_ROOT_USER: archypix
+      MINIO_ROOT_PASSWORD: archypix
+    ports:
+      - "9002:9000" # MinIO API
+      - "9001:9001" # MinIO console
+    volumes:
+      - minio_data:/data
+    command: [ "server", "/data", "--address", ":9000", "--console-address", ":9001" ]
+
+
+  redis:
+    image: redis:latest
+    container_name: archypix-back-redis
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    environment:
+      - REDIS_ARGS=--requirepass archypix --appendonly yes
+
 volumes:
   postgres_data:
+  minio_data:
+  redis_data:

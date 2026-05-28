@@ -50,6 +50,11 @@ Pictures support soft deletion via `deleted_at` timestamp:
 - **Received pictures**: Marked deleted locally, never physically deleted
 - All queries filter out `deleted_at IS NOT NULL` records
 
+### 4.1 Authentication Storage
+
+- `user_credentials` stores the Argon2 password hash per user.
+- `refresh_tokens` stores hashed refresh tokens with expiry/revocation timestamps.
+
 ### 5. Tagging Services Pipeline
 
 The tagging system uses a three-table inheritance pattern:
