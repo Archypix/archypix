@@ -1,20 +1,23 @@
-use crate::database::models::{IncomingShare, OutgoingShare};
+use crate::database::models::{IncomingShare, OutgoingShare, ShareStatus};
 use crate::infrastructure::error::{AppError, map_sqlx_error};
-use sqlx::PgPool;
+use sqlx::{Executor, Postgres};
 use uuid::Uuid;
 
 pub struct OutgoingShareRepository;
 
 impl OutgoingShareRepository {
-    pub async fn create(
-        pool: &PgPool,
+    pub async fn create<'e, E>(
+        ex: E,
         owner_id: Uuid,
         tag_path: &str,
         recipient_username: &str,
         recipient_instance: &str,
         allow_share_back: bool,
         future: bool,
-    ) -> Result<OutgoingShare, AppError> {
+    ) -> Result<OutgoingShare, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
         sqlx::query_as!(
             OutgoingShare,
             r#"
@@ -23,7 +26,7 @@ impl OutgoingShareRepository {
             )
             VALUES ($1, $2::text::ltree, $3, $4, $5, $6)
             RETURNING id, owner_id, tag_path::text as "tag_path!", recipient_username, recipient_instance,
-                      allow_share_back, future, status::text as "status!", created_at, revoked_at
+                      allow_share_back, future, status as "status!: ShareStatus", created_at, revoked_at
             "#,
             owner_id,
             tag_path,
@@ -32,16 +35,19 @@ impl OutgoingShareRepository {
             allow_share_back,
             future
         )
-            .fetch_one(pool)
+            .fetch_one(ex)
             .await
             .map_err(map_sqlx_error)
     }
 
-    pub async fn has_active_share_for_instance(
-        pool: &PgPool,
+    pub async fn has_active_share_for_instance<'e, E>(
+        ex: E,
         owner_id: Uuid,
         recipient_instance: &str,
-    ) -> Result<bool, AppError> {
+    ) -> Result<bool, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
         let exists = sqlx::query_scalar!(
             r#"
             SELECT EXISTS(
@@ -54,28 +60,28 @@ impl OutgoingShareRepository {
             owner_id,
             recipient_instance
         )
-        .fetch_one(pool)
+        .fetch_one(ex)
         .await
         .map_err(map_sqlx_error)?;
         Ok(exists)
     }
 
-    pub async fn list_by_owner(
-        pool: &PgPool,
-        owner_id: Uuid,
-    ) -> Result<Vec<OutgoingShare>, AppError> {
+    pub async fn list_by_owner<'e, E>(ex: E, owner_id: Uuid) -> Result<Vec<OutgoingShare>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
         sqlx::query_as!(
             OutgoingShare,
             r#"
             SELECT id, owner_id, tag_path::text as "tag_path!", recipient_username, recipient_instance,
-                   allow_share_back, future, status::text as "status!", created_at, revoked_at
+                   allow_share_back, future, status as "status!: ShareStatus", created_at, revoked_at
             FROM outgoing_shares
             WHERE owner_id = $1
             ORDER BY created_at DESC
             "#,
             owner_id
         )
-            .fetch_all(pool)
+            .fetch_all(ex)
             .await
             .map_err(map_sqlx_error)
     }
@@ -84,13 +90,16 @@ impl OutgoingShareRepository {
 pub struct IncomingShareRepository;
 
 impl IncomingShareRepository {
-    pub async fn create(
-        pool: &PgPool,
+    pub async fn create<'e, E>(
+        ex: E,
         recipient_id: Uuid,
         sender_username: &str,
         sender_instance: &str,
         outgoing_share_id: Uuid,
-    ) -> Result<IncomingShare, AppError> {
+    ) -> Result<IncomingShare, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
         sqlx::query_as!(
             IncomingShare,
             r#"
@@ -101,53 +110,59 @@ impl IncomingShareRepository {
             ON CONFLICT (recipient_id, sender_username, sender_instance, outgoing_share_id)
             DO UPDATE SET status = incoming_shares.status
             RETURNING id, recipient_id, sender_username, sender_instance, outgoing_share_id,
-                      local_mapping_service_id, status::text as "status!", created_at, revoked_at
+                      local_mapping_service_id, status as "status!: ShareStatus", created_at, revoked_at
             "#,
             recipient_id,
             sender_username,
             sender_instance,
             outgoing_share_id
         )
-        .fetch_one(pool)
+            .fetch_one(ex)
         .await
         .map_err(map_sqlx_error)
     }
 
-    pub async fn list_by_recipient(
-        pool: &PgPool,
+    pub async fn list_by_recipient<'e, E>(
+        ex: E,
         recipient_id: Uuid,
-    ) -> Result<Vec<IncomingShare>, AppError> {
+    ) -> Result<Vec<IncomingShare>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
         sqlx::query_as!(
             IncomingShare,
             r#"
             SELECT id, recipient_id, sender_username, sender_instance, outgoing_share_id,
-                   local_mapping_service_id, status::text as "status!", created_at, revoked_at
+                   local_mapping_service_id, status as "status!: ShareStatus", created_at, revoked_at
             FROM incoming_shares
             WHERE recipient_id = $1
             ORDER BY created_at DESC
             "#,
             recipient_id
         )
-        .fetch_all(pool)
+            .fetch_all(ex)
         .await
         .map_err(map_sqlx_error)
     }
 
-    pub async fn set_status(
-        pool: &PgPool,
+    pub async fn set_status<'e, E>(
+        ex: E,
         incoming_share_id: Uuid,
-        status: &str,
-    ) -> Result<(), AppError> {
+        status: ShareStatus,
+    ) -> Result<(), AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
         sqlx::query!(
             r#"
             UPDATE incoming_shares
-            SET status = $2::text::share_status
+            SET status = $2
             WHERE id = $1
             "#,
             incoming_share_id,
-            status
+            status as ShareStatus
         )
-        .execute(pool)
+        .execute(ex)
         .await
         .map_err(map_sqlx_error)?;
         Ok(())

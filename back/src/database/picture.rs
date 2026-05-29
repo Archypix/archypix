@@ -1,103 +1,115 @@
 use crate::database::models::Picture;
 use crate::infrastructure::error::{AppError, map_sqlx_error};
-use sqlx::PgPool;
+use sqlx::{Executor, Postgres};
 use uuid::Uuid;
+
+const PICTURE_COLUMNS: &str =
+    "id, local_user_id, remote_picture_id, owner_username, owner_instance_domain,
+    s3_key_original, s3_key_small, s3_key_medium, s3_key_large,
+    filename, mime_type, file_size, width, height,
+    exif_data, metadata, deleted_at, captured_at, ingested_at, updated_at";
 
 pub struct PictureRepository;
 
 impl PictureRepository {
-    pub async fn create(
-        pool: &PgPool,
-        owner_id: Uuid,
-        picture_id: &str,
-        s3_key: &str,
-        s3_bucket: &str,
+    pub async fn create<'e, E>(
+        ex: E,
+        local_user_id: Uuid,
+        s3_key_original: &str,
         filename: Option<&str>,
-    ) -> Result<Picture, AppError> {
+    ) -> Result<Picture, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
         sqlx::query_as!(
             Picture,
             r#"
-            INSERT INTO pictures (
-                owner_id,
-                picture_id,
-                s3_key,
-                s3_bucket,
-                filename,
-                exif_data,
-                metadata
-            )
-            VALUES ($1, $2, $3, $4, $5, '{}'::jsonb, '{}'::jsonb)
-            RETURNING id, owner_id, picture_id, owner_username, owner_instance_domain,
-                      s3_key, s3_bucket, filename, mime_type, file_size, width, height,
+            INSERT INTO pictures (local_user_id, s3_key_original, filename, exif_data, metadata)
+            VALUES ($1, $2, $3, '{}'::jsonb, '{}'::jsonb)
+            RETURNING id, local_user_id, remote_picture_id, owner_username, owner_instance_domain,
+                      s3_key_original, s3_key_small, s3_key_medium, s3_key_large,
+                      filename, mime_type, file_size, width, height,
                       exif_data, metadata, deleted_at, captured_at, ingested_at, updated_at
             "#,
-            owner_id,
-            picture_id,
-            s3_key,
-            s3_bucket,
-            filename.unwrap_or("New picture"),
+            local_user_id,
+            s3_key_original,
+            filename,
         )
-        .fetch_one(pool)
+        .fetch_one(ex)
         .await
         .map_err(map_sqlx_error)
     }
 
-    pub async fn find_by_id(pool: &PgPool, picture_id: Uuid) -> Result<Option<Picture>, AppError> {
+    pub async fn find_by_id<'e, E>(ex: E, id: Uuid) -> Result<Option<Picture>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
         sqlx::query_as!(
             Picture,
             r#"
-            SELECT id, owner_id, picture_id, owner_username, owner_instance_domain,
-                   s3_key, s3_bucket, filename, mime_type, file_size, width, height,
+            SELECT id, local_user_id, remote_picture_id, owner_username, owner_instance_domain,
+                   s3_key_original, s3_key_small, s3_key_medium, s3_key_large,
+                   filename, mime_type, file_size, width, height,
                    exif_data, metadata, deleted_at, captured_at, ingested_at, updated_at
             FROM pictures
             WHERE id = $1
             "#,
-            picture_id
+            id
         )
-        .fetch_optional(pool)
+        .fetch_optional(ex)
         .await
         .map_err(map_sqlx_error)
     }
 
-    pub async fn find_owned_by_picture_id(
-        pool: &PgPool,
-        owner_id: Uuid,
-        picture_id: &str,
-    ) -> Result<Option<Picture>, AppError> {
+    pub async fn find_received_by_remote_id<'e, E>(
+        ex: E,
+        local_user_id: Uuid,
+        remote_picture_id: &str,
+    ) -> Result<Option<Picture>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
         sqlx::query_as!(
             Picture,
             r#"
-            SELECT id, owner_id, picture_id, owner_username, owner_instance_domain,
-                   s3_key, s3_bucket, filename, mime_type, file_size, width, height,
+            SELECT id, local_user_id, remote_picture_id, owner_username, owner_instance_domain,
+                   s3_key_original, s3_key_small, s3_key_medium, s3_key_large,
+                   filename, mime_type, file_size, width, height,
                    exif_data, metadata, deleted_at, captured_at, ingested_at, updated_at
             FROM pictures
-            WHERE owner_id = $1
-              AND picture_id = $2
-              AND owner_username IS NULL
+            WHERE local_user_id = $1
+              AND remote_picture_id = $2
             "#,
-            owner_id,
-            picture_id
+            local_user_id,
+            remote_picture_id
         )
-        .fetch_optional(pool)
+        .fetch_optional(ex)
         .await
         .map_err(map_sqlx_error)
     }
 
-    pub async fn list_by_owner(pool: &PgPool, owner_id: Uuid) -> Result<Vec<Picture>, AppError> {
+    pub async fn list_by_local_user<'e, E>(
+        ex: E,
+        local_user_id: Uuid,
+    ) -> Result<Vec<Picture>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
         sqlx::query_as!(
             Picture,
             r#"
-            SELECT id, owner_id, picture_id, owner_username, owner_instance_domain,
-                   s3_key, s3_bucket, filename, mime_type, file_size, width, height,
+            SELECT id, local_user_id, remote_picture_id, owner_username, owner_instance_domain,
+                   s3_key_original, s3_key_small, s3_key_medium, s3_key_large,
+                   filename, mime_type, file_size, width, height,
                    exif_data, metadata, deleted_at, captured_at, ingested_at, updated_at
             FROM pictures
-            WHERE owner_id = $1
+            WHERE local_user_id = $1
               AND deleted_at IS NULL
             ORDER BY ingested_at DESC
             "#,
-            owner_id
+            local_user_id
         )
-        .fetch_all(pool)
+        .fetch_all(ex)
         .await
         .map_err(map_sqlx_error)
     }

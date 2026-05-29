@@ -38,7 +38,7 @@ services:
     volumes:
       - redis_data:/data
     environment:
-      - REDIS_ARGS=--requirepass archypix --appendonly yes
+      REDIS_ARGS: --requirepass archypix --appendonly yes
 
 volumes:
   postgres_data:

@@ -1,4 +1,5 @@
 use crate::api::middleware::auth_user::AuthUser;
+use crate::database::models::ShareStatus;
 use crate::database::shares::{IncomingShareRepository, OutgoingShareRepository};
 use crate::infrastructure::error::AppError;
 use crate::infrastructure::state::AppState;
@@ -23,7 +24,7 @@ pub struct ShareResponse {
     pub tag_path: String,
     pub recipient_username: String,
     pub recipient_instance: String,
-    pub status: String,
+    pub status: ShareStatus,
 }
 
 pub async fn create_outgoing(
@@ -152,7 +153,7 @@ pub async fn accept_incoming(
     State(state): State<AppState>,
     Path(share_id): Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    IncomingShareRepository::set_status(&state.db, share_id, "active").await?;
+    IncomingShareRepository::set_status(&state.db, share_id, ShareStatus::Active).await?;
     Ok(Json(serde_json::json!({ "accepted": true })))
 }
 
@@ -161,6 +162,6 @@ pub async fn reject_incoming(
     State(state): State<AppState>,
     Path(share_id): Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    IncomingShareRepository::set_status(&state.db, share_id, "tombstoned").await?;
+    IncomingShareRepository::set_status(&state.db, share_id, ShareStatus::Tombstoned).await?;
     Ok(Json(serde_json::json!({ "rejected": true })))
 }

@@ -1,8 +1,8 @@
 use crate::domain::auth::TokenType;
 use crate::infrastructure::config::Config;
 use crate::infrastructure::error::AppError;
+use crate::infrastructure::redis::RedisClient;
 use crate::services::auth::JwtService;
-use redis::AsyncCommands;
 use reqwest::Client;
 use serde::Deserialize;
 use std::time::Duration;
@@ -13,16 +13,11 @@ pub struct FederationService {
     http: Client,
     config: Config,
     jwt: JwtService,
-    redis: redis::aio::ConnectionManager,
+    redis: RedisClient,
 }
 
 impl FederationService {
-    pub fn new(
-        http: Client,
-        config: Config,
-        jwt: JwtService,
-        redis: redis::aio::ConnectionManager,
-    ) -> Self {
+    pub fn new(http: Client, config: Config, jwt: JwtService, redis: RedisClient) -> Self {
         Self {
             http,
             config,
@@ -37,8 +32,7 @@ impl FederationService {
         instance_domain: &str,
     ) -> Result<String, AppError> {
         let cache_key = backend_cache_key(username, instance_domain);
-        let mut redis = self.redis.clone();
-        if let Ok(Some(value)) = redis.get::<_, Option<String>>(&cache_key).await {
+        if let Some(value) = self.redis.get_string(&cache_key).await.ok().flatten() {
             return Ok(value);
         }
 
@@ -73,14 +67,13 @@ impl FederationService {
 
         let backend_domain = normalize_backend_domain(&backend_url);
 
-        let _: () = redis
-            .set_ex(
+        self.redis
+            .set_string_ex(
                 &cache_key,
                 &backend_domain,
                 self.config.federation_backend_cache_ttl_secs,
             )
-            .await
-            .map_err(|err| AppError::InternalServerError(err.to_string()))?;
+            .await?;
 
         Ok(backend_domain)
     }
@@ -90,8 +83,7 @@ impl FederationService {
         backend_domain: &str,
     ) -> Result<Option<String>, AppError> {
         let cache_key = token_cache_key(backend_domain);
-        let mut redis = self.redis.clone();
-        if let Ok(Some(token)) = redis.get::<_, Option<String>>(&cache_key).await {
+        if let Some(token) = self.redis.get_string(&cache_key).await.ok().flatten() {
             return Ok(Some(token));
         }
 
@@ -141,13 +133,12 @@ impl FederationService {
         }
 
         let cache_key = token_cache_key(backend_domain);
-        let mut redis = self.redis.clone();
         let timeout_duration = Duration::from_millis(self.config.federation_request_timeout_ms);
         let poll_interval = Duration::from_millis(200);
 
         let result = timeout(timeout_duration, async {
             loop {
-                if let Ok(Some(token)) = redis.get::<_, Option<String>>(&cache_key).await {
+                if let Some(token) = self.redis.get_string(&cache_key).await.ok().flatten() {
                     return Ok(token);
                 }
                 sleep(poll_interval).await;
@@ -171,15 +162,10 @@ impl FederationService {
         ttl_secs: i64,
     ) -> Result<(), AppError> {
         let cache_key = token_cache_key(issuer_instance);
-        let mut redis = self.redis.clone();
         let ttl = ttl_secs
             .try_into()
             .map_err(|_| AppError::BadRequest("Invalid token TTL".to_string()))?;
-        let _: () = redis
-            .set_ex(&cache_key, token, ttl)
-            .await
-            .map_err(|err| AppError::InternalServerError(err.to_string()))?;
-        Ok(())
+        self.redis.set_string_ex(&cache_key, token, ttl).await
     }
 
     pub fn issue_federation_token(&self, requester_instance: &str) -> Result<String, AppError> {

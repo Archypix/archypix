@@ -1,23 +1,29 @@
-use crate::database::models::Tag;
+use crate::database::models::{Tag, TagSource};
 use crate::infrastructure::error::{AppError, map_sqlx_error};
-use sqlx::PgPool;
+use sqlx::{Executor, Postgres};
 use uuid::Uuid;
 
 pub struct TagRepository;
 
 impl TagRepository {
-    pub async fn list_by_owner(pool: &PgPool, owner_id: Uuid) -> Result<Vec<String>, AppError> {
+    pub async fn list_by_local_user<'e, E>(
+        ex: E,
+        local_user_id: Uuid,
+    ) -> Result<Vec<String>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
         let tags = sqlx::query_scalar!(
             r#"
             SELECT DISTINCT t.tag_path::text
             FROM tags t
             JOIN pictures p ON p.id = t.picture_id
-            WHERE p.owner_id = $1
+            WHERE p.local_user_id = $1
               AND p.deleted_at IS NULL
             "#,
-            owner_id
+            local_user_id
         )
-        .fetch_all(pool)
+        .fetch_all(ex)
         .await
         .map_err(map_sqlx_error)?
         .into_iter()
@@ -27,55 +33,59 @@ impl TagRepository {
         Ok(tags)
     }
 
-    pub async fn assign_tags(
-        pool: &PgPool,
+    pub async fn assign_tags<'e, E>(
+        ex: E,
         picture_id: Uuid,
         tags: &[String],
-    ) -> Result<Vec<Tag>, AppError> {
-        let mut assigned = Vec::new();
-        for tag in tags {
-            let tag = sqlx::query_as!(
-                Tag,
-                r#"
-                INSERT INTO tags (picture_id, tag_path, is_virtual, source)
-                VALUES ($1, $2::text::ltree, false, 'manual'::tag_source)
-                ON CONFLICT (picture_id, tag_path) DO NOTHING
-                RETURNING id, picture_id, tag_path::text as "tag_path!", is_virtual,
-                          source::text as "source!", source_id, assigned_at
-                "#,
-                picture_id,
-                tag
-            )
-            .fetch_optional(pool)
-            .await
-            .map_err(map_sqlx_error)?;
-
-            if let Some(tag) = tag {
-                assigned.push(tag);
-            }
+    ) -> Result<Vec<Tag>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        if tags.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(assigned)
+
+        sqlx::query_as!(
+            Tag,
+            r#"
+            INSERT INTO tags (picture_id, tag_path, source)
+            SELECT $1, unnest($2::text[])::ltree, 'manual'::tag_source
+            ON CONFLICT (picture_id, tag_path) DO NOTHING
+            RETURNING id, picture_id, tag_path::text as "tag_path!",
+                      source as "source!: TagSource", source_id, assigned_at
+            "#,
+            picture_id,
+            tags
+        )
+        .fetch_all(ex)
+        .await
+        .map_err(map_sqlx_error)
     }
 
-    pub async fn remove_tags(
-        pool: &PgPool,
+    pub async fn remove_tags<'e, E>(
+        ex: E,
         picture_id: Uuid,
         tags: &[String],
-    ) -> Result<(), AppError> {
-        for tag in tags {
-            sqlx::query!(
-                r#"
-                DELETE FROM tags
-                WHERE picture_id = $1
-                  AND tag_path = $2::text::ltree
-                "#,
-                picture_id,
-                tag
-            )
-            .execute(pool)
-            .await
-            .map_err(map_sqlx_error)?;
+    ) -> Result<(), AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        if tags.is_empty() {
+            return Ok(());
         }
+
+        sqlx::query!(
+            r#"
+            DELETE FROM tags
+            WHERE picture_id = $1
+              AND tag_path::text = ANY($2::text[])
+            "#,
+            picture_id,
+            tags
+        )
+        .execute(ex)
+        .await
+        .map_err(map_sqlx_error)?;
         Ok(())
     }
 }

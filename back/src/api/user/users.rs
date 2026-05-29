@@ -1,9 +1,8 @@
 use crate::api::middleware::auth_user::AuthUser;
-use crate::database::auth::CredentialRepository;
 use crate::database::user::UserRepository;
-use crate::infrastructure::error::{AppError, map_sqlx_error};
+use crate::infrastructure::error::AppError;
 use crate::infrastructure::state::AppState;
-use crate::services::auth::PasswordService;
+use crate::services::users::UserAccountService;
 use axum::Json;
 use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
@@ -40,23 +39,15 @@ pub async fn register_public(
         ));
     }
 
-    if payload.password.trim().is_empty() {
-        return Err(AppError::BadRequest("Password is required".to_string()));
-    }
-
-    let mut tx = state.db.begin().await.map_err(map_sqlx_error)?;
-
-    let user = UserRepository::create(
-        &mut *tx,
+    let user = UserAccountService::create_user_with_password(
+        &state.db,
         &payload.username,
         &payload.email,
         &payload.display_name,
+        &payload.password,
         false,
     )
     .await?;
-
-    let password_hash = PasswordService::hash_password(&payload.password)?;
-    CredentialRepository::upsert_password(&state.db, user.id, &password_hash).await?;
 
     Ok(Json(UserResponse {
         id: user.id,

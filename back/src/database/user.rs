@@ -1,16 +1,19 @@
 use crate::database::models::User;
 use crate::infrastructure::error::{AppError, map_sqlx_error};
-use sqlx::{Executor, PgPool, Postgres};
+use sqlx::{Executor, Postgres};
 
 /// User-related database operations (Repository pattern)
 pub struct UserRepository;
 
 impl UserRepository {
     /// Find a user by username and instance domain
-    pub async fn find_by_username_and_instance(
-        pool: &PgPool,
+    pub async fn find_by_username_and_instance<'e, E>(
+        ex: E,
         username: &str,
-    ) -> Result<Option<User>, AppError> {
+    ) -> Result<Option<User>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
         sqlx::query_as!(
             User,
             r#"
@@ -20,12 +23,15 @@ impl UserRepository {
             "#,
             username,
         )
-        .fetch_optional(pool)
+        .fetch_optional(ex)
         .await
         .map_err(map_sqlx_error)
     }
 
-    pub async fn find_by_username(pool: &PgPool, username: &str) -> Result<Option<User>, AppError> {
+    pub async fn find_by_username<'e, E>(ex: E, username: &str) -> Result<Option<User>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
         sqlx::query_as!(
             User,
             r#"
@@ -35,12 +41,15 @@ impl UserRepository {
             "#,
             username,
         )
-        .fetch_optional(pool)
+        .fetch_optional(ex)
         .await
         .map_err(map_sqlx_error)
     }
 
-    pub async fn find_by_id(pool: &PgPool, user_id: uuid::Uuid) -> Result<Option<User>, AppError> {
+    pub async fn find_by_id<'e, E>(ex: E, user_id: uuid::Uuid) -> Result<Option<User>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
         sqlx::query_as!(
             User,
             r#"
@@ -50,12 +59,15 @@ impl UserRepository {
             "#,
             user_id,
         )
-        .fetch_optional(pool)
+        .fetch_optional(ex)
         .await
         .map_err(map_sqlx_error)
     }
 
-    pub async fn list(pool: &PgPool) -> Result<Vec<User>, AppError> {
+    pub async fn list<'e, E>(ex: E) -> Result<Vec<User>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
         sqlx::query_as!(
             User,
             r#"
@@ -64,7 +76,7 @@ impl UserRepository {
             ORDER BY created_at DESC
             "#
         )
-        .fetch_all(pool)
+        .fetch_all(ex)
         .await
         .map_err(map_sqlx_error)
     }
@@ -99,12 +111,15 @@ impl UserRepository {
         Ok(user)
     }
 
-    pub async fn update(
-        pool: &PgPool,
+    pub async fn update<'e, E>(
+        ex: E,
         user_id: uuid::Uuid,
         display_name: Option<&str>,
         is_admin: Option<bool>,
-    ) -> Result<User, AppError> {
+    ) -> Result<User, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
         sqlx::query_as!(
             User,
             r#"
@@ -118,17 +133,20 @@ impl UserRepository {
             display_name,
             is_admin
         )
-        .fetch_one(pool)
+        .fetch_one(ex)
         .await
         .map_err(map_sqlx_error)
     }
 
-    pub async fn update_profile(
-        pool: &PgPool,
+    pub async fn update_profile<'e, E>(
+        ex: E,
         user_id: uuid::Uuid,
         display_name: Option<&str>,
         email: Option<&str>,
-    ) -> Result<User, AppError> {
+    ) -> Result<User, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
         sqlx::query_as!(
             User,
             r#"
@@ -142,19 +160,22 @@ impl UserRepository {
             display_name,
             email
         )
-        .fetch_one(pool)
+        .fetch_one(ex)
         .await
         .map_err(map_sqlx_error)
     }
 
-    pub async fn delete(pool: &PgPool, user_id: uuid::Uuid) -> Result<(), AppError> {
+    pub async fn delete<'e, E>(ex: E, user_id: uuid::Uuid) -> Result<(), AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
         sqlx::query!(
             r#"
             DELETE FROM users WHERE id = $1
             "#,
             user_id
         )
-        .execute(pool)
+        .execute(ex)
         .await
         .map_err(map_sqlx_error)?;
         Ok(())

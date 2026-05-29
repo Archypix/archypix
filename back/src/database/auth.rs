@@ -1,15 +1,15 @@
 use crate::database::models::{RefreshToken, UserCredential};
 use crate::infrastructure::error::{AppError, map_sqlx_error};
-use sqlx::PgPool;
+use sqlx::{Executor, Postgres};
 use uuid::Uuid;
 
 pub struct CredentialRepository;
 
 impl CredentialRepository {
-    pub async fn get_password_hash(
-        pool: &PgPool,
-        user_id: Uuid,
-    ) -> Result<Option<String>, AppError> {
+    pub async fn get_password_hash<'e, E>(ex: E, user_id: Uuid) -> Result<Option<String>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
         sqlx::query_scalar!(
             r#"
             SELECT password_hash
@@ -18,16 +18,19 @@ impl CredentialRepository {
             "#,
             user_id
         )
-        .fetch_optional(pool)
+        .fetch_optional(ex)
         .await
         .map_err(map_sqlx_error)
     }
 
-    pub async fn upsert_password(
-        pool: &PgPool,
+    pub async fn upsert_password<'e, E>(
+        ex: E,
         user_id: Uuid,
         password_hash: &str,
-    ) -> Result<UserCredential, AppError> {
+    ) -> Result<UserCredential, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
         sqlx::query_as!(
             UserCredential,
             r#"
@@ -40,7 +43,7 @@ impl CredentialRepository {
             user_id,
             password_hash
         )
-        .fetch_one(pool)
+        .fetch_one(ex)
         .await
         .map_err(map_sqlx_error)
     }
@@ -49,12 +52,15 @@ impl CredentialRepository {
 pub struct RefreshTokenRepository;
 
 impl RefreshTokenRepository {
-    pub async fn create(
-        pool: &PgPool,
+    pub async fn create<'e, E>(
+        ex: E,
         user_id: Uuid,
         token_hash: &str,
         expires_at: chrono::DateTime<chrono::Utc>,
-    ) -> Result<RefreshToken, AppError> {
+    ) -> Result<RefreshToken, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
         let expires_at = expires_at.naive_utc();
 
         sqlx::query_as!(
@@ -68,15 +74,18 @@ impl RefreshTokenRepository {
             token_hash,
             expires_at
         )
-        .fetch_one(pool)
+        .fetch_one(ex)
         .await
         .map_err(map_sqlx_error)
     }
 
-    pub async fn find_valid(
-        pool: &PgPool,
+    pub async fn find_valid<'e, E>(
+        ex: E,
         token_hash: &str,
-    ) -> Result<Option<RefreshToken>, AppError> {
+    ) -> Result<Option<RefreshToken>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
         sqlx::query_as!(
             RefreshToken,
             r#"
@@ -88,12 +97,15 @@ impl RefreshTokenRepository {
             "#,
             token_hash
         )
-        .fetch_optional(pool)
+        .fetch_optional(ex)
         .await
         .map_err(map_sqlx_error)
     }
 
-    pub async fn revoke(pool: &PgPool, token_id: Uuid) -> Result<(), AppError> {
+    pub async fn revoke<'e, E>(ex: E, token_id: Uuid) -> Result<(), AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
         sqlx::query!(
             r#"
             UPDATE refresh_tokens
@@ -102,13 +114,16 @@ impl RefreshTokenRepository {
             "#,
             token_id
         )
-        .execute(pool)
+        .execute(ex)
         .await
         .map_err(map_sqlx_error)?;
         Ok(())
     }
 
-    pub async fn revoke_all_for_user(pool: &PgPool, user_id: Uuid) -> Result<(), AppError> {
+    pub async fn revoke_all_for_user<'e, E>(ex: E, user_id: Uuid) -> Result<(), AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
         sqlx::query!(
             r#"
             UPDATE refresh_tokens
@@ -117,7 +132,7 @@ impl RefreshTokenRepository {
             "#,
             user_id
         )
-        .execute(pool)
+        .execute(ex)
         .await
         .map_err(map_sqlx_error)?;
         Ok(())

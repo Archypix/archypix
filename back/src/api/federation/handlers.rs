@@ -3,18 +3,20 @@ use crate::api::federation::models::{
     ShareAnnouncement, ShareRevokeRequest,
 };
 use crate::api::middleware::auth_federation::AuthFederation;
+use crate::database::models::ShareStatus;
 use crate::database::picture::PictureRepository;
 use crate::database::shares::{IncomingShareRepository, OutgoingShareRepository};
 use crate::database::user::UserRepository;
 use crate::infrastructure::error::AppError;
 use crate::infrastructure::state::AppState;
+use crate::infrastructure::storage_service::StorageService;
 use crate::services::federation::FederationService;
-use crate::services::storage::StorageService;
 use axum::Json;
 use axum::extract::State;
 use chrono::Utc;
 use std::time::Duration;
 use tracing::info;
+use uuid::Uuid;
 
 pub async fn auth_request(
     State(state): State<AppState>,
@@ -112,7 +114,8 @@ pub async fn revoke_share(
     State(state): State<AppState>,
     Json(payload): Json<ShareRevokeRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    IncomingShareRepository::set_status(&state.db, payload.incoming_share_id, "revoked").await?;
+    IncomingShareRepository::set_status(&state.db, payload.incoming_share_id, ShareStatus::Revoked)
+        .await?;
     Ok(Json(serde_json::json!({ "revoked": true })))
 }
 
@@ -149,18 +152,25 @@ pub async fn presign_picture(
         return Err(AppError::Unauthorized("Share not allowed".to_string()));
     }
 
-    let picture =
-        PictureRepository::find_owned_by_picture_id(&state.db, owner.id, &payload.picture_id)
-            .await?
-            .ok_or(AppError::NotFound)?;
+    let picture_id: Uuid = payload
+        .picture_id
+        .parse()
+        .map_err(|_| AppError::BadRequest("Invalid picture_id".to_string()))?;
+    let picture = PictureRepository::find_by_id(&state.db, picture_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    // Verify this picture belongs to the requested owner and is not a received picture
+    if picture.local_user_id != owner.id || picture.remote_picture_id.is_some() {
+        return Err(AppError::NotFound);
+    }
 
     let storage = StorageService::new(
         state.s3.clone(),
-        state.config.s3_bucket.clone(),
         Duration::from_secs(state.config.s3_presign_ttl_secs),
     );
     let url = storage
-        .presign_get_in_bucket(&picture.s3_bucket, &picture.s3_key)
+        .presign_get(&state.config.s3_bucket_originals, &picture.s3_key_original)
         .await?;
 
     Ok(Json(serde_json::json!({ "url": url })))

@@ -2,10 +2,9 @@ use crate::api::middleware::auth_user::AuthUser;
 use crate::database::picture::PictureRepository;
 use crate::infrastructure::error::AppError;
 use crate::infrastructure::state::AppState;
-use crate::services::storage::StorageService;
+use crate::infrastructure::storage_service::StorageService;
 use axum::Json;
 use axum::extract::{Path, State};
-use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use uuid::Uuid;
@@ -24,8 +23,7 @@ pub struct CreateUploadResponse {
 #[derive(Debug, Serialize, Deserialize)]
 struct UploadSession {
     user_id: Uuid,
-    s3_key: String,
-    bucket: String,
+    s3_key_original: String,
     filename: String,
 }
 
@@ -44,30 +42,30 @@ pub async fn create_upload(
         .ok_or_else(|| AppError::Unauthorized("Missing user id".to_string()))?;
 
     let upload_id = Uuid::new_v4().to_string();
-    let s3_key = format!("uploads/{}/{}", user_id, upload_id);
+    let s3_key_original = format!("originals/{}/{}", user_id, upload_id);
 
     let storage = StorageService::new(
         state.s3.clone(),
-        state.config.s3_bucket.clone(),
         Duration::from_secs(state.config.s3_presign_ttl_secs),
     );
-    let presigned_url = storage.presign_put(&s3_key).await?;
+    let presigned_url = storage
+        .presign_put(&state.config.s3_bucket_originals, &s3_key_original)
+        .await?;
 
     let session = UploadSession {
         user_id,
-        s3_key,
-        bucket: state.config.s3_bucket.clone(),
+        s3_key_original,
         filename: payload.filename,
     };
 
-    let mut redis = state.redis.clone();
-    let key = format!("upload:{}", upload_id);
-    let value = serde_json::to_string(&session)
-        .map_err(|err| AppError::InternalServerError(err.to_string()))?;
-    let _: () = redis
-        .set_ex(&key, value, state.config.s3_presign_ttl_secs)
-        .await
-        .map_err(|err| AppError::InternalServerError(err.to_string()))?;
+    state
+        .redis
+        .set_json_ex(
+            &format!("upload:{}", upload_id),
+            &session,
+            state.config.s3_presign_ttl_secs,
+        )
+        .await?;
 
     Ok(Json(CreateUploadResponse {
         upload_id,
@@ -85,16 +83,13 @@ pub async fn complete_upload(
         .uid
         .ok_or_else(|| AppError::Unauthorized("Missing user id".to_string()))?;
 
-    let key = format!("upload:{}", upload_id);
-    let mut redis = state.redis.clone();
-    let value: Option<String> = redis
-        .get(&key)
-        .await
-        .map_err(|err| AppError::InternalServerError(err.to_string()))?;
+    let redis_key = format!("upload:{}", upload_id);
 
-    let value = value.ok_or_else(|| AppError::BadRequest("Upload session expired".to_string()))?;
-    let session: UploadSession = serde_json::from_str(&value)
-        .map_err(|err| AppError::InternalServerError(err.to_string()))?;
+    let session = state
+        .redis
+        .get_json::<UploadSession>(&redis_key)
+        .await?
+        .ok_or_else(|| AppError::BadRequest("Upload session expired".to_string()))?;
 
     if session.user_id != user_id {
         return Err(AppError::Unauthorized("Invalid upload session".to_string()));
@@ -103,23 +98,17 @@ pub async fn complete_upload(
     let picture = PictureRepository::create(
         &state.db,
         session.user_id,
-        &upload_id,
-        &session.s3_key,
-        &session.bucket,
+        &session.s3_key_original,
         Some(&session.filename),
     )
     .await?;
 
-    let _: () = redis
-        .del(&key)
-        .await
-        .map_err(|err| AppError::InternalServerError(err.to_string()))?;
+    state.redis.del(&redis_key).await?;
 
     Ok(Json(serde_json::json!({
         "id": picture.id,
-        "picture_id": picture.picture_id,
         "filename": picture.filename,
-        "s3_key": picture.s3_key
+        "s3_key_original": picture.s3_key_original,
     })))
 }
 
@@ -132,15 +121,15 @@ pub async fn list_pictures(
         .uid
         .ok_or_else(|| AppError::Unauthorized("Missing user id".to_string()))?;
 
-    let pictures = PictureRepository::list_by_owner(&state.db, user_id).await?;
+    let pictures = PictureRepository::list_by_local_user(&state.db, user_id).await?;
     let items: Vec<_> = pictures
         .into_iter()
-        .map(|picture| {
+        .map(|p| {
             serde_json::json!({
-                "id": picture.id,
-                "picture_id": picture.picture_id,
-                "filename": picture.filename,
-                "created_at": picture.ingested_at,
+                "id": p.id,
+                "filename": p.filename,
+                "captured_at": p.captured_at,
+                "ingested_at": p.ingested_at,
             })
         })
         .collect();
@@ -151,7 +140,7 @@ pub async fn list_pictures(
 pub async fn get_picture(
     auth: AuthUser,
     State(state): State<AppState>,
-    Path(picture_id): Path<uuid::Uuid>,
+    Path(picture_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let user_id = auth
         .claims
@@ -162,23 +151,27 @@ pub async fn get_picture(
         .await?
         .ok_or(AppError::NotFound)?;
 
-    if picture.owner_id != user_id {
+    if picture.local_user_id != user_id {
         return Err(AppError::NotFound);
     }
 
     Ok(Json(serde_json::json!({
         "id": picture.id,
-        "picture_id": picture.picture_id,
         "filename": picture.filename,
-        "s3_key": picture.s3_key,
-        "s3_bucket": picture.s3_bucket
+        "mime_type": picture.mime_type,
+        "width": picture.width,
+        "height": picture.height,
+        "captured_at": picture.captured_at,
+        "ingested_at": picture.ingested_at,
+        "owner_username": picture.owner_username,
+        "owner_instance_domain": picture.owner_instance_domain,
     })))
 }
 
 pub async fn download_picture(
     auth: AuthUser,
     State(state): State<AppState>,
-    Path(picture_id): Path<uuid::Uuid>,
+    Path(picture_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let user_id = auth
         .claims
@@ -189,18 +182,17 @@ pub async fn download_picture(
         .await?
         .ok_or(AppError::NotFound)?;
 
-    if picture.owner_id != user_id {
+    if picture.local_user_id != user_id {
         return Err(AppError::NotFound);
     }
 
     let storage = StorageService::new(
         state.s3.clone(),
-        state.config.s3_bucket.clone(),
         Duration::from_secs(state.config.s3_presign_ttl_secs),
     );
 
     let url = storage
-        .presign_get_in_bucket(&picture.s3_bucket, &picture.s3_key)
+        .presign_get(&state.config.s3_bucket_originals, &picture.s3_key_original)
         .await?;
 
     Ok(Json(serde_json::json!({ "url": url })))

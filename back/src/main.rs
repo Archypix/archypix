@@ -7,6 +7,9 @@ mod services;
 use crate::infrastructure::config::Config;
 use crate::infrastructure::state::AppState;
 use crate::services::auth::JwtService;
+use bb8_redis::redis::cmd;
+use bb8_redis::{RedisConnectionManager, bb8};
+use futures_util::future::join_all;
 use tracing::info;
 
 #[tokio::main]
@@ -26,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
     let db_pool = database::get_database_pool(&config).await?;
     database::run_migrations(&db_pool).await?;
 
-    let redis = infrastructure::redis::get_redis_manager(&config).await?;
+    let redis = infrastructure::redis::get_redis_client(&config).await?;
     let s3 = infrastructure::storage::get_s3_client(&config).await?;
     let http = reqwest::Client::new();
     let jwt = JwtService::new(&config.jwt_secret, &config.host);

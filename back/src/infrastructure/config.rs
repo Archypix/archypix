@@ -21,7 +21,10 @@ pub struct Config {
     pub s3_access_key: String,
     pub s3_secret_key: String,
     pub s3_region: String,
-    pub s3_bucket: String,
+    pub s3_bucket_originals: String,
+    pub s3_bucket_small: String,
+    pub s3_bucket_medium: String,
+    pub s3_bucket_large: String,
     pub s3_presign_ttl_secs: u64,
 }
 
@@ -51,7 +54,10 @@ impl Config {
             s3_access_key: require_env("S3_ACCESS_KEY")?,
             s3_secret_key: require_env("S3_SECRET_KEY")?,
             s3_region: env("S3_REGION", "us-east-1".to_string()),
-            s3_bucket: require_env("S3_BUCKET")?,
+            s3_bucket_originals: require_env("S3_BUCKET_ORIGINALS")?,
+            s3_bucket_small: require_env("S3_BUCKET_SMALL")?,
+            s3_bucket_medium: require_env("S3_BUCKET_MEDIUM")?,
+            s3_bucket_large: require_env("S3_BUCKET_LARGE")?,
             s3_presign_ttl_secs: env_u64("S3_PRESIGN_TTL_SECS", 300)?,
         };
 

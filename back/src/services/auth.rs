@@ -3,7 +3,7 @@ use crate::infrastructure::error::AppError;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use chrono::Utc;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
-use rand::RngCore;
+use rand::Rng;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -72,7 +72,8 @@ pub struct PasswordService;
 
 impl PasswordService {
     pub fn hash_password(password: &str) -> Result<String, AppError> {
-        let salt = argon2::password_hash::SaltString::generate(&mut rand::thread_rng());
+        let salt =
+            argon2::password_hash::SaltString::generate(argon2::password_hash::rand_core::OsRng);
         let argon2 = Argon2::default();
         let hash = argon2
             .hash_password(password.as_bytes(), &salt)
@@ -95,7 +96,7 @@ pub struct RefreshTokenService;
 impl RefreshTokenService {
     pub fn generate_refresh_token() -> String {
         let mut bytes = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut bytes);
+        rand::rng().fill_bytes(&mut bytes);
         hex::encode(bytes)
     }
 

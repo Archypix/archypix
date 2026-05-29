@@ -1,4 +1,4 @@
 pub mod auth;
 pub mod federation;
 pub mod resolver;
-pub mod storage;
+pub mod users;

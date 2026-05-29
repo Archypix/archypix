@@ -1,13 +1,15 @@
-# Backend Technology Considerations
+# Backend Architecture
 
-## Framework Choice: Axum
+## A) Technology considerations
+
+### Framework Choice: Axum
 - Already proven in resolver component
 - Excellent async/await support with Tokio
 - Robust routing, middleware (via Tower), and error handling
 - Consistent codebase across resolver and backend
 - Good performance and scalability for microservices
 
-## Database Access: SQLx
+### Database Access: SQLx
 - Excellent PostgreSQL feature support (LTREE, JSONB, custom types, etc.)
 - Compile-time checked SQL with macros
 - Direct SQL control for performance optimization
@@ -15,12 +17,38 @@
 - Migration capabilities already in use
 - Reduced abstraction overhead compared to ORMs
 
-## Architecture Approach
-- Layered separation of concerns
-- Shared application state pattern (similar to resolver)
-- Modular organization by domain/business capability
-- Placeholder implementations for complex components
-- Designed for evolution as schema and requirements change
+## B) Layered architecture and responsibilities
+
+**Goal:** clean separation between HTTP API, business workflows, domain rules, database access, and infrastructure connectivity.
+
+| Layer            | Responsibility                                                                                                 | Can depend on                                             | Must NOT depend on                                                                  |
+|------------------|----------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------|-------------------------------------------------------------------------------------|
+| `api`            | HTTP handlers, auth extraction, request/response mapping. Can call repositories directly for single-step CRUD. | `services`, `domain`, `database`, `infrastructure::error` | External connectivity details (Redis/S3/HTTP clients) outside `AppState` injection. |
+| `services`       | Multi-step workflows and orchestration. Defines transaction boundaries.                                        | `domain`, `database`, infra traits                        | Axum request types, HTTP-specific models.                                           |
+| `domain`         | Business rules, validation, transformations, and pure value types.                                             | Nothing outside Rust std + lightweight crates             | `database`, `infrastructure`, or external clients.                                  |
+| `database`       | Repository-only SQL operations (no business logic).                                                            | `sqlx`, `domain` types, `infrastructure::error`           | `services`, external clients.                                                       |
+| `infrastructure` | Connectivity (config, error, Redis, S3, HTTP clients, app state). Implements service traits when applicable.   | External SDKs                                             | `api` business logic, `domain` rules.                                               |
+
+Notes:
+
+- Services should be oriented by **business capability** (e.g., `user_account`), not by API emitter (admin/public/resolver).
+- Infrastructure can expose adapters that implement traits used by services. This keeps services decoupled from concrete Redis/S3/HTTP
+  implementations.
+
+## C) Transactions and database access
+
+**Rule:** all repository functions accept an `Executor<'e, Database = Postgres>` so they can run on either a `PgPool` or a transaction.
+
+- Multi-step workflows (e.g., user creation, picture upload) **must** run in an explicit SQL transaction managed by a service.
+- API handlers can call repositories directly **only** for single-step CRUD with no domain rule composition.
+
+Example signature (pattern):
+
+```rust
+pub async fn create<'e, E>(ex: E, ...) -> Result<Entity, AppError>
+where
+    E: Executor<'e, Database=Postgres>,
+```
 
 # Backend REST API Structure (updated)
 
@@ -89,10 +117,8 @@ request and ensures tokens are delivered only to the true domain owner.
 **Notes**
 
 - The grant is sent server-to-server to the callback on the requester’s domain, ensuring only the real instance receives it.
-- Tokens are short-lived; A re-requests as needed.
+- Tokens are short-lived; re-requested as needed.
 - All federation endpoints validate `token_type=federation`, `aud`, and optional scope.
-
-**Result:** We do **not** need `/api/federation/keys/{instance}`.
 
 ## 4) Middleware stack (Axum/Tower)
 
@@ -119,31 +145,14 @@ src/
   api/
     middleware.rs
     middleware/
-      auth_user.rs
-      auth_admin.rs
-      auth_resolver.rs
-      auth_federation.rs
-      rate_limit.rs
-      request_id.rs
     resolver.rs
     resolver/
-      handlers.rs
-      models.rs
     admin.rs
     admin/
-      handlers.rs
-      models.rs
     user.rs
     user/
-      auth.rs
-      users.rs
-      pictures.rs
-      tags.rs
-      shares.rs
     federation.rs
     federation/
-      handlers.rs
-      models.rs
 ```
 
 ## 6) Endpoint layout (initial set)
@@ -335,19 +344,20 @@ This spec builds on the current schema in `back/migrations/001_initial_schema.up
 
 ### 9.1 Picture identity
 
-- **Owned picture:** `owner_id = local user`, `owner_username/owner_instance_domain = NULL`.
-- **Received picture:** `owner_id = local user (recipient)`, `owner_username/owner_instance_domain = original owner`.
-- **Global identity:** `(owner_username, owner_instance_domain, picture_id)` for received pictures; `(owner_id, picture_id)` for owned pictures.
+- **Owned picture:** `local_user_id = owner`, `owner_username/owner_instance_domain = NULL`.
+- **Received picture:** `local_user_id = recipient`, `owner_username/owner_instance_domain = original owner`.
+- **Global identity:** `(owner_username, owner_instance_domain, picture_id)` for received pictures; `(local_user_id, picture_id)` for owned pictures.
 
 ### 9.2 Deduplication rules
 
 When a share announcement includes picture IDs:
 
-1. Lookup by `(owner_username, owner_instance_domain, picture_id, recipient_id)` for received pictures.
-2. If present, **reuse** the existing picture row and only update tags/shares.
-3. If not present, insert a new picture row with the incoming owner identity and storage info.
+1. Attempt `INSERT INTO pictures … ON CONFLICT (local_user_id, picture_id) DO UPDATE` (or `DO NOTHING`).
+2. The unique constraint `(local_user_id, picture_id)` is the deduplication key: `picture_id` is a UUID, globally unique in practice, so no extra
+   composite key is needed.
+3. On conflict, only update tags/shares for the existing row; do not overwrite storage fields.
 
-Idempotency is enforced at the federation message level (use `federation_messages` with a message id / hash).
+Idempotency at the federation message level is enforced via `federation_messages.idempotency_key` (unique constraint).
 
 ### 9.3 Storage and access
 

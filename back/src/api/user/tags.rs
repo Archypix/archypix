@@ -22,7 +22,7 @@ pub async fn list_tags(
         .uid
         .ok_or_else(|| AppError::Unauthorized("Missing user id".to_string()))?;
 
-    let tags = TagRepository::list_by_owner(&state.db, user_id).await?;
+    let tags = TagRepository::list_by_local_user(&state.db, user_id).await?;
     Ok(Json(serde_json::json!({ "tags": tags })))
 }
 
@@ -40,7 +40,7 @@ pub async fn assign_tags(
         let picture = PictureRepository::find_by_id(&state.db, item.picture_id)
             .await?
             .ok_or(AppError::NotFound)?;
-        if picture.owner_id != user_id {
+        if picture.local_user_id != user_id {
             return Err(AppError::Unauthorized("Invalid picture".to_string()));
         }
         TagRepository::assign_tags(&state.db, item.picture_id, &item.tags).await?;
@@ -63,7 +63,7 @@ pub async fn remove_tags(
         let picture = PictureRepository::find_by_id(&state.db, item.picture_id)
             .await?
             .ok_or(AppError::NotFound)?;
-        if picture.owner_id != user_id {
+        if picture.local_user_id != user_id {
             return Err(AppError::Unauthorized("Invalid picture".to_string()));
         }
         TagRepository::remove_tags(&state.db, item.picture_id, &item.tags).await?;
@@ -86,7 +86,7 @@ pub async fn assign_picture_tags(
     let picture = PictureRepository::find_by_id(&state.db, picture_id)
         .await?
         .ok_or(AppError::NotFound)?;
-    if picture.owner_id != user_id {
+    if picture.local_user_id != user_id {
         return Err(AppError::Unauthorized("Invalid picture".to_string()));
     }
 
@@ -108,7 +108,7 @@ pub async fn remove_picture_tags(
     let picture = PictureRepository::find_by_id(&state.db, picture_id)
         .await?
         .ok_or(AppError::NotFound)?;
-    if picture.owner_id != user_id {
+    if picture.local_user_id != user_id {
         return Err(AppError::Unauthorized("Invalid picture".to_string()));
     }
 

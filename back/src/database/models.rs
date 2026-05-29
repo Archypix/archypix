@@ -3,6 +3,94 @@ use serde::{Deserialize, Serialize};
 use sqlx::types::Json;
 use uuid::Uuid;
 
+// ============================================================================
+// Enums (mirror PostgreSQL enum types)
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "share_status", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum ShareStatus {
+    Active,
+    Revoked,
+    Tombstoned,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "tag_source", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum TagSource {
+    Manual,
+    Rule,
+    Segment,
+    ShareMapping,
+    IncomingShare,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "job_status", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum JobStatus {
+    Pending,
+    Processing,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "job_type", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum JobType {
+    GenThumbnail,
+    MlStyle,
+    MlPeople,
+    MlGroupLocation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "federation_message_type", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum FederationMessageType {
+    ShareAnnouncement,
+    ShareRevocation,
+    PictureUpdate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "federation_direction", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum FederationDirection {
+    Inbound,
+    Outbound,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "federation_status", rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
+pub enum FederationStatus {
+    Pending,
+    Sent,
+    Delivered,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "service_type", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceType {
+    SharedTagMapping,
+    Rule,
+    Segmentation,
+}
+
+// Used only in hierarchy JSONB config, not a direct column type
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SafeDeleteMode {
+    SingleBranch,
+    FullDelete,
+}
+
 // User model
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct User {
@@ -38,12 +126,14 @@ pub struct RefreshToken {
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Picture {
     pub id: Uuid,
-    pub owner_id: Uuid,
-    pub picture_id: String,
+    pub local_user_id: Uuid,
+    pub remote_picture_id: Option<String>, // only set for received pictures
     pub owner_username: Option<String>,
     pub owner_instance_domain: Option<String>,
-    pub s3_key: String,
-    pub s3_bucket: String,
+    pub s3_key_original: String,
+    pub s3_key_small: Option<String>,
+    pub s3_key_medium: Option<String>,
+    pub s3_key_large: Option<String>,
     pub filename: Option<String>,
     pub mime_type: Option<String>,
     pub file_size: Option<i64>,
@@ -62,9 +152,8 @@ pub struct Picture {
 pub struct Tag {
     pub id: Uuid,
     pub picture_id: Uuid,
-    pub tag_path: String, // In practice, this would be ltree, but we'll store as string for simplicity
-    pub is_virtual: bool,
-    pub source: String, // In practice, this would be tag_source enum
+    pub tag_path: String, // ltree stored as text via ::text cast
+    pub source: TagSource,
     pub source_id: Option<Uuid>,
     pub assigned_at: NaiveDateTime,
 }
@@ -74,12 +163,12 @@ pub struct Tag {
 pub struct OutgoingShare {
     pub id: Uuid,
     pub owner_id: Uuid,
-    pub tag_path: String,
+    pub tag_path: String, // ltree stored as text via ::text cast
     pub recipient_username: String,
     pub recipient_instance: String,
     pub allow_share_back: bool,
     pub future: bool,
-    pub status: String, // share_status enum
+    pub status: ShareStatus,
     pub created_at: NaiveDateTime,
     pub revoked_at: Option<NaiveDateTime>,
 }
@@ -92,7 +181,7 @@ pub struct IncomingShare {
     pub sender_instance: String,
     pub outgoing_share_id: Uuid,
     pub local_mapping_service_id: Option<Uuid>,
-    pub status: String, // share_status enum
+    pub status: ShareStatus,
     pub created_at: NaiveDateTime,
     pub revoked_at: Option<NaiveDateTime>,
 }
@@ -102,8 +191,8 @@ pub struct IncomingShare {
 pub struct Job {
     pub id: Uuid,
     pub owner_id: Uuid,
-    pub job_type: String, // job_type enum
-    pub status: String,   // job_status enum
+    pub job_type: JobType,
+    pub status: JobStatus,
     pub config: Json<serde_json::Value>,
     pub result: Json<serde_json::Value>,
     pub result_s3_keys: Vec<String>,
@@ -120,8 +209,8 @@ pub struct Job {
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct FederationMessage {
     pub id: Uuid,
-    pub message_type: String, // federation_message_type enum
-    pub direction: String,    // federation_direction enum
+    pub message_type: FederationMessageType,
+    pub direction: FederationDirection,
     pub sender_username: Option<String>,
     pub sender_instance: Option<String>,
     pub recipient_username: Option<String>,
@@ -129,7 +218,8 @@ pub struct FederationMessage {
     pub outgoing_share_id: Option<Uuid>,
     pub incoming_share_id: Option<Uuid>,
     pub payload: Json<serde_json::Value>,
-    pub status: String, // federation_status enum
+    pub idempotency_key: Option<String>,
+    pub status: FederationStatus,
     pub created_at: NaiveDateTime,
     pub sent_at: Option<NaiveDateTime>,
     pub delivered_at: Option<NaiveDateTime>,
@@ -154,9 +244,9 @@ pub struct Hierarchy {
 pub struct TaggingService {
     pub id: Uuid,
     pub owner_id: Uuid,
-    pub service_type: String, // service_type enum
-    pub requires: Vec<String>,
-    pub excludes: Vec<String>,
+    pub service_type: ServiceType,
+    pub requires: Vec<String>, // LTREE[] read as text[]
+    pub excludes: Vec<String>, // LTREE[] read as text[]
     pub enabled: bool,
     pub created_at: NaiveDateTime,
     pub updated_at: NaiveDateTime,

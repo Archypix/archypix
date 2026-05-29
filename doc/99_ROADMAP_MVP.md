@@ -12,6 +12,8 @@
 - [x] Federation auth endpoints (request/grant).
 - [x] Resolver JWT validation on update endpoint.
 - [x] Docs/env examples updated for new config.
+- [x] Refactor architecture: generalized DB executors for transactions, created shared UserAccountService, updated rules for services vs
+  infrastructure.
 
 ## Next steps (detailed)
 
