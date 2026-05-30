@@ -70,7 +70,8 @@ back/src/
   domain/
     auth.rs            # TokenType, JwtClaims
     user.rs            # User, UserCredential, RefreshToken
-    picture.rs         # Picture, UploadSession
+    user_settings.rs   # UserSettings, VersioningMode enum
+    picture.rs         # Picture, PictureVersion, UploadSession
     tag.rs             # TagPath (newtype), TagSource, Tag
     share.rs           # ShareStatus, OutgoingShare, IncomingShare
     federation.rs      # FederationMessage, direction/status enums, BackendMapping
@@ -82,7 +83,9 @@ back/src/
   repository.rs
   repository/
     user.rs            # UserRepository
-    picture.rs         # PictureRepository
+    picture.rs         # PictureRepository + PictureListFilter/SortField/SortOrder
+    picture_version.rs # PictureVersionRepository
+    user_settings.rs   # UserSettingsRepository (get_or_default, upsert)
     tag.rs             # TagRepository
     share.rs           # OutgoingShareRepository, IncomingShareRepository
     auth.rs            # CredentialRepository, RefreshTokenRepository
@@ -96,7 +99,9 @@ back/src/
   services/
     auth.rs            # login(), refresh(), logout()
     users.rs           # create_user()
-    pictures.rs        # begin_upload(), complete_upload()
+    pictures.rs        # begin_upload(), complete_upload(), list_pictures()
+                       # + ThumbnailSize, UploadMetadata, PictureListParams
+    user_settings.rs   # get(), update()
     shares.rs          # create_outgoing_share()
 
   api.rs               # Router composition
@@ -111,7 +116,8 @@ back/src/
     user/
       auth.rs          # login, refresh, logout, me handlers
       users.rs         # register, get_public, update_me handlers
-      pictures.rs      # upload, list, get, download handlers
+      pictures.rs      # create_upload, complete_upload, list, details handlers
+      settings.rs      # get_settings, update_settings handlers
       shares.rs        # share create/list/accept/reject handlers
       tags.rs          # tag list/assign/remove handlers
     admin.rs           # routes()
@@ -135,27 +141,29 @@ back/src/
     crypto.rs          # JwtService, hash_password(), verify_password(),
                        # generate_refresh_token(), hash_refresh_token()
     db.rs              # connect(), run_migrations()
-    s3.rs              # StorageClient (presign_get/put/copy/delete), connect(), bucket + lifecycle setup
+    s3.rs              # StorageClient (presign_get/put/copy/delete), connect(),
+                       # picture_key(), version_key(), bucket setup + lifecycle rule
 ```
 
 ---
 
 ## D) What belongs where — decision guide
 
-| Code                                                 | Layer                           | Reasoning                                                                                    |
-|------------------------------------------------------|---------------------------------|----------------------------------------------------------------------------------------------|
-| `TokenType`, `JwtClaims`                             | `domain/auth.rs`                | Pure value types, no I/O                                                                     |
-| `TagPath` newtype + methods                          | `domain/tag.rs`                 | Business invariants, pure                                                                    |
-| `OutgoingShare::would_loop_to()`                     | `domain/share.rs`               | Domain rule, pure                                                                            |
-| Pipeline evaluator                                   | `domain/tagging/pipeline.rs`    | Pure business logic, testable without I/O                                                    |
-| SQL queries                                          | `repository/`                   | SQL only, no business logic                                                                  |
-| WebFinger resolution + global→backend domain mapping | `clients/federation.rs`         | Outbound HTTP adapter; caches backend domains in Redis                                       |
-| Login/refresh workflow                               | `services/auth.rs`              | Multi-step: DB + crypto + token generation                                                   |
-| Upload workflow                                      | `services/pictures.rs`          | Multi-step: Redis session + S3 presign (staging) + server-side copy to originals + DB record |
-| Share creation                                       | `services/shares.rs`            | Multi-step: DB + federation announce                                                         |
-| JWT signing keys, argon2 hashing                     | `infra/crypto.rs`               | Infrastructure crypto primitives                                                             |
-| S3 presigned URLs                                    | `infra/s3.rs` → `StorageClient` | Infrastructure adapter                                                                       |
-| HTTP handler                                         | `api/*/`                        | Thin: extract input → call service/repo → serialize output                                   |
+| Code                                                 | Layer                           | Reasoning                                                                                                         |
+|------------------------------------------------------|---------------------------------|-------------------------------------------------------------------------------------------------------------------|
+| `TokenType`, `JwtClaims`                             | `domain/auth.rs`                | Pure value types, no I/O                                                                                          |
+| `TagPath` newtype + methods                          | `domain/tag.rs`                 | Business invariants, pure                                                                                         |
+| `OutgoingShare::would_loop_to()`                     | `domain/share.rs`               | Domain rule, pure                                                                                                 |
+| Pipeline evaluator                                   | `domain/tagging/pipeline.rs`    | Pure business logic, testable without I/O                                                                         |
+| SQL queries                                          | `repository/`                   | SQL only, no business logic                                                                                       |
+| WebFinger resolution + global→backend domain mapping | `clients/federation.rs`         | Outbound HTTP adapter; caches backend domains in Redis                                                            |
+| Login/refresh workflow                               | `services/auth.rs`              | Multi-step: DB + crypto + token generation                                                                        |
+| Upload workflow                                      | `services/pictures.rs`          | Multi-step: Redis session + S3 presign (staging) + server-side copy to pictures + optional versioning + DB record |
+| User settings read/update                            | `services/user_settings.rs`     | DB get-or-default + upsert; not embedded in JWT (changes too frequently)                                          |
+| Share creation                                       | `services/shares.rs`            | Multi-step: DB + federation announce                                                                              |
+| JWT signing keys, argon2 hashing                     | `infra/crypto.rs`               | Infrastructure crypto primitives                                                                                  |
+| S3 presigned URLs                                    | `infra/s3.rs` → `StorageClient` | Infrastructure adapter                                                                                            |
+| HTTP handler                                         | `api/*/`                        | Thin: extract input → call service/repo → serialize output                                                        |
 
 ---
 
@@ -302,10 +310,36 @@ via WebFinger at request time and cached in Redis.
 
 ### 6.1 Resolver endpoints
 
+These endpoints are on the **backend** and are called by the Resolver service (authenticated with a resolver JWT signed by `RESOLVER_ADMIN_SECRET`).
+
 | Method | Path                             | Description                                                  |
 |--------|----------------------------------|--------------------------------------------------------------|
 | `POST` | `/api/resolver/users`            | Create user on this backend (only when `USE_RESOLVER=true`). |
 | `GET`  | `/api/resolver/users/{username}` | Fetch user by username for resolver validation.              |
+
+### 6.1b Resolver service endpoints
+
+These endpoints are on the **Resolver service** itself (`resolver/`, port 8080).
+
+**Public (no auth)**
+
+| Method | Path                                                    | Description                                                                                 |
+|--------|---------------------------------------------------------|---------------------------------------------------------------------------------------------|
+| `GET`  | `/.well-known/webfinger?resource=archypix:@user:domain` | Resolve username to backend URL. Returns links with `rel: backend_url`.                     |
+| `POST` | `/api/register`                                         | Register a new user. Picks the least-loaded backend, forwards registration, stores mapping. |
+| `GET`  | `/health`                                               | Health check.                                                                               |
+
+**Admin (resolver JWT required)**
+
+| Method | Path            | Description                                                              |
+|--------|-----------------|--------------------------------------------------------------------------|
+| `POST` | `/api/update`   | Manually update a `username → backend_url` mapping (called by backends). |
+| `POST` | `/api/backends` | Register a backend node with the resolver.                               |
+| `GET`  | `/api/backends` | List all registered backend nodes.                                       |
+
+**`POST /api/register` body:** `{ username, display_name, email, password }`  
+**Algorithm:** queries `user_mappings` grouped by `backends`, picks the backend with fewest users (or 503 if no backends registered), forwards to
+`POST {backend}/api/resolver/users` with a resolver JWT, then stores `username → backend_url`.
 
 ### 6.2 Admin endpoints
 
@@ -335,15 +369,48 @@ via WebFinger at request time and cached in Redis.
 |---------|-------------------------------|--------------------------|
 | `PATCH` | `/api/authenticated/users/me` | Update profile/settings. |
 
-**Pictures & uploads**
+**Settings**
 
-| Method | Path                                                | Description                            |
-|--------|-----------------------------------------------------|----------------------------------------|
-| `POST` | `/api/authenticated/pictures/uploads`               | Create upload session + presigned URL. |
-| `POST` | `/api/authenticated/pictures/uploads/{id}/complete` | Finalize upload (enqueue jobs).        |
-| `GET`  | `/api/authenticated/pictures`                       | List/search pictures.                  |
-| `GET`  | `/api/authenticated/pictures/{id}`                  | Picture details (metadata, tags).      |
-| `GET`  | `/api/authenticated/pictures/{id}/download`         | Presigned URL for original/derivative. |
+| Method  | Path                          | Description                                                                                  |
+|---------|-------------------------------|----------------------------------------------------------------------------------------------|
+| `GET`   | `/api/authenticated/settings` | Get current user settings.                                                                   |
+| `PATCH` | `/api/authenticated/settings` | Update settings. Body: `{ versioning_mode: "none" \| "original_copy" \| "full_versioning" }` |
+
+User settings are **not** embedded in the JWT — they are loaded from the database on demand. A default row is created automatically on first access.
+
+**Pictures — upload**
+
+| Method | Path                                                        | Description                                                                                                                                                 |
+|--------|-------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `POST` | `/api/authenticated/pictures/uploads`                       | Begin upload. Body: `{ filename }`. Returns `{ picture_id, presigned_url }`. The `picture_id` UUID becomes the DB primary key and S3 key component.         |
+| `POST` | `/api/authenticated/pictures/uploads/{picture_id}/complete` | Confirm upload. Body: all fields optional — `{ mime_type, file_size, width, height, exif_data, captured_at }`. Workers will verify/complete metadata later. |
+
+**Pictures — list & details**
+
+| Method | Path                               | Description                                      |
+|--------|------------------------------------|--------------------------------------------------|
+| `GET`  | `/api/authenticated/pictures`      | Paginated picture list (see query params below). |
+| `GET`  | `/api/authenticated/pictures/{id}` | Full picture details including version history.  |
+
+List query parameters:
+
+| Parameter         | Type                                           | Default       | Description                                                                                                                    |
+|-------------------|------------------------------------------------|---------------|--------------------------------------------------------------------------------------------------------------------------------|
+| `page`            | integer                                        | `1`           | Page number.                                                                                                                   |
+| `page_size`       | integer (max 200)                              | `50`          | Items per page.                                                                                                                |
+| `sort`            | `captured_at` \| `ingested_at` \| `updated_at` | `ingested_at` | Sort field.                                                                                                                    |
+| `order`           | `asc` \| `desc`                                | `desc`        | Sort direction.                                                                                                                |
+| `tag`             | ltree path string                              | —             | Filter to pictures under this tag path (inclusive descendants).                                                                |
+| `owned_only`      | boolean                                        | `false`       | Restrict to pictures owned by this user.                                                                                       |
+| `shared_with_me`  | boolean                                        | `false`       | Restrict to pictures received via a share.                                                                                     |
+| `include_deleted` | boolean                                        | `false`       | Include soft-deleted pictures.                                                                                                 |
+| `captured_after`  | ISO-8601 datetime                              | —             | Filter by capture date (inclusive lower bound).                                                                                |
+| `captured_before` | ISO-8601 datetime                              | —             | Filter by capture date (inclusive upper bound).                                                                                |
+| `thumbnail`       | `small` \| `medium` \| `large`                 | —             | If set, each item includes a `thumbnail_url` presigned URL. URLs are cached in Redis for `presign_ttl − cache_margin` seconds. |
+
+List response: `{ total, page, page_size, items: [{ id, filename, width, height, captured_at, ingested_at, thumbnail_url? }] }`
+
+Details response: all picture fields + `versions: [{ id, version_number, file_size, mime_type, created_at }]`
 
 **Tags**
 
@@ -421,10 +488,29 @@ sequenceDiagram
 
 ### 7.3 Picture upload and tagging pipeline
 
-Uploads use a two-bucket staging pattern to prevent orphaned objects in the originals bucket:
-the client uploads to a short-lived staging bucket, then `complete_upload` performs a server-side
-copy to the originals bucket and deletes the staging object. Staging objects that are never
-confirmed are automatically removed by a 1-day lifecycle rule set at startup.
+**S3 key design:** Picture keys are never stored in the database. They are derived on-the-fly from `user_id` and `picture_id`:
+
+- `{user_id}/{picture_id}` — used in every bucket (staging, pictures, small, medium, large)
+- `{user_id}/{picture_id}/{version_id}` — for the versions bucket
+
+The `picture_id` UUID is generated at `begin_upload` time and serves as both the S3 key component and the database primary key.
+
+**Staging pattern:** Uploads go to `archypix-staging` first. `complete_upload` performs a server-side copy to `archypix-pictures` and deletes the
+staging object. Staging objects never confirmed are cleaned up by a 1-day MinIO lifecycle rule applied at startup. The staging bucket name **must not
+** be shared with any other bucket (enforced at startup by config validation).
+
+**Versioning:** Controlled per-user by `versioning_mode` in `user_settings`:
+
+- `none` — no version history (default)
+- `original_copy` — the first upload is preserved in `archypix-versions` as version 1; subsequent WebDAV overwrites replace `archypix-pictures` while
+  the original is kept
+- `full_versioning` — every pre-overwrite state is snapshotted to `archypix-versions`
+
+At `complete_upload` time, if versioning is enabled, the confirmed file is also copied to the versions bucket and a `picture_versions` row is
+inserted.
+
+**Metadata:** The client supplies optional metadata in `complete_upload` (`mime_type`, `file_size`, `width`, `height`, `exif_data`, `captured_at`).
+Workers will verify and overwrite them during processing.
 
 ```mermaid
 sequenceDiagram
@@ -433,17 +519,30 @@ sequenceDiagram
     participant Backend
     participant MinIO
     participant Worker
-    Client ->> Backend: POST /api/authenticated/pictures/uploads
-   Backend -->> Client: presigned_url (staging bucket) + upload_id
-   Client ->> MinIO: PUT object to staging (presigned)
-    Client ->> Backend: POST /api/authenticated/pictures/uploads/{id}/complete
-   Backend ->> MinIO: server-side copy staging → originals
+   Client ->> Backend: POST /api/authenticated/pictures/uploads (filename)
+   Backend -->> Client: { picture_id, presigned_url } (staging bucket)
+   Client ->> MinIO: PUT binary file to staging (presigned, body = binary)
+   Client ->> Backend: POST /uploads/{picture_id}/complete (optional metadata)
+   Backend ->> MinIO: server-side copy staging → archypix-pictures
    Backend ->> MinIO: delete staging object
-   Backend ->> Backend: create picture record in DB
-    Backend ->> Worker: enqueue job (thumbnails/ML)
-    Worker ->> Backend: publish results
-    Backend -->> Client: 200 OK (picture available)
+   opt versioning_mode != none
+      Backend ->> MinIO: copy pictures → archypix-versions (version_id key)
+      Backend ->> Backend: insert picture_versions row
+   end
+   Backend ->> Backend: insert picture row (id = picture_id)
+   Backend -->> Client: Picture JSON
+   Note over Backend, Worker: async — not yet implemented
+   Backend ->> Worker: enqueue job (thumbnails / ML)
+   Worker ->> MinIO: write small/medium/large thumbnails
+   Worker ->> Backend: publish results (metadata, face embeddings, etc.)
 ```
+
+**Presigned URL caching:** The list endpoint generates presigned GET URLs for thumbnails. URLs are cached in Redis under `presign:{bucket}:{key}` for
+`S3_PRESIGN_TTL_SECS − S3_PRESIGN_CACHE_MARGIN_SECS` seconds. If the TTL is ≤ 0, caching is skipped entirely. Default: 3600s − 600s = 3000s cache.
+
+**WebDAV presigned strategy (not yet implemented):** WebDAV clients authenticate against the backend and are unaware of MinIO. For full-resolution
+reads the backend issues an HTTP redirect to a presigned GET URL. For thumbnails the backend proxies the stream. WebDAV writes go through the backend,
+which handles staging and versioning transparently.
 
 ### 7.4 Federation auth handshake
 
@@ -498,8 +597,11 @@ sequenceDiagram
 ## 8) WebDAV + storage behavior
 
 - WebDAV lives under `/dav/*` and maps tags to virtual directories (see hierarchy spec).
-- For WebDAV clients, the backend **proxies** file downloads/uploads to MinIO when presigned URLs are not suitable.
-- REST clients can still use presigned URLs for direct MinIO transfers.
+- **Full-resolution reads:** backend issues an HTTP redirect to a presigned GET URL (`archypix-pictures`). No data is proxied.
+- **Thumbnail reads:** backend proxies the stream from `archypix-small/medium/large`.
+- **Writes (upload/overwrite):** backend receives the file, writes to staging (`archypix-staging`), confirms, and copies to `archypix-pictures`.
+  Versioning logic runs identically to the REST upload flow.
+- REST clients use presigned PUT URLs for direct MinIO uploads (staging pattern), then call `complete_upload` separately.
 
 ---
 
@@ -522,9 +624,11 @@ Idempotency at the federation message level is enforced via `federation_messages
 
 ### 9.3 Storage and access
 
-- The original owner stores `s3_key` + `s3_bucket` in MinIO.
-- The receiving backend stores those values for reference only.
-- To access a remote file, the receiver calls `POST /api/federation/pictures/presign` on the owner's backend.
+- S3 keys are **never stored** in the database. They are always derived as `{user_id}/{picture_id}` (or `{user_id}/{picture_id}/{version_id}` for
+  versions). The bucket is selected by context (pictures, small, medium, large, versions).
+- The receiving backend stores no S3 reference for foreign pictures — the file lives on the owner's instance.
+- To access a remote file, the receiver calls `POST /api/federation/pictures/presign` on the owner's backend, which generates and returns a
+  short-lived presigned GET URL. That URL can be cached in Redis for the same duration as local presigns.
 
 ### 9.4 Transitive sharing
 
@@ -538,11 +642,42 @@ federation announcement.
 
 ---
 
-## 10) Not-yet-developed items
+## 10) Local dev setup (Docker)
+
+A root-level `docker-compose.yml` provides a complete federation dev stack:
+
+```
+docker compose up --build
+```
+
+| Service       | Port      | Description                                                       |
+|---------------|-----------|-------------------------------------------------------------------|
+| `resolver`    | 8080      | WebFinger resolver + user registration routing                    |
+| `backend1`    | 8001      | Backend with `USE_RESOLVER=true`, `WEBFINGER_HOST=archypix.local` |
+| `backend2`    | 8002      | Standalone backend, no resolver                                   |
+| `minio`       | 9000/9001 | Shared MinIO (API / console)                                      |
+| `postgres-*`  | —         | Separate Postgres per service (internal)                          |
+| `redis-back*` | —         | Separate Redis per backend (internal)                             |
+
+**Testing federation:** Open `front-test/index.html` in two browser tabs. Set one to `http://localhost:8001` and the other to `http://localhost:8002`.
+Use sharing endpoints to send pictures across instances.
+
+**Registering a backend with the resolver (backend1 flow):**
+After startup, backend1 registers itself with the resolver by calling `POST /api/resolver/users` (via resolver JWT) whenever a user is created. The
+resolver stores `username → http://localhost:8001`.
+
+---
+
+## 11) Not-yet-developed items
 
 1. Full tagging pipeline execution in `services/tagging.rs` (domain evaluators are ready in `domain/tagging/pipeline.rs`).
 2. Federation token storage rotation schedule and retry logic.
 3. Redis-backed rate limits and session invalidation.
 4. NATS JetStream job publishing and result consumption.
-5. WebDAV implementation.
-6. Admin job and metrics endpoints.
+5. WebDAV implementation (redirect strategy for full-res reads, proxy for thumbnails, staging pattern for writes).
+6. Picture file-update flow (WebDAV overwrite) triggering versioning: copy current `archypix-pictures` object to `archypix-versions` before overwrite,
+   insert a new `picture_versions` row, then replace the object. Triggered by WebDAV `PUT` on an existing picture path.
+7. Worker-driven metadata backfill: after workers generate thumbnails and run ML, they update the `pictures` row with verified `mime_type`,
+   `file_size`, `width`, `height`, and `exif_data`.
+8. Presigned URL caching for federation picture access (Redis TTL matching local presign caching strategy).
+9. Admin job and metrics endpoints.

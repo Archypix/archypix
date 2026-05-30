@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"/>
+    <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+    <title>Archypix API Test Tool</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        pre {
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-900 font-mono text-sm">
+
+<!-- ===== CONFIG BAR ===== -->
+<div class="sticky top-0 z-50 bg-gray-900 text-white p-3 flex flex-wrap gap-3 items-center shadow-lg">
+    <span class="font-bold text-yellow-400">Archypix Dev Tool</span>
+
+    <label class="flex flex-col text-xs">
+        <span class="text-gray-400">Backend URL</span>
+        <input class="bg-gray-700 text-white px-2 py-1 rounded w-64 text-xs" id="cfg-backend" placeholder="http://localhost:8000"
+               type="text"/>
+    </label>
+
+    <label class="flex flex-col text-xs">
+        <span class="text-gray-400">Resolver URL</span>
+        <input class="bg-gray-700 text-white px-2 py-1 rounded w-64 text-xs" id="cfg-resolver" placeholder="http://localhost:8080"
+               type="text"/>
+    </label>
+
+    <div class="text-xs text-green-400 hidden" id="cfg-user-info">
+        Logged in as: <span class="font-bold" id="cfg-username"></span>
+    </div>
+
+    <button class="ml-auto bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-xs" onclick="logout()">Logout</button>
+
+    <div class="text-xs text-orange-300 w-full">
+        ⚠️ CORS note: if you see CORS errors, make sure the backend has <code>FRONT_URL</code> configured to include this origin (<span
+            id="cfg-origin"></span>).
+    </div>
+</div>
+
+<div class="max-w-5xl mx-auto p-4 space-y-6">
+
+    <!-- ===== AUTH SECTION ===== -->
+    <section class="bg-white rounded shadow p-4">
+        <h2 class="text-lg font-bold mb-3 border-b pb-2">📋 Auth</h2>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+
+            <!-- Login -->
+            <div>
+                <h3 class="font-semibold mb-2 text-blue-700">Login</h3>
+                <div class="space-y-2">
+                    <input class="input w-full" id="login-username" placeholder="Username" type="text"/>
+                    <input class="input w-full" id="login-password" placeholder="Password" type="password"/>
+                    <button class="btn btn-blue w-full" onclick="doLogin()">Login</button>
+                </div>
+            </div>
+
+            <!-- Register (direct) -->
+            <div>
+                <h3 class="font-semibold mb-2 text-green-700">Register (direct, no resolver)</h3>
+                <div class="space-y-2">
+                    <input class="input w-full" id="reg-username" placeholder="Username" type="text"/>
+                    <input class="input w-full" id="reg-display" placeholder="Display name" type="text"/>
+                    <input class="input w-full" id="reg-email" placeholder="Email" type="email"/>
+                    <input class="input w-full" id="reg-password" placeholder="Password" type="password"/>
+                    <button class="btn btn-green w-full" onclick="doRegister()">Register &amp; Login</button>
+                    <p class="text-xs text-gray-500">Only works when <code>USE_RESOLVER=false</code> on backend.</p>
+                </div>
+            </div>
+
+            <!-- Register via resolver -->
+            <div>
+                <h3 class="font-semibold mb-2 text-purple-700">Register via Resolver</h3>
+                <div class="space-y-2">
+                    <input class="input w-full" id="rres-username" placeholder="Username" type="text"/>
+                    <input class="input w-full" id="rres-display" placeholder="Display name" type="text"/>
+                    <input class="input w-full" id="rres-email" placeholder="Email" type="email"/>
+                    <input class="input w-full" id="rres-password" placeholder="Password" type="password"/>
+                    <button class="btn btn-purple w-full" onclick="doRegisterViaResolver()">Register via Resolver</button>
+                    <p class="text-xs text-orange-500">⚠️ Not yet implemented on the resolver side.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Current user -->
+        <div class="mt-4">
+            <div class="flex gap-2 mb-2">
+                <button class="btn btn-gray" onclick="doGetMe()">GET /api/auth/me</button>
+            </div>
+            <pre class="output" id="auth-output"></pre>
+        </div>
+    </section>
+
+    <!-- ===== PICTURES SECTION ===== -->
+    <section class="bg-white rounded shadow p-4">
+        <h2 class="text-lg font-bold mb-3 border-b pb-2">🖼 Pictures</h2>
+
+        <!-- Upload -->
+        <div class="mb-4">
+            <h3 class="font-semibold mb-2 text-blue-700">Upload Picture</h3>
+            <div class="flex gap-2 items-center flex-wrap">
+                <input class="text-xs" id="pic-file" type="file"/>
+                <button class="btn btn-blue" onclick="doUpload()">Upload</button>
+            </div>
+            <div class="text-xs mt-1 text-gray-500" id="upload-progress"></div>
+            <pre class="output mt-2" id="upload-output"></pre>
+        </div>
+
+        <!-- List -->
+        <div class="mb-4">
+            <h3 class="font-semibold mb-2 text-blue-700">List Pictures</h3>
+            <div class="flex gap-2 mb-2 flex-wrap">
+                <input class="input w-16" id="pic-page" min="1" placeholder="page" type="number" value="1"/>
+                <input class="input w-20" id="pic-page-size" min="1" placeholder="page_size" type="number" value="20"/>
+                <button class="btn btn-blue" onclick="doListPictures()">List</button>
+            </div>
+            <pre class="output" id="list-output"></pre>
+            <div class="grid grid-cols-3 md:grid-cols-5 gap-2 mt-3" id="pic-grid"></div>
+        </div>
+
+        <!-- Details -->
+        <div>
+            <h3 class="font-semibold mb-2 text-blue-700">Picture Details</h3>
+            <div class="flex gap-2 mb-2">
+                <input class="input flex-1" id="pic-id" placeholder="Picture ID (UUID)" type="text"/>
+                <button class="btn btn-blue" onclick="doGetPicture()">Get Details</button>
+            </div>
+            <pre class="output" id="pic-detail-output"></pre>
+        </div>
+    </section>
+
+    <!-- ===== SETTINGS SECTION ===== -->
+    <section class="bg-white rounded shadow p-4">
+        <h2 class="text-lg font-bold mb-3 border-b pb-2">⚙️ Settings</h2>
+        <div class="flex gap-2 mb-3 flex-wrap items-center">
+            <button class="btn btn-gray" onclick="doGetSettings()">Load Settings</button>
+            <label class="text-sm">versioning_mode:
+                <select class="input ml-1" id="settings-versioning">
+                    <option value="none">none</option>
+                    <option value="original_copy">original_copy</option>
+                    <option value="full_versioning">full_versioning</option>
+                </select>
+            </label>
+            <button class="btn btn-green" onclick="doSaveSettings()">Save</button>
+        </div>
+        <pre class="output" id="settings-output"></pre>
+    </section>
+
+    <!-- ===== SHARING SECTION ===== -->
+    <section class="bg-white rounded shadow p-4">
+        <h2 class="text-lg font-bold mb-3 border-b pb-2">🔗 Sharing</h2>
+
+        <!-- Create share -->
+        <div class="mb-4">
+            <h3 class="font-semibold mb-2 text-blue-700">Create Outgoing Share</h3>
+            <div class="grid grid-cols-2 gap-2">
+                <input class="input" id="share-tag-path" placeholder="tag_path" type="text"/>
+                <input class="input" id="share-recipient-username" placeholder="recipient_username" type="text"/>
+                <input class="input" id="share-recipient-instance" id="share-recipient-instance" placeholder="recipient_instance (other backend host)"
+                       type="text"/>
+                <div class="flex gap-4 items-center">
+                    <label class="flex gap-1 items-center text-xs">
+                        <input id="share-allow-back" type="checkbox"/> allow_share_back
+                    </label>
+                    <label class="flex gap-1 items-center text-xs">
+                        <input id="share-future" type="checkbox"/> future
+                    </label>
+                </div>
+            </div>
+            <button class="btn btn-blue mt-2" onclick="doCreateShare()">Create Share</button>
+            <pre class="output mt-2" id="share-create-output"></pre>
+        </div>
+
+        <!-- List shares -->
+        <div class="flex gap-2 mb-2 flex-wrap">
+            <button class="btn btn-gray" onclick="doListOutgoing()">List Outgoing Shares</button>
+            <button class="btn btn-gray" onclick="doListIncoming()">List Incoming Shares</button>
+        </div>
+        <pre class="output" id="shares-list-output"></pre>
+    </section>
+
+    <!-- ===== FEDERATION SECTION ===== -->
+    <section class="bg-white rounded shadow p-4">
+        <h2 class="text-lg font-bold mb-3 border-b pb-2">🌐 Federation</h2>
+
+        <div class="mb-3 text-xs text-gray-600 bg-gray-50 p-3 rounded border">
+            <strong>How to test federation:</strong> Open a second browser tab pointing to this same file. Set a different Backend URL in the config
+            bar of the second tab. Log in as a different user on the second instance. Then use the Sharing section to send pictures from one instance
+            to the other using <code>@username:domain</code> addressing.
+        </div>
+
+        <div class="mb-3">
+            <strong>Current instance info:</strong>
+            <div class="text-xs mt-1 space-y-1">
+                <div>Backend: <span class="text-blue-600 font-bold" id="fed-backend"></span></div>
+                <div>Logged in as: <span class="text-green-600 font-bold" id="fed-user"></span></div>
+            </div>
+        </div>
+
+        <!-- WebFinger lookup -->
+        <div>
+            <h3 class="font-semibold mb-2 text-blue-700">WebFinger Lookup (via Resolver)</h3>
+            <p class="text-xs text-gray-500 mb-2">
+                Format: <code>@username:domain</code> — queries resolver's
+                <code>/.well-known/webfinger?resource=archypix:@{"{"}username{"}"}{":"}domain</code>
+            </p>
+            <div class="flex gap-2 mb-2">
+                <input class="input flex-1" id="wf-address" placeholder="@username:domain" type="text"/>
+                <button class="btn btn-blue" onclick="doWebFinger()">Lookup</button>
+            </div>
+            <pre class="output" id="wf-output"></pre>
+        </div>
+    </section>
+
+    <!-- ===== PUBLIC PROFILE SECTION ===== -->
+    <section class="bg-white rounded shadow p-4">
+        <h2 class="text-lg font-bold mb-3 border-b pb-2">👤 Public Profile Lookup</h2>
+        <div class="flex gap-2 mb-2">
+            <input class="input flex-1" id="profile-username" placeholder="username" type="text"/>
+            <button class="btn btn-gray" onclick="doGetProfile()">GET /api/public/users/{username}</button>
+        </div>
+        <pre class="output" id="profile-output"></pre>
+    </section>
+
+</div><!-- end max-w -->
+
+<style>
+    .input {
+        @apply border border-gray-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400;
+    }
+    .btn {
+        @apply px-3 py-1 rounded text-sm font-medium cursor-pointer;
+    }
+    .btn-blue {
+        @apply bg-blue-600 hover:bg-blue-700 text-white;
+    }
+    .btn-green {
+        @apply bg-green-600 hover:bg-green-700 text-white;
+    }
+    .btn-gray {
+        @apply bg-gray-200 hover:bg-gray-300 text-gray-800;
+    }
+    .btn-purple {
+        @apply bg-purple-600 hover:bg-purple-700 text-white;
+    }
+    .output {
+        @apply bg-gray-50 border border-gray-200 rounded p-2 text-xs max-h-64 overflow-auto min-h-8;
+    }
+</style>
+
+<script>
+    // ===== STORAGE HELPERS =====
+    const LS = {
+        get: k => localStorage.getItem(k) || '',
+        set: (k, v) => localStorage.setItem(k, v),
+    };
+
+    const KEYS = {
+        backend: 'archypix_backend_url',
+        resolver: 'archypix_resolver_url',
+        access: 'archypix_access_token',
+        refresh: 'archypix_refresh_token',
+        username: 'archypix_username',
+    };
+
+    // ===== INIT =====
+    function init(){
+        const beInput = document.getElementById('cfg-backend');
+        const resInput = document.getElementById('cfg-resolver');
+
+        beInput.value = LS.get(KEYS.backend) || 'http://localhost:8000';
+        resInput.value = LS.get(KEYS.resolver) || 'http://localhost:8080';
+
+        beInput.addEventListener('input', () => {
+            LS.set(KEYS.backend, beInput.value.trim());
+            updateFedInfo();
+            prefillRecipientInstance();
+        });
+        resInput.addEventListener('input', () => {
+            LS.set(KEYS.resolver, resInput.value.trim());
+        });
+
+        document.getElementById('cfg-origin').textContent = window.location.origin;
+
+        updateUserInfo();
+        updateFedInfo();
+        prefillRecipientInstance();
+    }
+
+    function getBackend(){
+        return (document.getElementById('cfg-backend').value || 'http://localhost:8000').replace(/\/$/, '');
+    }
+
+    function getResolver(){
+        return (document.getElementById('cfg-resolver').value || 'http://localhost:8080').replace(/\/$/, '');
+    }
+
+    function getToken(){
+        return LS.get(KEYS.access);
+    }
+
+    function updateUserInfo(){
+        const username = LS.get(KEYS.username);
+        const el = document.getElementById('cfg-user-info');
+        if(username && getToken()){
+            el.classList.remove('hidden');
+            document.getElementById('cfg-username').textContent = username;
+        }else{
+            el.classList.add('hidden');
+        }
+    }
+
+    function updateFedInfo(){
+        document.getElementById('fed-backend').textContent = getBackend();
+        document.getElementById('fed-user').textContent = LS.get(KEYS.username) || '(not logged in)';
+    }
+
+    function prefillRecipientInstance(){
+        // Pre-fill recipient instance with the OTHER backend's hostname (strip protocol)
+        const url = getBackend();
+        try{
+            const parsed = new URL(url);
+            document.getElementById('share-recipient-instance').value = parsed.host;
+        }catch(e){
+            // ignore
+        }
+    }
+
+    // ===== FETCH HELPERS =====
+    async function apiFetch(path, options = {}, useAuth = true, baseUrl = null){
+        const url = (baseUrl || getBackend()) + path;
+        const headers = {'Content-Type': 'application/json', ...(options.headers || {})};
+        if(useAuth){
+            const token = getToken();
+            if(token) headers['Authorization'] = `Bearer ${token}`;
+        }
+        const res = await fetch(url, {...options, headers});
+        let data;
+        const ct = res.headers.get('content-type') || '';
+        if(ct.includes('application/json')){
+            data = await res.json();
+        }else{
+            data = await res.text();
+        }
+        return {ok: res.ok, status: res.status, data};
+    }
+
+    function showOutput(elId, result, error = null){
+        const el = document.getElementById(elId);
+        if(error){
+            el.textContent = '❌ ERROR: ' + error;
+            el.className = el.className.replace('text-red-600', '') + ' text-red-600';
+        }else{
+            el.className = el.className.replace(' text-red-600', '');
+            el.textContent = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+        }
+    }
+
+    // ===== AUTH =====
+    async function doLogin(){
+        try{
+            const r = await apiFetch('/api/auth/login', {
+                method: 'POST',
+                body: JSON.stringify({
+                    username: document.getElementById('login-username').value,
+                    password: document.getElementById('login-password').value,
+                }),
+            }, false);
+            if(r.ok){
+                LS.set(KEYS.access, r.data.access_token);
+                LS.set(KEYS.refresh, r.data.refresh_token);
+                LS.set(KEYS.username, document.getElementById('login-username').value);
+                updateUserInfo();
+                updateFedInfo();
+            }
+            showOutput('auth-output', r.data, r.ok ? null : `HTTP ${r.status}`);
+        }catch(e){
+            showOutput('auth-output', null, e.message);
+        }
+    }
+
+    async function doRegister(){
+        try{
+            const r = await apiFetch('/api/public/users', {
+                method: 'POST',
+                body: JSON.stringify({
+                    username: document.getElementById('reg-username').value,
+                    display_name: document.getElementById('reg-display').value,
+                    email: document.getElementById('reg-email').value,
+                    password: document.getElementById('reg-password').value,
+                }),
+            }, false);
+            showOutput('auth-output', r.data, r.ok ? null : `HTTP ${r.status}: ${JSON.stringify(r.data)}`);
+            if(r.ok){
+                // Auto-login
+                document.getElementById('login-username').value = document.getElementById('reg-username').value;
+                document.getElementById('login-password').value = document.getElementById('reg-password').value;
+                await doLogin();
+            }
+        }catch(e){
+            showOutput('auth-output', null, e.message);
+        }
+    }
+
+    async function doRegisterViaResolver(){
+        try{
+            const r = await apiFetch('/api/register', {
+                method: 'POST',
+                body: JSON.stringify({
+                    username: document.getElementById('rres-username').value,
+                    display_name: document.getElementById('rres-display').value,
+                    email: document.getElementById('rres-email').value,
+                    password: document.getElementById('rres-password').value,
+                }),
+            }, false, getResolver());
+            showOutput('auth-output', r.data, r.ok ? null : `HTTP ${r.status} (resolver may not implement this yet)`);
+        }catch(e){
+            showOutput('auth-output', null, e.message + ' (resolver endpoint likely not implemented yet)');
+        }
+    }
+
+    async function doGetMe(){
+        try{
+            const r = await apiFetch('/api/auth/me');
+            if(r.ok && r.data.username){
+                LS.set(KEYS.username, r.data.username);
+                updateUserInfo();
+                updateFedInfo();
+            }
+            showOutput('auth-output', r.data, r.ok ? null : `HTTP ${r.status}`);
+        }catch(e){
+            showOutput('auth-output', null, e.message);
+        }
+    }
+
+    async function logout(){
+        try{
+            const refresh = LS.get(KEYS.refresh);
+            if(refresh){
+                await apiFetch('/api/auth/logout', {
+                    method: 'POST',
+                    body: JSON.stringify({refresh_token: refresh}),
+                });
+            }
+        }catch(e){ /* ignore */
+        }
+        LS.set(KEYS.access, '');
+        LS.set(KEYS.refresh, '');
+        LS.set(KEYS.username, '');
+        updateUserInfo();
+        updateFedInfo();
+        showOutput('auth-output', 'Logged out.');
+    }
+
+    // ===== PICTURES =====
+    async function doUpload(){
+        const fileInput = document.getElementById('pic-file');
+        const file = fileInput.files[0];
+        if(!file){
+            showOutput('upload-output', null, 'No file selected.');
+            return;
+        }
+
+        const progress = document.getElementById('upload-progress');
+
+        try{
+            progress.textContent = '1/3 Requesting upload URL...';
+            const r1 = await apiFetch('/api/authenticated/pictures/uploads', {
+                method: 'POST',
+                body: JSON.stringify({filename: file.name}),
+            });
+            if(!r1.ok){
+                showOutput('upload-output', r1.data, `HTTP ${r1.status}`);
+                return;
+            }
+
+            const {picture_id, presigned_url} = r1.data;
+            showOutput('upload-output', {step1: r1.data});
+
+            progress.textContent = `2/3 Uploading to MinIO (presigned URL)... picture_id=${picture_id}`;
+            // PUT directly to MinIO — no Authorization header
+            const putRes = await fetch(presigned_url, {
+                method: 'PUT',
+                body: file,
+                headers: {'Content-Type': file.type || 'application/octet-stream'},
+            });
+            if(!putRes.ok){
+                const txt = await putRes.text();
+                showOutput('upload-output', txt, `MinIO PUT failed: HTTP ${putRes.status}`);
+                return;
+            }
+            progress.textContent = `3/3 Completing upload...`;
+
+            const completeBody = {
+                mime_type: file.type || null,
+                file_size: file.size || null,
+            };
+            // Try to get image dimensions if it's an image
+            if(file.type.startsWith('image/')){
+                try{
+                    const dims = await getImageDimensions(file);
+                    completeBody.width = dims.width;
+                    completeBody.height = dims.height;
+                }catch(e){ /* skip */
+                }
+            }
+
+            const r3 = await apiFetch(`/api/authenticated/pictures/uploads/${picture_id}/complete`, {
+                method: 'POST',
+                body: JSON.stringify(completeBody),
+            });
+            progress.textContent = r3.ok ? '✅ Upload complete!' : '❌ Complete step failed.';
+            showOutput('upload-output', r3.data, r3.ok ? null : `HTTP ${r3.status}`);
+        }catch(e){
+            progress.textContent = '';
+            showOutput('upload-output', null, e.message);
+        }
+    }
+
+    function getImageDimensions(file){
+        return new Promise((resolve, reject) => {
+            const url = URL.createObjectURL(file);
+            const img = new Image();
+            img.onload = () => {
+                resolve({width: img.naturalWidth, height: img.naturalHeight});
+                URL.revokeObjectURL(url);
+            };
+            img.onerror = reject;
+            img.src = url;
+        });
+    }
+
+    async function doListPictures(){
+        try{
+            const page = document.getElementById('pic-page').value || 1;
+            const pageSize = document.getElementById('pic-page-size').value || 20;
+            const r = await apiFetch(`/api/authenticated/pictures?thumbnail=small&page=${page}&page_size=${pageSize}`);
+            showOutput('list-output', r.data, r.ok ? null : `HTTP ${r.status}`);
+
+            const grid = document.getElementById('pic-grid');
+            grid.innerHTML = '';
+            if(r.ok && r.data.items){
+                r.data.items.forEach(pic => {
+                    const div = document.createElement('div');
+                    div.className = 'border rounded overflow-hidden cursor-pointer hover:shadow-md transition-shadow';
+                    div.onclick = () => {
+                        document.getElementById('pic-id').value = pic.id;
+                        doGetPicture();
+                    };
+                    const imgSrc = pic.thumbnail_url || '';
+                    div.innerHTML = `
+          <img src="${imgSrc}" alt="${pic.filename}" class="w-full h-24 object-cover bg-gray-200"
+               onerror="this.style.display='none'" />
+          <div class="p-1 text-xs truncate text-gray-700" title="${pic.filename}">${pic.filename}</div>
+          <div class="px-1 pb-1 text-xs text-gray-400">${pic.ingested_at ? new Date(pic.ingested_at).toLocaleDateString() : ''}</div>
+        `;
+                    grid.appendChild(div);
+                });
+            }
+        }catch(e){
+            showOutput('list-output', null, e.message);
+        }
+    }
+
+    async function doGetPicture(){
+        const id = document.getElementById('pic-id').value.trim();
+        if(!id){
+            showOutput('pic-detail-output', null, 'Enter a picture ID.');
+            return;
+        }
+        try{
+            const r = await apiFetch(`/api/authenticated/pictures/${id}`);
+            showOutput('pic-detail-output', r.data, r.ok ? null : `HTTP ${r.status}`);
+        }catch(e){
+            showOutput('pic-detail-output', null, e.message);
+        }
+    }
+
+    // ===== SETTINGS =====
+    async function doGetSettings(){
+        try{
+            const r = await apiFetch('/api/authenticated/settings');
+            if(r.ok && r.data.versioning_mode){
+                document.getElementById('settings-versioning').value = r.data.versioning_mode;
+            }
+            showOutput('settings-output', r.data, r.ok ? null : `HTTP ${r.status}`);
+        }catch(e){
+            showOutput('settings-output', null, e.message);
+        }
+    }
+
+    async function doSaveSettings(){
+        try{
+            const r = await apiFetch('/api/authenticated/settings', {
+                method: 'PATCH',
+                body: JSON.stringify({
+                    versioning_mode: document.getElementById('settings-versioning').value,
+                }),
+            });
+            showOutput('settings-output', r.data, r.ok ? null : `HTTP ${r.status}`);
+        }catch(e){
+            showOutput('settings-output', null, e.message);
+        }
+    }
+
+    // ===== SHARING =====
+    async function doCreateShare(){
+        try{
+            const body = {
+                tag_path: document.getElementById('share-tag-path').value,
+                recipient_username: document.getElementById('share-recipient-username').value,
+                recipient_instance: document.getElementById('share-recipient-instance').value || null,
+                allow_share_back: document.getElementById('share-allow-back').checked,
+                future: document.getElementById('share-future').checked,
+            };
+            const r = await apiFetch('/api/authenticated/shares/outgoing', {
+                method: 'POST',
+                body: JSON.stringify(body),
+            });
+            showOutput('share-create-output', r.data, r.ok ? null : `HTTP ${r.status}`);
+        }catch(e){
+            showOutput('share-create-output', null, e.message);
+        }
+    }
+
+    async function doListOutgoing(){
+        try{
+            const r = await apiFetch('/api/authenticated/shares/outgoing');
+            showOutput('shares-list-output', r.data, r.ok ? null : `HTTP ${r.status}`);
+        }catch(e){
+            showOutput('shares-list-output', null, e.message);
+        }
+    }
+
+    async function doListIncoming(){
+        try{
+            const r = await apiFetch('/api/authenticated/shares/incoming');
+            showOutput('shares-list-output', r.data, r.ok ? null : `HTTP ${r.status}`);
+        }catch(e){
+            showOutput('shares-list-output', null, e.message);
+        }
+    }
+
+    // ===== FEDERATION / WEBFINGER =====
+    async function doWebFinger(){
+        const address = document.getElementById('wf-address').value.trim();
+        // Expect @username:domain
+        const match = address.match(/^@?([^:]+):(.+)$/);
+        if(!match){
+            showOutput('wf-output', null, 'Format must be @username:domain or username:domain');
+            return;
+        }
+        const [, username, domain] = match;
+        const resource = `archypix:@${username}:${domain}`;
+        const resolverUrl = getResolver();
+        const url = `${resolverUrl}/.well-known/webfinger?resource=${encodeURIComponent(resource)}`;
+        try{
+            showOutput('wf-output', `Querying: ${url}`);
+            const res = await fetch(url);
+            let data;
+            try{
+                data = await res.json();
+            }catch{
+                data = await res.text();
+            }
+            showOutput('wf-output', data, res.ok ? null : `HTTP ${res.status}`);
+        }catch(e){
+            showOutput('wf-output', null, e.message);
+        }
+    }
+
+    // ===== PUBLIC PROFILE =====
+    async function doGetProfile(){
+        const username = document.getElementById('profile-username').value.trim();
+        if(!username){
+            showOutput('profile-output', null, 'Enter a username.');
+            return;
+        }
+        try{
+            const r = await apiFetch(`/api/public/users/${username}`, {}, false);
+            showOutput('profile-output', r.data, r.ok ? null : `HTTP ${r.status}`);
+        }catch(e){
+            showOutput('profile-output', null, e.message);
+        }
+    }
+
+    // ===== BOOT =====
+    init();
+</script>
+</body>
+</html>

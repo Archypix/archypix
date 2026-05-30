@@ -6,3 +6,4 @@ pub mod share;
 pub mod tag;
 pub mod tagging;
 pub mod user;
+pub mod user_settings;

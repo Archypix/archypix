@@ -1,12 +1,14 @@
+use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use tracing::warn;
 
 pub enum AppError {
     NotFound,
     Unauthorized,
     BadRequest(String),
+    ServiceUnavailable(String),
+    BackendError(u16, String),
     Internal(anyhow::Error),
 }
 
@@ -16,6 +18,12 @@ impl IntoResponse for AppError {
             AppError::NotFound => (StatusCode::NOT_FOUND, "User not found".to_string()),
             AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized".to_string()),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
+            AppError::ServiceUnavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg),
+            AppError::BackendError(status_code, msg) => {
+                let status =
+                    StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+                return (status, Json(serde_json::json!({ "error": msg }))).into_response();
+            }
             AppError::Internal(err) => {
                 warn!("Internal error: {:?}", err);
                 (

@@ -22,11 +22,13 @@ pub struct Config {
     pub s3_secret_key: String,
     pub s3_region: String,
     pub s3_bucket_staging: String,
-    pub s3_bucket_originals: String,
+    pub s3_bucket_pictures: String,
+    pub s3_bucket_versions: String,
     pub s3_bucket_small: String,
     pub s3_bucket_medium: String,
     pub s3_bucket_large: String,
     pub s3_presign_ttl_secs: u64,
+    pub s3_presign_cache_margin_secs: u64,
 }
 
 impl Config {
@@ -56,15 +58,18 @@ impl Config {
             s3_secret_key: require_env("S3_SECRET_KEY")?,
             s3_region: env("S3_REGION", "us-east-1".to_string()),
             s3_bucket_staging: require_env("S3_BUCKET_STAGING")?,
-            s3_bucket_originals: require_env("S3_BUCKET_ORIGINALS")?,
+            s3_bucket_pictures: require_env("S3_BUCKET_PICTURES")?,
+            s3_bucket_versions: require_env("S3_BUCKET_VERSIONS")?,
             s3_bucket_small: require_env("S3_BUCKET_SMALL")?,
             s3_bucket_medium: require_env("S3_BUCKET_MEDIUM")?,
             s3_bucket_large: require_env("S3_BUCKET_LARGE")?,
             s3_presign_ttl_secs: env_u64("S3_PRESIGN_TTL_SECS", 300)?,
+            s3_presign_cache_margin_secs: env_u64("S3_PRESIGN_CACHE_MARGIN_SECS", 600)?,
         };
 
         let storage_buckets = [
-            &config.s3_bucket_originals,
+            &config.s3_bucket_pictures,
+            &config.s3_bucket_versions,
             &config.s3_bucket_small,
             &config.s3_bucket_medium,
             &config.s3_bucket_large,
@@ -72,7 +77,7 @@ impl Config {
         if storage_buckets.contains(&&config.s3_bucket_staging) {
             return Err(anyhow::anyhow!(
                 "S3_BUCKET_STAGING must be different from all other bucket names \
-                 (originals/small/medium/large) — it has a an expiration rule applied at startup."
+                 (pictures/versions/small/medium/large) — it has an expiration rule applied at startup."
             ));
         }
 

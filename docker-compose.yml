@@ -1,0 +1,148 @@
+# Archypix production stack
+#
+# Resolver:  archypix.com         → port 8080
+# Backend 1: backend1.archypix.com → port 8001
+# Backend 2: backend2.archypix.com → port 8002
+#
+# Both backends share the same resolver (archypix.com).
+# For TLS, put nginx or Caddy in front and proxy each domain to its port.
+#
+# For local testing without a reverse proxy, add to /etc/hosts:
+#   127.0.0.1  archypix.com  backend1.archypix.com  backend2.archypix.com
+#
+# Secrets: set JWT_SECRET, RESOLVER_ADMIN_SECRET via environment or a .env file.
+# Do NOT use the placeholder values below in production.
+#
+# Usage:
+#   docker compose up --build
+
+services:
+  resolver:
+    build: ./resolver
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: postgres://archypix:archypix@postgres/archypix_resolver
+      MANAGED_DOMAIN: archypix.com
+      RESOLVER_ADMIN_SECRET: ${RESOLVER_ADMIN_SECRET:-change-me-in-production}
+      LISTEN_ADDR: 0.0.0.0:8080
+      RUST_LOG: info
+    depends_on:
+      - postgres
+
+  backend1:
+    build: ./back
+    ports:
+      - "8001:8000"
+    environment:
+      LISTEN_ADDR: 0.0.0.0:8000
+      USE_RESOLVER: "true"
+      HOST: backend1.archypix.com
+      PUBLIC_BASE_URL: https://backend1.archypix.com
+      WEBFINGER_HOST: archypix.com
+      RESOLVER_URL: http://resolver:8080
+      RESOLVER_ADMIN_SECRET: ${RESOLVER_ADMIN_SECRET:-change-me-in-production}
+      JWT_SECRET: ${JWT_SECRET_BACKEND1:-change-me-in-production}
+      DATABASE_URL: postgres://archypix:archypix@postgres/archypix_back1
+      REDIS_URL: redis://default:archypix@redis:6379/0
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-archypix}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-archypix}
+      S3_REGION: us-east-1
+      S3_BUCKET_STAGING: b1-archypix-staging
+      S3_BUCKET_PICTURES: b1-archypix-pictures
+      S3_BUCKET_VERSIONS: b1-archypix-versions
+      S3_BUCKET_SMALL: b1-archypix-small
+      S3_BUCKET_MEDIUM: b1-archypix-medium
+      S3_BUCKET_LARGE: b1-archypix-large
+      S3_PRESIGN_TTL_SECS: "3600"
+      S3_PRESIGN_CACHE_MARGIN_SECS: "600"
+      FRONT_URL: https://archypix.com
+      FEDERATION_SCHEME: https
+      ACCESS_TOKEN_TTL_SECS: "900"
+      REFRESH_TOKEN_TTL_SECS: "2592000"
+      FEDERATION_JWT_TTL_SECS: "900"
+      FEDERATION_BACKEND_CACHE_TTL_SECS: "3600"
+      FEDERATION_REQUEST_TIMEOUT_MS: "5000"
+      SQLX_OFFLINE: "false"
+      RUST_LOG: info
+    depends_on:
+      - postgres
+      - redis
+      - minio
+      - resolver
+
+  backend2:
+    build: ./back
+    ports:
+      - "8002:8000"
+    environment:
+      LISTEN_ADDR: 0.0.0.0:8000
+      USE_RESOLVER: "true"
+      HOST: backend2.archypix.com
+      PUBLIC_BASE_URL: https://backend2.archypix.com
+      WEBFINGER_HOST: archypix.com
+      RESOLVER_URL: http://resolver:8080
+      RESOLVER_ADMIN_SECRET: ${RESOLVER_ADMIN_SECRET:-change-me-in-production}
+      JWT_SECRET: ${JWT_SECRET_BACKEND2:-change-me-in-production}
+      DATABASE_URL: postgres://archypix:archypix@postgres/archypix_back2
+      REDIS_URL: redis://default:archypix@redis:6379/1
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-archypix}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-archypix}
+      S3_REGION: us-east-1
+      S3_BUCKET_STAGING: b2-archypix-staging
+      S3_BUCKET_PICTURES: b2-archypix-pictures
+      S3_BUCKET_VERSIONS: b2-archypix-versions
+      S3_BUCKET_SMALL: b2-archypix-small
+      S3_BUCKET_MEDIUM: b2-archypix-medium
+      S3_BUCKET_LARGE: b2-archypix-large
+      S3_PRESIGN_TTL_SECS: "3600"
+      S3_PRESIGN_CACHE_MARGIN_SECS: "600"
+      FRONT_URL: https://archypix.com
+      FEDERATION_SCHEME: https
+      ACCESS_TOKEN_TTL_SECS: "900"
+      REFRESH_TOKEN_TTL_SECS: "2592000"
+      FEDERATION_JWT_TTL_SECS: "900"
+      FEDERATION_BACKEND_CACHE_TTL_SECS: "3600"
+      FEDERATION_REQUEST_TIMEOUT_MS: "5000"
+      SQLX_OFFLINE: "false"
+      RUST_LOG: info
+    depends_on:
+      - postgres
+      - redis
+      - minio
+      - resolver
+
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: archypix_resolver
+      POSTGRES_USER: archypix
+      POSTGRES_PASSWORD: archypix
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres-init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  redis:
+    image: redis:latest
+    command: redis-server --requirepass archypix --appendonly yes
+    volumes:
+      - redis_data:/data
+
+  minio:
+    image: minio/minio:latest
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-archypix}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-archypix}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    command: server /data --address :9000 --console-address :9001
+    volumes:
+      - minio_data:/data
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:

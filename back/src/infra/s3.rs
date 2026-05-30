@@ -12,6 +12,15 @@ use aws_sdk_s3::types::{
 use base64::Engine as _;
 use std::time::Duration;
 use tracing::{info, warn};
+use uuid::Uuid;
+
+pub fn picture_key(user_id: Uuid, picture_id: Uuid) -> String {
+    format!("{}/{}", user_id, picture_id)
+}
+
+pub fn version_key(user_id: Uuid, picture_id: Uuid, version_id: Uuid) -> String {
+    format!("{}/{}/{}", user_id, picture_id, version_id)
+}
 
 /// Thin wrapper around the S3 client that adds presigned URL helpers.
 #[derive(Clone)]
@@ -127,7 +136,8 @@ pub async fn connect(config: &Config) -> anyhow::Result<StorageClient> {
 
     let buckets = [
         config.s3_bucket_staging.as_str(),
-        config.s3_bucket_originals.as_str(),
+        config.s3_bucket_pictures.as_str(),
+        config.s3_bucket_versions.as_str(),
         config.s3_bucket_small.as_str(),
         config.s3_bucket_medium.as_str(),
         config.s3_bucket_large.as_str(),

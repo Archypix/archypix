@@ -4,15 +4,20 @@ mod error;
 mod handler;
 
 use crate::database::init_database;
-use crate::handler::{health_handler, update_handler, webfinger_handler};
+use crate::handler::{
+    health_handler, list_backends_handler, register_backend_handler, register_handler,
+    update_handler, webfinger_handler,
+};
 use axum::{
     Router,
+    http::HeaderValue,
     routing::{get, post},
 };
 use config::Config;
 use moka::future::Cache;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::time::Duration;
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
@@ -22,6 +27,7 @@ struct AppState {
     cache: Cache<String, String>,
     managed_domain: String,
     resolver_admin_secret: String,
+    reqwest_client: reqwest::Client,
 }
 
 #[tokio::main]
@@ -60,19 +66,44 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Initialized in-memory cache");
 
+    // Initialize shared HTTP client
+    let reqwest_client = reqwest::Client::new();
+
     // Create application state
     let state = AppState {
         db: db_pool,
         managed_domain: config.managed_domain,
         cache,
         resolver_admin_secret: config.resolver_admin_secret,
+        reqwest_client,
     };
+
+    let allow_origin = if config.front_url == "*" {
+        tower_http::cors::AllowOrigin::any()
+    } else {
+        tower_http::cors::AllowOrigin::exact(
+            config
+                .front_url
+                .parse::<HeaderValue>()
+                .expect("FRONT_URL is not a valid origin"),
+        )
+    };
+    let cors = CorsLayer::new()
+        .allow_methods(Any)
+        .allow_origin(allow_origin)
+        .allow_headers(Any);
 
     // Build router
     let app = Router::new()
         .route("/.well-known/webfinger", get(webfinger_handler))
         .route("/api/update", post(update_handler))
+        .route("/api/register", post(register_handler))
+        .route(
+            "/api/backends",
+            post(register_backend_handler).get(list_backends_handler),
+        )
         .route("/health", get(health_handler))
+        .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 

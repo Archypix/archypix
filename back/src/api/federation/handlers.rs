@@ -5,6 +5,7 @@ use crate::api::federation::models::{
 use crate::api::middleware::auth_federation::AuthFederation;
 use crate::domain::share::ShareStatus;
 use crate::infra::error::AppError;
+use crate::infra::s3;
 use crate::repository::picture::PictureRepository;
 use crate::repository::share::{IncomingShareRepository, OutgoingShareRepository};
 use crate::repository::user::UserRepository;
@@ -159,9 +160,10 @@ pub async fn presign_picture(
         return Err(AppError::NotFound);
     }
 
+    let key = s3::picture_key(picture.local_user_id, picture.id);
     let url = state
         .storage
-        .presign_get(&state.config.s3_bucket_originals, &picture.s3_key_original)
+        .presign_get(&state.config.s3_bucket_pictures, &key)
         .await?;
     Ok(Json(serde_json::json!({ "url": url })))
 }

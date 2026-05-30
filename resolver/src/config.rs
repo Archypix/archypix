@@ -6,6 +6,7 @@ pub struct Config {
     pub listen_addr: String,
     pub cache_ttl_secs: u64,
     pub cache_max_capacity: u64,
+    pub front_url: String,
 }
 
 impl Config {
@@ -30,6 +31,7 @@ impl Config {
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(100_000),
+            front_url: std::env::var("FRONT_URL").unwrap_or_else(|_| "*".to_string()),
         })
     }
 }

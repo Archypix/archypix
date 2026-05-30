@@ -596,3 +596,58 @@ COMMENT ON FUNCTION get_pictures_under_tag IS 'Returns all non-deleted pictures 
 -- shared_tag_mapping: order=1, triggers=[incoming_share]
 -- rule: order=2, triggers=[incoming_share, ingest, metadata, manual_tag, rule_edit]
 -- segmentation: order=3, triggers=[incoming_share, ingest, metadata, manual_tag, rule_edit, segmentation_edit]
+
+-- ============================================================================
+-- PICTURES: remove stored S3 keys (keys derived from user_id + picture_id)
+-- ============================================================================
+ALTER TABLE pictures
+    DROP COLUMN s3_key_original;
+ALTER TABLE pictures
+    DROP COLUMN s3_key_small;
+ALTER TABLE pictures
+    DROP COLUMN s3_key_medium;
+ALTER TABLE pictures
+    DROP COLUMN s3_key_large;
+
+-- ============================================================================
+-- VERSIONING MODE
+-- ============================================================================
+CREATE TYPE versioning_mode AS ENUM ('none', 'original_copy', 'full_versioning');
+
+-- ============================================================================
+-- USER SETTINGS (one row per user, created lazily with defaults)
+-- ============================================================================
+CREATE TABLE user_settings
+(
+    user_id         UUID PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
+    versioning_mode versioning_mode NOT NULL DEFAULT 'none',
+    created_at      TIMESTAMP       NOT NULL DEFAULT (now() at time zone 'utc'),
+    updated_at      TIMESTAMP       NOT NULL DEFAULT (now() at time zone 'utc')
+);
+
+CREATE TRIGGER update_user_settings_updated_at
+    BEFORE UPDATE
+    ON user_settings
+    FOR EACH ROW
+EXECUTE FUNCTION update_updated_at_column();
+
+COMMENT ON TABLE user_settings IS 'Per-user preferences; created on first access with defaults';
+
+-- ============================================================================
+-- PICTURE VERSIONS
+-- ============================================================================
+CREATE TABLE picture_versions
+(
+    id             UUID PRIMARY KEY   DEFAULT uuid_generate_v4(),
+    picture_id     UUID      NOT NULL REFERENCES pictures (id) ON DELETE CASCADE,
+    version_number INT       NOT NULL,
+    file_size      BIGINT,
+    mime_type      VARCHAR(100),
+    created_at     TIMESTAMP NOT NULL DEFAULT (now() at time zone 'utc'),
+
+    CONSTRAINT uq_picture_version UNIQUE (picture_id, version_number)
+);
+
+CREATE INDEX idx_picture_versions_picture ON picture_versions (picture_id);
+
+COMMENT ON TABLE picture_versions IS 'Versioned snapshots of picture files in archypix-versions bucket; keyed by {user_id}/{picture_id}/{version_id}';

@@ -18,3 +18,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy = "0.15"
 jsonwebtoken = "9.3"
 chrono = { version = "0.4.44", features = ["serde"] }
+reqwest = { version = "0.12", features = ["json"] }
+uuid = { version = "1", features = ["v4"] }

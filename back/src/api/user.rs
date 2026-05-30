@@ -1,5 +1,6 @@
 mod auth;
 mod pictures;
+mod settings;
 mod shares;
 mod tags;
 mod users;
@@ -31,8 +32,9 @@ pub fn authenticated_routes() -> Router<AppState> {
             post(pictures::complete_upload),
         )
         .route("/pictures", get(pictures::list))
-        .route("/pictures/{id}", get(pictures::get))
-        .route("/pictures/{id}/download", get(pictures::download))
+        .route("/pictures/{id}", get(pictures::details))
+        .route("/settings", get(settings::get_settings))
+        .route("/settings", patch(settings::update_settings))
         .route(
             "/tags",
             get(tags::list).post(tags::assign).delete(tags::remove),

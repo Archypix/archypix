@@ -1,0 +1,91 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO picture_versions (picture_id, version_number, file_size, mime_type)\n               VALUES ($1, $2, $3, $4)\n               RETURNING id, picture_id, version_number, file_size, mime_type, created_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "picture_versions",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "picture_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "picture_versions",
+            "name": "picture_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "version_number",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "picture_versions",
+            "name": "version_number"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "file_size",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "picture_versions",
+            "name": "file_size"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "mime_type",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "picture_versions",
+            "name": "mime_type"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at",
+        "type_info": "Timestamp",
+        "origin": {
+          "Table": {
+            "table": "picture_versions",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int8",
+        "Varchar"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "a2b785efe9646a61ea365ae7bd320d5fb88cc80fc3fa3dd39fec286c3c91df73"
+}

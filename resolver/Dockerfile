@@ -1,5 +1,5 @@
 # Multi-stage build for Archypix Resolver
-FROM rust:1.84-slim AS builder
+FROM rust:1.96-slim AS builder
 
 WORKDIR /app
 
@@ -53,3 +53,12 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 
 # Run the binary
 CMD ["archypix-resolver"]
+
+# ---- dev (source mounted at runtime, cargo run on start) ----
+# Usage: build with --target dev, mount ./src, Cargo.toml, Cargo.lock as volumes.
+# Named volume on /app/target persists compiled deps across restarts.
+FROM rust:1.96-slim AS dev
+WORKDIR /app
+RUN apt-get update && apt-get install -y pkg-config libssl-dev curl && rm -rf /var/lib/apt/lists/*
+EXPOSE 8080
+CMD ["cargo", "run"]

@@ -1,10 +1,12 @@
 use crate::api::middleware::auth_user::AuthUser;
+use crate::domain::picture::Picture;
 use crate::infra::error::AppError;
-use crate::repository::picture::PictureRepository;
+use crate::repository::picture_version::PictureVersionRepository;
 use crate::services;
+use crate::services::pictures::{PictureListParams, PictureListResult, UploadMetadata};
 use crate::state::AppState;
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -15,7 +17,7 @@ pub struct CreateUploadRequest {
 
 #[derive(Debug, Serialize)]
 pub struct CreateUploadResponse {
-    pub upload_id: String,
+    pub picture_id: Uuid,
     pub presigned_url: String,
 }
 
@@ -24,7 +26,7 @@ pub async fn create_upload(
     State(state): State<AppState>,
     Json(payload): Json<CreateUploadRequest>,
 ) -> Result<Json<CreateUploadResponse>, AppError> {
-    let (upload_id, presigned_url) = services::pictures::begin_upload(
+    let (picture_id, presigned_url) = services::pictures::begin_upload(
         &state.redis,
         &state.storage,
         &state.config,
@@ -33,7 +35,7 @@ pub async fn create_upload(
     )
     .await?;
     Ok(Json(CreateUploadResponse {
-        upload_id,
+        picture_id,
         presigned_url,
     }))
 }
@@ -41,48 +43,46 @@ pub async fn create_upload(
 pub async fn complete_upload(
     auth: AuthUser,
     State(state): State<AppState>,
-    Path(upload_id): Path<String>,
-) -> Result<Json<serde_json::Value>, AppError> {
+    Path(picture_id): Path<Uuid>,
+    Json(meta): Json<UploadMetadata>,
+) -> Result<Json<Picture>, AppError> {
     let picture = services::pictures::complete_upload(
         &state.db,
         &state.redis,
         &state.storage,
         &state.config,
         auth.user_id()?,
-        &upload_id,
+        picture_id,
+        meta,
     )
     .await?;
-    Ok(Json(serde_json::json!({
-        "id": picture.id,
-        "filename": picture.filename,
-        "s3_key_original": picture.s3_key_original,
-    })))
+    Ok(Json(picture))
 }
 
 pub async fn list(
     auth: AuthUser,
     State(state): State<AppState>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let pictures = PictureRepository::list_by_user(&state.db, auth.user_id()?).await?;
-    let items: Vec<_> = pictures
-        .into_iter()
-        .map(|p| {
-            serde_json::json!({
-                "id": p.id,
-                "filename": p.filename,
-                "captured_at": p.captured_at,
-                "ingested_at": p.ingested_at,
-            })
-        })
-        .collect();
-    Ok(Json(serde_json::json!({ "items": items })))
+    Query(params): Query<PictureListParams>,
+) -> Result<Json<PictureListResult>, AppError> {
+    let result = services::pictures::list_pictures(
+        &state.db,
+        &state.redis,
+        &state.storage,
+        &state.config,
+        auth.user_id()?,
+        params,
+    )
+    .await?;
+    Ok(Json(result))
 }
 
-pub async fn get(
+pub async fn details(
     auth: AuthUser,
     State(state): State<AppState>,
     Path(picture_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    use crate::repository::picture::PictureRepository;
+
     let picture = PictureRepository::find_by_id(&state.db, picture_id)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -90,36 +90,21 @@ pub async fn get(
     if picture.local_user_id != auth.user_id()? {
         return Err(AppError::NotFound);
     }
+
+    let versions = PictureVersionRepository::list_by_picture(&state.db, picture_id).await?;
 
     Ok(Json(serde_json::json!({
         "id": picture.id,
         "filename": picture.filename,
         "mime_type": picture.mime_type,
+        "file_size": picture.file_size,
         "width": picture.width,
         "height": picture.height,
         "captured_at": picture.captured_at,
         "ingested_at": picture.ingested_at,
+        "updated_at": picture.updated_at,
         "owner_username": picture.owner_username,
         "owner_instance_domain": picture.owner_instance_domain,
+        "versions": versions,
     })))
-}
-
-pub async fn download(
-    auth: AuthUser,
-    State(state): State<AppState>,
-    Path(picture_id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>, AppError> {
-    let picture = PictureRepository::find_by_id(&state.db, picture_id)
-        .await?
-        .ok_or(AppError::NotFound)?;
-
-    if picture.local_user_id != auth.user_id()? {
-        return Err(AppError::NotFound);
-    }
-
-    let url = state
-        .storage
-        .presign_get(&state.config.s3_bucket_originals, &picture.s3_key_original)
-        .await?;
-    Ok(Json(serde_json::json!({ "url": url })))
 }

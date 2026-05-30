@@ -26,9 +26,19 @@ pub fn routes(config: &Config) -> Router<AppState> {
 }
 
 fn api_routes(config: &Config) -> Router<AppState> {
+    let allow_origin = if config.front_url == "*" {
+        tower_http::cors::AllowOrigin::any()
+    } else {
+        tower_http::cors::AllowOrigin::exact(
+            config
+                .front_url
+                .parse::<HeaderValue>()
+                .expect("FRONT_URL is not a valid origin"),
+        )
+    };
     let cors = CorsLayer::new()
         .allow_methods(Any)
-        .allow_origin(config.front_url.parse::<HeaderValue>().unwrap())
+        .allow_origin(allow_origin)
         .allow_headers([AUTHORIZATION, CONTENT_TYPE]);
 
     Router::new()

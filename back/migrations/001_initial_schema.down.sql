@@ -2,6 +2,8 @@
 -- DROP ALL TABLES AND TYPES
 -- ============================================================================
 
+DROP TABLE IF EXISTS picture_versions CASCADE;
+DROP TABLE IF EXISTS user_settings CASCADE;
 DROP TABLE IF EXISTS federation_messages CASCADE;
 DROP TABLE IF EXISTS jobs CASCADE;
 DROP TABLE IF EXISTS hierarchies CASCADE;
@@ -26,3 +28,4 @@ DROP TYPE IF EXISTS federation_direction;
 DROP TYPE IF EXISTS federation_status;
 DROP TYPE IF EXISTS safe_delete_mode;
 DROP TYPE IF EXISTS service_type;
+DROP TYPE IF EXISTS versioning_mode;
