@@ -19,12 +19,6 @@ pub async fn auth_request(
     State(state): State<AppState>,
     Json(payload): Json<FederationAuthRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    if !payload.callback_url.contains(&payload.requester_instance) {
-        return Err(AppError::BadRequest(
-            "Callback URL does not match requester instance".to_string(),
-        ));
-    }
-
     let token = state
         .federation
         .issue_federation_token(&payload.requester_instance)?;
@@ -33,12 +27,13 @@ pub async fn auth_request(
     state
         .federation
         .send_auth_grant(
-            &payload.callback_url,
+            &payload.use_https,
+            &payload.requester_instance,
             &FederationAuthGrant {
                 issuer_instance: state.config.host.clone(),
                 token,
                 expires_at,
-                scope: payload.scope,
+                scope: "federation".to_string(),
                 nonce: payload.nonce,
             },
         )
@@ -63,13 +58,24 @@ pub async fn auth_grant(
 }
 
 pub async fn announce_share(
-    _auth: AuthFederation,
+    auth: AuthFederation,
     State(state): State<AppState>,
     Json(payload): Json<ShareAnnouncement>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let recipient = UserRepository::find_by_username(&state.db, &payload.recipient_username)
         .await?
         .ok_or(AppError::NotFound)?;
+
+    if payload.recipient_instance != state.config.webfinger_host {
+        return Err(AppError::BadRequest(
+            "Invalid recipient instance".to_string(),
+        ));
+    }
+    if payload.sender_instance != auth.claims.sub {
+        return Err(AppError::Unauthorized(
+            "Sender instance does not match authenticated instance".to_string(),
+        ));
+    }
 
     let incoming = IncomingShareRepository::create(
         &state.db,
@@ -88,12 +94,20 @@ pub async fn announce_share(
 }
 
 pub async fn revoke_share(
-    _auth: AuthFederation,
+    auth: AuthFederation,
     State(state): State<AppState>,
     Json(payload): Json<ShareRevokeRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let share = IncomingShareRepository::get_by_id(&state.db, payload.incoming_share_id).await?;
+    if share.sender_instance != auth.claims.sub {
+        return Err(AppError::Unauthorized(
+            "Sender instance does not match authenticated instance".to_string(),
+        ));
+    }
+
     IncomingShareRepository::set_status(&state.db, payload.incoming_share_id, ShareStatus::Revoked)
         .await?;
+
     Ok(Json(serde_json::json!({ "revoked": true })))
 }
 
@@ -102,6 +116,7 @@ pub async fn announce_pictures(
     _state: State<AppState>,
     Json(_payload): Json<PicturesAnnouncement>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    // TODO: Implement
     Ok(Json(serde_json::json!({ "accepted": true })))
 }
 

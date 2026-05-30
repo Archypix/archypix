@@ -1,10 +1,9 @@
-use crate::domain::auth::{JwtClaims, TokenType};
+use crate::api::middleware::auth_user::AuthUser;
+use crate::domain::auth::JwtClaims;
 use crate::infra::error::AppError;
 use crate::state::AppState;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
-
-use super::bearer_token;
 
 #[derive(Clone)]
 pub struct AuthAdmin {
@@ -18,18 +17,14 @@ impl FromRequestParts<AppState> for AuthAdmin {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let token = bearer_token(&parts.headers)?;
-        let claims = state.jwt.decode(&token, &state.config.host)?;
+        let auth_user = AuthUser::from_request_parts(parts, state).await?;
 
-        match claims.token_type {
-            TokenType::Admin | TokenType::User => {}
-            _ => return Err(AppError::Unauthorized("Invalid token type".to_string())),
-        }
-
-        if !claims.is_admin {
+        if !auth_user.claims.is_admin {
             return Err(AppError::Unauthorized("Admin access required".to_string()));
         }
 
-        Ok(AuthAdmin { claims })
+        Ok(AuthAdmin {
+            claims: auth_user.claims,
+        })
     }
 }

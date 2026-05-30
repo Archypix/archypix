@@ -1,10 +1,9 @@
+use super::bearer_token;
 use crate::domain::auth::{JwtClaims, TokenType};
 use crate::infra::error::AppError;
 use crate::state::AppState;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
-
-use super::bearer_token;
 
 #[derive(Clone)]
 pub struct AuthResolver {
@@ -18,6 +17,12 @@ impl FromRequestParts<AppState> for AuthResolver {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        if !state.config.use_resolver {
+            return Err(AppError::Unauthorized(
+                "Resolver is disabled on this backend instance. Set USE_RESOLVER=true and RESOLVER_ADMIN_SECRET to use a resolver.".to_string(),
+            ));
+        }
+
         let token = bearer_token(&parts.headers)?;
         let claims = state.resolver.verify_token(&token)?;
 

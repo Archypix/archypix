@@ -177,9 +177,15 @@ impl FederationClient {
     /// Send the federation token grant to the requester's callback URL.
     pub async fn send_auth_grant(
         &self,
-        callback_url: &str,
+        use_https: &bool,
+        requester_instance: &str,
         grant: &FederationAuthGrant,
     ) -> Result<(), AppError> {
+        let protocol = if *use_https { "https" } else { "http" };
+        let callback_url = format!(
+            "{}://{}/api/federation/auth/grant",
+            protocol, requester_instance
+        );
         let resp = self
             .http
             .post(callback_url)

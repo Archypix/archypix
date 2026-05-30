@@ -6,6 +6,10 @@ back/target
 back/.env
 back/Cargo.lock
 
+fed-test/Cargo.lock
+fed-test/target
+fed-test/.env
+
 # Macos
 .DS_Store
 

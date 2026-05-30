@@ -80,16 +80,11 @@ async fn issue_tokens(
     config: &Config,
     user: &User,
 ) -> Result<AuthTokens, AppError> {
-    let token_type = if user.is_admin {
-        TokenType::Admin
-    } else {
-        TokenType::User
-    };
     let access_token = jwt.issue(
         &user.username,
         Some(user.id),
         &config.host,
-        token_type,
+        TokenType::User,
         user.is_admin,
         &config.host,
         config.access_token_ttl_secs,

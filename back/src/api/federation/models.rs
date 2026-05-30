@@ -7,15 +7,13 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 pub struct FederationAuthRequest {
     pub requester_instance: String,
-    pub callback_url: String,
-    pub scope: String,
+    pub use_https: bool,
     pub nonce: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ShareRevokeRequest {
     pub incoming_share_id: uuid::Uuid,
-    pub reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

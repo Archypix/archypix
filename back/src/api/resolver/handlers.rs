@@ -6,14 +6,12 @@ use crate::services;
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::{Path, State};
-use tracing::info;
 
 pub async fn get_user(
     _auth: AuthResolver,
     State(state): State<AppState>,
     Path(username): Path<String>,
 ) -> Result<Json<UserResponse>, AppError> {
-    info!("Resolver fetch user: {}", username);
     let user = UserRepository::find_by_username(&state.db, &username)
         .await?
         .ok_or(AppError::NotFound)?;

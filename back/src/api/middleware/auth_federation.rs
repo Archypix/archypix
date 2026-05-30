@@ -1,10 +1,9 @@
+use super::bearer_token;
 use crate::domain::auth::{JwtClaims, TokenType};
 use crate::infra::error::AppError;
 use crate::state::AppState;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
-
-use super::bearer_token;
 
 #[derive(Clone)]
 pub struct AuthFederation {

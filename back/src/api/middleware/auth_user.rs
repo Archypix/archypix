@@ -30,11 +30,9 @@ impl FromRequestParts<AppState> for AuthUser {
         let token = bearer_token(&parts.headers)?;
         let claims = state.jwt.decode(&token, &state.config.host)?;
 
-        match claims.token_type {
-            TokenType::User | TokenType::Admin => {}
-            _ => return Err(AppError::Unauthorized("Invalid token type".to_string())),
+        if claims.token_type != TokenType::User {
+            return Err(AppError::Unauthorized("Invalid token type".to_string()));
         }
-
         if claims.uid.is_none() {
             return Err(AppError::Unauthorized("Missing user id".to_string()));
         }

@@ -5,7 +5,6 @@ use uuid::Uuid;
 #[serde(rename_all = "lowercase")]
 pub enum TokenType {
     User,
-    Admin,
     Resolver,
     Federation,
 }

@@ -144,4 +144,20 @@ impl IncomingShareRepository {
         .map_err(map_sqlx_error)?;
         Ok(())
     }
+
+    pub async fn get_by_id<'e, E>(ex: E, share_id: Uuid) -> Result<IncomingShare, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query_as!(
+            IncomingShare,
+            r#"SELECT id, recipient_id, sender_username, sender_instance, outgoing_share_id,
+                      local_mapping_service_id, status as "status!: ShareStatus", created_at, revoked_at
+               FROM incoming_shares WHERE id = $1"#,
+            share_id
+        )
+            .fetch_one(ex)
+            .await
+            .map_err(map_sqlx_error)
+    }
 }
