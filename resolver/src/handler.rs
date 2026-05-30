@@ -149,14 +149,14 @@ pub async fn health_handler() -> impl IntoResponse {
 }
 
 fn parse_acct_resource(resource: &str, state: &AppState) -> Result<String, AppError> {
-    // Expected format: acct:username@domain or just username
-    if let Some(username) = resource.strip_prefix("acct:@") {
-        let mut iter = username.split(':');
+    // Expected format: archypix:@user:domain
+    if let Some(rest) = resource.strip_prefix("archypix:@") {
+        let mut iter = rest.split(':');
         let user = iter.next().ok_or(AppError::BadRequest(
-            "Invalid account format. Excepted acct:@user:domain".to_string(),
+            "Invalid resource format. Expected archypix:@user:domain".to_string(),
         ))?;
         let domain = iter.next().ok_or(AppError::BadRequest(
-            "Invalid account format Excepted acct:@user:domain".to_string(),
+            "Invalid resource format. Expected archypix:@user:domain".to_string(),
         ))?;
 
         if domain != state.managed_domain {
@@ -166,7 +166,7 @@ fn parse_acct_resource(resource: &str, state: &AppState) -> Result<String, AppEr
         return Ok(user.to_string());
     }
     Err(AppError::BadRequest(
-        "Invalid account forma Excepted acct:@user:domain".to_string(),
+        "Invalid resource format. Expected archypix:@user:domain".to_string(),
     ))
 }
 
@@ -176,7 +176,7 @@ fn build_webfinger_response(
     managed_domain: &str,
 ) -> WebFingerResponse {
     WebFingerResponse {
-        subject: format!("acct:@{}:{}", username, managed_domain),
+        subject: format!("archypix:@{}:{}", username, managed_domain),
         links: vec![WebFingerLink {
             rel: "backend_url".to_string(),
             href: backend_url.to_string(),

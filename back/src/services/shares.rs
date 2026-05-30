@@ -30,16 +30,15 @@ pub async fn create_outgoing_share(
     )
     .await?;
 
-    let backend_domain = federation
-        .resolve_backend_domain(recipient_username, recipient_instance)
-        .await?;
+    // `recipient_instance` is the global (WebFinger) domain; backend resolution happens inside.
     let token = federation
-        .get_or_wait_federation_token(&backend_domain)
+        .get_or_wait_federation_token(sender_username, recipient_username, recipient_instance)
         .await?;
 
     federation
         .announce_share(
-            &backend_domain,
+            recipient_username,
+            recipient_instance,
             &token,
             &ShareAnnouncement {
                 sender_username: sender_username.to_string(),

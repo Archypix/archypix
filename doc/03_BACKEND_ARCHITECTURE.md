@@ -142,20 +142,20 @@ back/src/
 
 ## D) What belongs where — decision guide
 
-| Code                                  | Layer                           | Reasoning                                                  |
-|---------------------------------------|---------------------------------|------------------------------------------------------------|
-| `TokenType`, `JwtClaims`              | `domain/auth.rs`                | Pure value types, no I/O                                   |
-| `TagPath` newtype + methods           | `domain/tag.rs`                 | Business invariants, pure                                  |
-| `OutgoingShare::would_loop_to()`      | `domain/share.rs`               | Domain rule, pure                                          |
-| Pipeline evaluator                    | `domain/tagging/pipeline.rs`    | Pure business logic, testable without I/O                  |
-| SQL queries                           | `repository/`                   | SQL only, no business logic                                |
-| WebFinger resolution, federation HTTP | `clients/federation.rs`         | Outbound HTTP adapter                                      |
-| Login/refresh workflow                | `services/auth.rs`              | Multi-step: DB + crypto + token generation                 |
-| Upload workflow                       | `services/pictures.rs`          | Multi-step: Redis session + S3 presign + DB record         |
-| Share creation                        | `services/shares.rs`            | Multi-step: DB + federation announce                       |
-| JWT signing keys, argon2 hashing      | `infra/crypto.rs`               | Infrastructure crypto primitives                           |
-| S3 presigned URLs                     | `infra/s3.rs` → `StorageClient` | Infrastructure adapter                                     |
-| HTTP handler                          | `api/*/`                        | Thin: extract input → call service/repo → serialize output |
+| Code                                                 | Layer                           | Reasoning                                                  |
+|------------------------------------------------------|---------------------------------|------------------------------------------------------------|
+| `TokenType`, `JwtClaims`                             | `domain/auth.rs`                | Pure value types, no I/O                                   |
+| `TagPath` newtype + methods                          | `domain/tag.rs`                 | Business invariants, pure                                  |
+| `OutgoingShare::would_loop_to()`                     | `domain/share.rs`               | Domain rule, pure                                          |
+| Pipeline evaluator                                   | `domain/tagging/pipeline.rs`    | Pure business logic, testable without I/O                  |
+| SQL queries                                          | `repository/`                   | SQL only, no business logic                                |
+| WebFinger resolution + global→backend domain mapping | `clients/federation.rs`         | Outbound HTTP adapter; caches backend domains in Redis     |
+| Login/refresh workflow                               | `services/auth.rs`              | Multi-step: DB + crypto + token generation                 |
+| Upload workflow                                      | `services/pictures.rs`          | Multi-step: Redis session + S3 presign + DB record         |
+| Share creation                                       | `services/shares.rs`            | Multi-step: DB + federation announce                       |
+| JWT signing keys, argon2 hashing                     | `infra/crypto.rs`               | Infrastructure crypto primitives                           |
+| S3 presigned URLs                                    | `infra/s3.rs` → `StorageClient` | Infrastructure adapter                                     |
+| HTTP handler                                         | `api/*/`                        | Thin: extract input → call service/repo → serialize output |
 
 ---
 
@@ -215,44 +215,77 @@ The router is composed in `src/api.rs` (no `routes.rs` files).
 | Authenticated user endpoints | `/api/authenticated/*`         | User JWT                                | Main user API (pictures, tags, shares).                                    |
 | Federation endpoints         | `/api/federation/*`            | Federation JWT (pairwise)               | Cross-instance messaging.                                                  |
 
-## 2) JWT tokens
+## 2) Domain terminology
+
+Two domain concepts are used throughout the system:
+
+| Term               | Config field     | Example                | Description                                                                                                                                              |
+|--------------------|------------------|------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **Global domain**  | `WEBFINGER_HOST` | `example.com`          | Public identity domain. Used in `@user:example.com`, stored in JWTs, database, and all federation messages. Never changes from the user's perspective.   |
+| **Backend domain** | `HOST`           | `backend1.example.com` | Actual API server domain. Resolved at request time via WebFinger. Never stored persistently — it may change if users are migrated to a different server. |
+
+**Invariant:** all persistent storage (database fields, JWT claims) uses the **global domain**. The backend domain is derived from the global domain
+on demand via WebFinger and cached in Redis.
+
+---
+
+## 3) JWT tokens
 
 All auth types use JWT with a shared claim shape:
 
-| Claim               | Description                                         |
-|---------------------|-----------------------------------------------------|
-| `sub`               | Username (or service name for resolver/federation). |
-| `uid`               | User UUID (for user/admin tokens).                  |
-| `instance`          | Instance domain that issued the token.              |
-| `token_type`        | `user` \| `admin` \| `resolver` \| `federation`.    |
-| `is_admin`          | Boolean (true for admin tokens).                    |
-| `aud`               | Target backend instance domain.                     |
-| `exp`, `iat`, `jti` | Standard JWT lifecycle and replay protection.       |
+| Claim               | Description                                                                    |
+|---------------------|--------------------------------------------------------------------------------|
+| `sub`               | Username (for user/admin tokens) or global domain (for federation tokens).     |
+| `uid`               | User UUID (for user/admin tokens).                                             |
+| `instance`          | **Global (WebFinger) domain** of the issuing instance.                         |
+| `token_type`        | `user` \| `admin` \| `resolver` \| `federation`.                               |
+| `is_admin`          | Boolean (true for admin tokens).                                               |
+| `aud`               | **Backend domain** of the verifying instance (checked locally against `HOST`). |
+| `exp`, `iat`, `jti` | Standard JWT lifecycle and replay protection.                                  |
 
-## 3) Federation authentication protocol (pairwise JWT)
+The separation between `instance` (global domain) and `aud` (backend domain) means a token correctly identifies the issuing instance by its public
+identity while still being verifiable by the specific backend that received it.
+
+## 4) Federation authentication protocol (pairwise JWT)
 
 We use a pairwise token scheme: the **recipient instance** issues a JWT to the **requesting instance**.
+
+All domains in federation messages are **global (WebFinger) domains**. Backend domains are never included in federation messages — they are resolved
+via WebFinger at request time and cached in Redis.
 
 ### Handshake
 
 1. **Token request**  
-   `A -> B`: `POST /api/federation/auth/request`  
-   Body: `{ requester_instance, callback_url, scope, nonce }`
+   `A.backend -> B.backend`: `POST /api/federation/auth/request`  
+   Body: `{ requester_instance (A's global domain), username (a user on A, for B to resolve A's backend), scope, nonce }`
 
-2. **Token grant**  
-   `B -> A`: `POST <callback_url>` (A's `auth/grant` endpoint)  
-   Body: `{ issuer_instance, token, expires_at, scope, nonce }`
+2. **Backend resolution**  
+   B resolves A's backend domain: `WebFinger(username@A_global_domain)` → `A.backend_domain`  
+   (Result cached in Redis under `federation:backend:{username}@{A_global_domain}`.)
 
-3. **Usage**  
-   A stores the token in Redis and uses it for subsequent calls to B's federation endpoints.
+3. **Token grant**  
+   `B -> A.backend` (resolved via WebFinger): `POST /api/federation/auth/grant`  
+   Body: `{ issuer_instance (B's global domain), token, expires_at, scope, nonce }`
+
+4. **Usage**  
+   A stores the token in Redis under `federation:token:{B_global_domain}` and uses it for subsequent calls to B's federation endpoints.
+
+**JWT claim values for federation tokens:**
+
+| Claim      | Value                                   |
+|------------|-----------------------------------------|
+| `sub`      | Requester's global domain (A)           |
+| `instance` | Issuer's global domain (B)              |
+| `aud`      | Issuer's **backend** domain (B.backend) |
 
 **Notes:**
 
-- The grant is sent server-to-server to a callback on the requester's domain, ensuring only the real instance receives it.
+- The grant is sent server-to-server to A's resolved backend, ensuring only the real instance receives it.
 - Tokens are short-lived; re-requested as needed.
 - Token lifecycle is managed by `FederationClient` (resolve, cache, request, store).
+- Token cache is keyed by **global domain**, not backend domain.
 
-## 4) Middleware stack (Axum/Tower)
+## 5) Middleware stack (Axum/Tower)
 
 | Middleware  | Applies to                           | Purpose                                          |
 |-------------|--------------------------------------|--------------------------------------------------|
@@ -265,16 +298,16 @@ We use a pairwise token scheme: the **recipient instance** issues a JWT to the *
 | Rate limit  | Auth + federation + public endpoints | Abuse control (Redis-backed).                    |
 | Auth        | By route group                       | Enforce identity type.                           |
 
-## 5) Endpoint layout (initial set)
+## 6) Endpoint layout (initial set)
 
-### 5.1 Resolver endpoints
+### 6.1 Resolver endpoints
 
 | Method | Path                             | Description                                                  |
 |--------|----------------------------------|--------------------------------------------------------------|
 | `POST` | `/api/resolver/users`            | Create user on this backend (only when `USE_RESOLVER=true`). |
 | `GET`  | `/api/resolver/users/{username}` | Fetch user by username for resolver validation.              |
 
-### 5.2 Admin endpoints
+### 6.2 Admin endpoints
 
 | Method   | Path                    | Description                   |
 |----------|-------------------------|-------------------------------|
@@ -283,7 +316,7 @@ We use a pairwise token scheme: the **recipient instance** issues a JWT to the *
 | `PATCH`  | `/api/admin/users/{id}` | Suspend/restore, set role.    |
 | `DELETE` | `/api/admin/users/{id}` | Delete user.                  |
 
-### 5.3 Public/auth endpoints
+### 6.3 Public/auth endpoints
 
 | Method | Path                           | Description                                       |
 |--------|--------------------------------|---------------------------------------------------|
@@ -294,7 +327,7 @@ We use a pairwise token scheme: the **recipient instance** issues a JWT to the *
 | `GET`  | `/api/public/users/{username}` | Public profile lookup.                            |
 | `POST` | `/api/public/users`            | Register user (**only if `USE_RESOLVER=false`**). |
 
-### 5.4 Authenticated user endpoints (`/api/authenticated/*`)
+### 6.4 Authenticated user endpoints (`/api/authenticated/*`)
 
 **Users**
 
@@ -332,7 +365,7 @@ We use a pairwise token scheme: the **recipient instance** issues a JWT to the *
 | `POST` | `/api/authenticated/shares/incoming/{id}/accept` | Accept incoming share. |
 | `POST` | `/api/authenticated/shares/incoming/{id}/reject` | Reject incoming share. |
 
-### 5.5 Federation endpoints
+### 6.5 Federation endpoints
 
 | Method | Path                                | Description                                            |
 |--------|-------------------------------------|--------------------------------------------------------|
@@ -343,15 +376,15 @@ We use a pairwise token scheme: the **recipient instance** issues a JWT to the *
 | `POST` | `/api/federation/pictures/announce` | Announce pictures for an active share.                 |
 | `POST` | `/api/federation/pictures/presign`  | Request presigned URL from original owner backend.     |
 
-### 5.6 WebDAV
+### 6.6 WebDAV
 
 WebDAV runs on a separate route, e.g. `/dav/*`, and uses the same user JWT auth.
 
 ---
 
-## 6) Main flows
+## 7) Main flows
 
-### 6.1 User creation (with and without resolver)
+### 7.1 User creation (with and without resolver)
 
 ```mermaid
 sequenceDiagram
@@ -371,7 +404,7 @@ sequenceDiagram
     end
 ```
 
-### 6.2 Authentication and session flow
+### 7.2 Authentication and session flow
 
 ```mermaid
 sequenceDiagram
@@ -386,7 +419,7 @@ sequenceDiagram
     Backend -->> Client: new access_token
 ```
 
-### 6.3 Picture upload and tagging pipeline
+### 7.3 Picture upload and tagging pipeline
 
 ```mermaid
 sequenceDiagram
@@ -404,19 +437,29 @@ sequenceDiagram
     Backend -->> Client: 200 OK (picture available)
 ```
 
-### 6.4 Federation auth handshake
+### 7.4 Federation auth handshake
+
+All domains in federation messages are **global (WebFinger) domains**. Backend domains are never
+transmitted — they are resolved via WebFinger on each side and cached in Redis.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant A as a.com
-    participant B as b.com
-    A ->> B: POST /api/federation/auth/request
-    B ->> A: POST /api/federation/auth/grant (federation JWT)
-    A ->> B: POST /api/federation/shares/announce (Bearer federation JWT)
+   participant ABack as A backend (backend.a.com)
+   participant WebFingerB as B WebFinger (b.com)
+   participant BBack as B backend (backend.b.com)
+   participant WebFingerA as A WebFinger (a.com)
+   ABack ->> WebFingerB: GET /.well-known/webfinger?resource=archypix:@bob:b.com
+   WebFingerB -->> ABack: backend_url = backend.b.com
+   ABack ->> BBack: POST /api/federation/auth/request<br/>{ requester_instance: "a.com", username: "alice", scope, nonce }
+   BBack ->> WebFingerA: GET /.well-known/webfinger?resource=archypix:@alice:a.com
+   WebFingerA -->> BBack: backend_url = backend.a.com
+   BBack ->> ABack: POST /api/federation/auth/grant<br/>{ issuer_instance: "b.com", token, expires_at, scope, nonce }
+   Note over ABack: stores token under federation:token:b.com
+   ABack ->> BBack: POST /api/federation/shares/announce (Bearer token)
 ```
 
-### 6.5 Federation: share announcement and receipt
+### 7.5 Federation: share announcement and receipt
 
 ```mermaid
 sequenceDiagram
@@ -428,7 +471,7 @@ sequenceDiagram
     BobBackend -->> AliceBackend: 202 Accepted
 ```
 
-### 6.6 Federation: share revocation
+### 7.6 Federation: share revocation
 
 ```mermaid
 sequenceDiagram
@@ -444,7 +487,7 @@ sequenceDiagram
 
 ---
 
-## 7) WebDAV + storage behavior
+## 8) WebDAV + storage behavior
 
 - WebDAV lives under `/dav/*` and maps tags to virtual directories (see hierarchy spec).
 - For WebDAV clients, the backend **proxies** file downloads/uploads to MinIO when presigned URLs are not suitable.
@@ -452,15 +495,15 @@ sequenceDiagram
 
 ---
 
-## 8) Share consistency and deduplication (spec)
+## 9) Share consistency and deduplication (spec)
 
-### 8.1 Picture identity
+### 9.1 Picture identity
 
 - **Owned picture:** `local_user_id = owner`, `owner_username/owner_instance_domain = NULL`.
 - **Received picture:** `local_user_id = recipient`, `owner_username/owner_instance_domain = original owner`.
 - **Global identity:** `(owner_username, owner_instance_domain, picture_id)` for received pictures.
 
-### 8.2 Deduplication rules
+### 9.2 Deduplication rules
 
 When a share announcement includes picture IDs:
 
@@ -469,25 +512,25 @@ When a share announcement includes picture IDs:
 
 Idempotency at the federation message level is enforced via `federation_messages.idempotency_key`.
 
-### 8.3 Storage and access
+### 9.3 Storage and access
 
 - The original owner stores `s3_key` + `s3_bucket` in MinIO.
 - The receiving backend stores those values for reference only.
 - To access a remote file, the receiver calls `POST /api/federation/pictures/presign` on the owner's backend.
 
-### 8.4 Transitive sharing
+### 9.4 Transitive sharing
 
 Transitive shares **never** re-upload or re-host blobs. Announcements always reference the original owner identity and `picture_id`. Recipients fetch
 blobs directly from the original owner via presigned URLs.
 
-### 8.5 Loop prevention
+### 9.5 Loop prevention
 
 `OutgoingShare::would_loop_to(owner_instance)` detects when an announcement would loop back to the original owner. Checked before sending any
 federation announcement.
 
 ---
 
-## 9) Not-yet-developed items
+## 10) Not-yet-developed items
 
 1. Full tagging pipeline execution in `services/tagging.rs` (domain evaluators are ready in `domain/tagging/pipeline.rs`).
 2. Federation token storage rotation schedule and retry logic.

@@ -27,13 +27,13 @@ pub async fn auth_request(
     state
         .federation
         .send_auth_grant(
-            &payload.use_https,
+            &payload.username,
             &payload.requester_instance,
             &FederationAuthGrant {
-                issuer_instance: state.config.host.clone(),
+                issuer_instance: state.config.webfinger_host.clone(),
                 token,
                 expires_at,
-                scope: "federation".to_string(),
+                scope: payload.scope,
                 nonce: payload.nonce,
             },
         )

@@ -4,10 +4,15 @@ pub use crate::clients::federation::{FederationAuthGrant, ShareAnnouncement};
 use serde::Deserialize;
 
 /// Inbound request from a remote instance asking for a federation token.
+///
+/// `requester_instance` is the requester's global (WebFinger) domain.
+/// `username` is a user on the requester's instance; this instance uses it to
+/// resolve the requester's backend domain via WebFinger before sending the grant.
 #[derive(Debug, Deserialize)]
 pub struct FederationAuthRequest {
     pub requester_instance: String,
-    pub use_https: bool,
+    pub username: String,
+    pub scope: String,
     pub nonce: String,
 }
 
@@ -25,6 +30,7 @@ pub struct PicturesAnnouncement {
 #[derive(Debug, Deserialize)]
 pub struct PresignRequest {
     pub owner_username: String,
+    /// Global (WebFinger) domain of the owner's instance.
     pub owner_instance: String,
     pub picture_id: String,
     pub variant: Option<String>,

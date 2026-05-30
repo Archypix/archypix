@@ -3,6 +3,7 @@ mod federation;
 mod middleware;
 mod resolver;
 mod user;
+mod webfinger;
 
 use crate::infra::config::Config;
 use crate::state::AppState;
@@ -13,9 +14,15 @@ use axum::routing::get;
 use tower_http::cors::{Any, CorsLayer};
 
 pub fn routes(config: &Config) -> Router<AppState> {
-    Router::new()
+    let mut router = Router::new()
         .nest("/api", api_routes(config))
-        .route("/health", get(|| async { "OK" }))
+        .route("/health", get(|| async { "OK" }));
+
+    if !config.use_resolver {
+        router = router.route("/.well-known/webfinger", get(webfinger::handler));
+    }
+
+    router
 }
 
 fn api_routes(config: &Config) -> Router<AppState> {

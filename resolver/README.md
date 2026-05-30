@@ -53,19 +53,19 @@ CREATE TABLE IF NOT EXISTS user_mappings (
 
 ### WebFinger Discovery
 
-**GET** `/.well-known/webfinger?resource=acct:@username:domain`
+**GET** `/.well-known/webfinger?resource=archypix:@username:domain`
 
 Returns WebFinger response with links to the user's backend.
 
 Example:
 ```bash
-curl "http://localhost:8080/.well-known/webfinger?resource=acct:@alice:example.com"
+curl "http://localhost:8080/.well-known/webfinger?resource=archypix:@alice:example.com"
 ```
 
 Response:
 ```json
 {
-  "subject": "acct:alice@backend1.archypix.com",
+  "subject": "archypix:@alice:example.com",
   "links": [
     {
       "rel": "backend_url",
