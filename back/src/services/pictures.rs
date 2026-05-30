@@ -19,22 +19,22 @@ pub async fn begin_upload(
     }
 
     let upload_id = Uuid::new_v4().to_string();
-    let s3_key = format!("originals/{}/{}", user_id, upload_id);
+    let s3_key_staging = format!("staging/{}/{}", user_id, upload_id);
 
     let presigned_url = storage
-        .presign_put(&config.s3_bucket_originals, &s3_key)
+        .presign_put(&config.s3_bucket_staging, &s3_key_staging)
         .await?;
 
     let session = UploadSession {
         user_id,
-        s3_key_original: s3_key,
+        s3_key_staging,
         filename: filename.to_string(),
     };
     redis
         .set_json_ex(
             &upload_session_key(&upload_id),
             &session,
-            config.s3_presign_ttl_secs,
+            config.s3_presign_ttl_secs + 60,
         )
         .await?;
 
@@ -44,6 +44,8 @@ pub async fn begin_upload(
 pub async fn complete_upload(
     db: &PgPool,
     redis: &RedisClient,
+    storage: &StorageClient,
+    config: &Config,
     user_id: Uuid,
     upload_id: &str,
 ) -> Result<Picture, AppError> {
@@ -59,10 +61,23 @@ pub async fn complete_upload(
         ));
     }
 
+    let s3_key_original = format!("originals/{}/{}", session.user_id, upload_id);
+    storage
+        .copy_object(
+            &config.s3_bucket_staging,
+            &session.s3_key_staging,
+            &config.s3_bucket_originals,
+            &s3_key_original,
+        )
+        .await?;
+    storage
+        .delete_object(&config.s3_bucket_staging, &session.s3_key_staging)
+        .await?;
+
     let picture = PictureRepository::create(
         db,
         session.user_id,
-        &session.s3_key_original,
+        &s3_key_original,
         Some(&session.filename),
     )
     .await?;

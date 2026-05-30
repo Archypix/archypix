@@ -135,27 +135,27 @@ back/src/
     crypto.rs          # JwtService, hash_password(), verify_password(),
                        # generate_refresh_token(), hash_refresh_token()
     db.rs              # connect(), run_migrations()
-    s3.rs              # StorageClient (presign_get/put), connect()
+    s3.rs              # StorageClient (presign_get/put/copy/delete), connect(), bucket + lifecycle setup
 ```
 
 ---
 
 ## D) What belongs where — decision guide
 
-| Code                                                 | Layer                           | Reasoning                                                  |
-|------------------------------------------------------|---------------------------------|------------------------------------------------------------|
-| `TokenType`, `JwtClaims`                             | `domain/auth.rs`                | Pure value types, no I/O                                   |
-| `TagPath` newtype + methods                          | `domain/tag.rs`                 | Business invariants, pure                                  |
-| `OutgoingShare::would_loop_to()`                     | `domain/share.rs`               | Domain rule, pure                                          |
-| Pipeline evaluator                                   | `domain/tagging/pipeline.rs`    | Pure business logic, testable without I/O                  |
-| SQL queries                                          | `repository/`                   | SQL only, no business logic                                |
-| WebFinger resolution + global→backend domain mapping | `clients/federation.rs`         | Outbound HTTP adapter; caches backend domains in Redis     |
-| Login/refresh workflow                               | `services/auth.rs`              | Multi-step: DB + crypto + token generation                 |
-| Upload workflow                                      | `services/pictures.rs`          | Multi-step: Redis session + S3 presign + DB record         |
-| Share creation                                       | `services/shares.rs`            | Multi-step: DB + federation announce                       |
-| JWT signing keys, argon2 hashing                     | `infra/crypto.rs`               | Infrastructure crypto primitives                           |
-| S3 presigned URLs                                    | `infra/s3.rs` → `StorageClient` | Infrastructure adapter                                     |
-| HTTP handler                                         | `api/*/`                        | Thin: extract input → call service/repo → serialize output |
+| Code                                                 | Layer                           | Reasoning                                                                                    |
+|------------------------------------------------------|---------------------------------|----------------------------------------------------------------------------------------------|
+| `TokenType`, `JwtClaims`                             | `domain/auth.rs`                | Pure value types, no I/O                                                                     |
+| `TagPath` newtype + methods                          | `domain/tag.rs`                 | Business invariants, pure                                                                    |
+| `OutgoingShare::would_loop_to()`                     | `domain/share.rs`               | Domain rule, pure                                                                            |
+| Pipeline evaluator                                   | `domain/tagging/pipeline.rs`    | Pure business logic, testable without I/O                                                    |
+| SQL queries                                          | `repository/`                   | SQL only, no business logic                                                                  |
+| WebFinger resolution + global→backend domain mapping | `clients/federation.rs`         | Outbound HTTP adapter; caches backend domains in Redis                                       |
+| Login/refresh workflow                               | `services/auth.rs`              | Multi-step: DB + crypto + token generation                                                   |
+| Upload workflow                                      | `services/pictures.rs`          | Multi-step: Redis session + S3 presign (staging) + server-side copy to originals + DB record |
+| Share creation                                       | `services/shares.rs`            | Multi-step: DB + federation announce                                                         |
+| JWT signing keys, argon2 hashing                     | `infra/crypto.rs`               | Infrastructure crypto primitives                                                             |
+| S3 presigned URLs                                    | `infra/s3.rs` → `StorageClient` | Infrastructure adapter                                                                       |
+| HTTP handler                                         | `api/*/`                        | Thin: extract input → call service/repo → serialize output                                   |
 
 ---
 
@@ -421,6 +421,11 @@ sequenceDiagram
 
 ### 7.3 Picture upload and tagging pipeline
 
+Uploads use a two-bucket staging pattern to prevent orphaned objects in the originals bucket:
+the client uploads to a short-lived staging bucket, then `complete_upload` performs a server-side
+copy to the originals bucket and deletes the staging object. Staging objects that are never
+confirmed are automatically removed by a 1-day lifecycle rule set at startup.
+
 ```mermaid
 sequenceDiagram
     autonumber
@@ -429,9 +434,12 @@ sequenceDiagram
     participant MinIO
     participant Worker
     Client ->> Backend: POST /api/authenticated/pictures/uploads
-    Backend -->> Client: presigned_url + upload_id
-    Client ->> MinIO: PUT object (presigned)
+   Backend -->> Client: presigned_url (staging bucket) + upload_id
+   Client ->> MinIO: PUT object to staging (presigned)
     Client ->> Backend: POST /api/authenticated/pictures/uploads/{id}/complete
+   Backend ->> MinIO: server-side copy staging → originals
+   Backend ->> MinIO: delete staging object
+   Backend ->> Backend: create picture record in DB
     Backend ->> Worker: enqueue job (thumbnails/ML)
     Worker ->> Backend: publish results
     Backend -->> Client: 200 OK (picture available)

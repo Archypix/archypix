@@ -43,9 +43,15 @@ pub async fn complete_upload(
     State(state): State<AppState>,
     Path(upload_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let picture =
-        services::pictures::complete_upload(&state.db, &state.redis, auth.user_id()?, &upload_id)
-            .await?;
+    let picture = services::pictures::complete_upload(
+        &state.db,
+        &state.redis,
+        &state.storage,
+        &state.config,
+        auth.user_id()?,
+        &upload_id,
+    )
+    .await?;
     Ok(Json(serde_json::json!({
         "id": picture.id,
         "filename": picture.filename,

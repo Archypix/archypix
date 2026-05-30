@@ -24,6 +24,9 @@ rand = { version = "0.10", features = ["std"] }
 bb8-redis = "0.26.0"
 aws-config = "1.5"
 aws-sdk-s3 = "1.64"
+md5 = "0.7"
+base64 = "0.22"
+http = "1"
 reqwest = { version = "0.13", features = ["json", "query"] }
 sha2 = "0.11"
 hex = "0.4"

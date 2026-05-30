@@ -45,6 +45,6 @@ impl Picture {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UploadSession {
     pub user_id: Uuid,
-    pub s3_key_original: String,
+    pub s3_key_staging: String,
     pub filename: String,
 }
