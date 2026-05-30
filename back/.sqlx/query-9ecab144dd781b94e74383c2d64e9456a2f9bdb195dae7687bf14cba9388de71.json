@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE incoming_shares SET status = $2 WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        {
+          "Custom": {
+            "name": "share_status",
+            "kind": {
+              "Enum": [
+                "active",
+                "revoked",
+                "tombstoned"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9ecab144dd781b94e74383c2d64e9456a2f9bdb195dae7687bf14cba9388de71"
+}

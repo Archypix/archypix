@@ -1,9 +1,9 @@
 use crate::api::admin::models::{CreateUserRequest, UpdateUserRequest, UserResponse};
 use crate::api::middleware::auth_admin::AuthAdmin;
-use crate::database::user::UserRepository;
-use crate::infrastructure::error::AppError;
-use crate::infrastructure::state::AppState;
-use crate::services::users::UserAccountService;
+use crate::infra::error::AppError;
+use crate::repository::user::UserRepository;
+use crate::services;
+use crate::state::AppState;
 use axum::Json;
 use axum::extract::{Path, State};
 
@@ -12,17 +12,7 @@ pub async fn list_users(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<UserResponse>>, AppError> {
     let users = UserRepository::list(&state.db).await?;
-    let response = users
-        .into_iter()
-        .map(|user| UserResponse {
-            id: user.id,
-            username: user.username,
-            email: user.email,
-            display_name: user.display_name,
-            is_admin: user.is_admin,
-        })
-        .collect();
-    Ok(Json(response))
+    Ok(Json(users.into_iter().map(UserResponse::from).collect()))
 }
 
 pub async fn create_user(
@@ -30,7 +20,7 @@ pub async fn create_user(
     State(state): State<AppState>,
     Json(payload): Json<CreateUserRequest>,
 ) -> Result<Json<UserResponse>, AppError> {
-    let user = UserAccountService::create_user_with_password(
+    let user = services::users::create_user(
         &state.db,
         &payload.username,
         &payload.email,
@@ -39,14 +29,7 @@ pub async fn create_user(
         payload.is_admin.unwrap_or(false),
     )
     .await?;
-
-    Ok(Json(UserResponse {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        display_name: user.display_name,
-        is_admin: user.is_admin,
-    }))
+    Ok(Json(UserResponse::from(user)))
 }
 
 pub async fn update_user(
@@ -62,14 +45,7 @@ pub async fn update_user(
         payload.is_admin,
     )
     .await?;
-
-    Ok(Json(UserResponse {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        display_name: user.display_name,
-        is_admin: user.is_admin,
-    }))
+    Ok(Json(UserResponse::from(user)))
 }
 
 pub async fn delete_user(

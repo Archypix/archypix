@@ -1,4 +1,4 @@
 pub mod auth;
-pub mod federation;
-pub mod resolver;
+pub mod pictures;
+pub mod shares;
 pub mod users;

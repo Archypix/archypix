@@ -1,11 +1,19 @@
 use crate::api::middleware::auth_user::AuthUser;
-use crate::database::user::UserRepository;
-use crate::infrastructure::error::AppError;
-use crate::infrastructure::state::AppState;
-use crate::services::users::UserAccountService;
+use crate::infra::error::AppError;
+use crate::repository::user::UserRepository;
+use crate::services;
+use crate::state::AppState;
 use axum::Json;
 use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize)]
+pub struct UserResponse {
+    pub id: uuid::Uuid,
+    pub username: String,
+    pub email: String,
+    pub display_name: String,
+}
 
 #[derive(Debug, Deserialize)]
 pub struct RegisterRequest {
@@ -21,25 +29,16 @@ pub struct UpdateMeRequest {
     pub email: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct UserResponse {
-    pub id: uuid::Uuid,
-    pub username: String,
-    pub email: String,
-    pub display_name: String,
-}
-
-pub async fn register_public(
+pub async fn register(
     State(state): State<AppState>,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Json<UserResponse>, AppError> {
     if state.config.use_resolver {
         return Err(AppError::BadRequest(
-            "Registration is handled by resolver".to_string(),
+            "Registration is handled by the resolver".to_string(),
         ));
     }
-
-    let user = UserAccountService::create_user_with_password(
+    let user = services::users::create_user(
         &state.db,
         &payload.username,
         &payload.email,
@@ -48,7 +47,6 @@ pub async fn register_public(
         false,
     )
     .await?;
-
     Ok(Json(UserResponse {
         id: user.id,
         username: user.username,
@@ -57,14 +55,13 @@ pub async fn register_public(
     }))
 }
 
-pub async fn get_public_user(
+pub async fn get_public(
     State(state): State<AppState>,
     Path(username): Path<String>,
 ) -> Result<Json<UserResponse>, AppError> {
     let user = UserRepository::find_by_username(&state.db, &username)
         .await?
         .ok_or(AppError::NotFound)?;
-
     Ok(Json(UserResponse {
         id: user.id,
         username: user.username,
@@ -78,19 +75,13 @@ pub async fn update_me(
     State(state): State<AppState>,
     Json(payload): Json<UpdateMeRequest>,
 ) -> Result<Json<UserResponse>, AppError> {
-    let user_id = auth
-        .claims
-        .uid
-        .ok_or_else(|| AppError::Unauthorized("Missing user id".to_string()))?;
-
     let user = UserRepository::update_profile(
         &state.db,
-        user_id,
+        auth.user_id()?,
         payload.display_name.as_deref(),
         payload.email.as_deref(),
     )
     .await?;
-
     Ok(Json(UserResponse {
         id: user.id,
         username: user.username,

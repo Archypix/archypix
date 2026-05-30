@@ -3,18 +3,15 @@ use crate::api::federation::models::{
     ShareAnnouncement, ShareRevokeRequest,
 };
 use crate::api::middleware::auth_federation::AuthFederation;
-use crate::database::models::ShareStatus;
-use crate::database::picture::PictureRepository;
-use crate::database::shares::{IncomingShareRepository, OutgoingShareRepository};
-use crate::database::user::UserRepository;
-use crate::infrastructure::error::AppError;
-use crate::infrastructure::state::AppState;
-use crate::infrastructure::storage_service::StorageService;
-use crate::services::federation::FederationService;
+use crate::domain::share::ShareStatus;
+use crate::infra::error::AppError;
+use crate::repository::picture::PictureRepository;
+use crate::repository::share::{IncomingShareRepository, OutgoingShareRepository};
+use crate::repository::user::UserRepository;
+use crate::state::AppState;
 use axum::Json;
 use axum::extract::State;
 use chrono::Utc;
-use std::time::Duration;
 use tracing::info;
 use uuid::Uuid;
 
@@ -28,38 +25,24 @@ pub async fn auth_request(
         ));
     }
 
-    let federation = FederationService::new(
-        state.http.clone(),
-        state.config.clone(),
-        state.jwt.clone(),
-        state.redis.clone(),
-    );
-
-    let token = federation.issue_federation_token(&payload.requester_instance)?;
+    let token = state
+        .federation
+        .issue_federation_token(&payload.requester_instance)?;
     let expires_at = Utc::now().timestamp() + state.config.federation_jwt_ttl_secs;
 
-    let grant = FederationAuthGrant {
-        issuer_instance: state.config.host.clone(),
-        token,
-        expires_at,
-        scope: payload.scope,
-        nonce: payload.nonce,
-    };
-
-    let response = state
-        .http
-        .post(&payload.callback_url)
-        .json(&grant)
-        .send()
-        .await
-        .map_err(|err| AppError::InternalServerError(err.to_string()))?;
-
-    if !response.status().is_success() {
-        return Err(AppError::InternalServerError(format!(
-            "Callback rejected grant: {}",
-            response.status()
-        )));
-    }
+    state
+        .federation
+        .send_auth_grant(
+            &payload.callback_url,
+            &FederationAuthGrant {
+                issuer_instance: state.config.host.clone(),
+                token,
+                expires_at,
+                scope: payload.scope,
+                nonce: payload.nonce,
+            },
+        )
+        .await?;
 
     Ok(Json(serde_json::json!({ "accepted": true })))
 }
@@ -72,17 +55,10 @@ pub async fn auth_grant(
     if ttl <= 0 {
         return Err(AppError::BadRequest("Token already expired".to_string()));
     }
-
-    let federation = FederationService::new(
-        state.http.clone(),
-        state.config.clone(),
-        state.jwt.clone(),
-        state.redis.clone(),
-    );
-    federation
+    state
+        .federation
         .store_federation_token(&payload.issuer_instance, &payload.token, ttl)
         .await?;
-
     Ok(Json(serde_json::json!({ "stored": true })))
 }
 
@@ -93,7 +69,7 @@ pub async fn announce_share(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let recipient = UserRepository::find_by_username(&state.db, &payload.recipient_username)
         .await?
-        .ok_or_else(|| AppError::NotFound)?;
+        .ok_or(AppError::NotFound)?;
 
     let incoming = IncomingShareRepository::create(
         &state.db,
@@ -104,8 +80,10 @@ pub async fn announce_share(
     )
     .await?;
 
-    info!("Incoming share {} stored", incoming.id);
-
+    info!(
+        "Incoming share {} stored from {}@{}",
+        incoming.id, payload.sender_username, payload.sender_instance
+    );
     Ok(Json(serde_json::json!({ "accepted": true })))
 }
 
@@ -140,38 +118,35 @@ pub async fn presign_picture(
         .await?
         .ok_or(AppError::NotFound)?;
 
-    let requester_instance = auth.claims.sub;
     let allowed = OutgoingShareRepository::has_active_share_for_instance(
         &state.db,
         owner.id,
-        &requester_instance,
+        &auth.claims.sub,
     )
     .await?;
 
     if !allowed {
-        return Err(AppError::Unauthorized("Share not allowed".to_string()));
+        return Err(AppError::Unauthorized(
+            "No active share for requesting instance".to_string(),
+        ));
     }
 
     let picture_id: Uuid = payload
         .picture_id
         .parse()
         .map_err(|_| AppError::BadRequest("Invalid picture_id".to_string()))?;
+
     let picture = PictureRepository::find_by_id(&state.db, picture_id)
         .await?
         .ok_or(AppError::NotFound)?;
 
-    // Verify this picture belongs to the requested owner and is not a received picture
-    if picture.local_user_id != owner.id || picture.remote_picture_id.is_some() {
+    if picture.local_user_id != owner.id || !picture.is_owned() {
         return Err(AppError::NotFound);
     }
 
-    let storage = StorageService::new(
-        state.s3.clone(),
-        Duration::from_secs(state.config.s3_presign_ttl_secs),
-    );
-    let url = storage
+    let url = state
+        .storage
         .presign_get(&state.config.s3_bucket_originals, &picture.s3_key_original)
         .await?;
-
     Ok(Json(serde_json::json!({ "url": url })))
 }

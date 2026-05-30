@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE refresh_tokens\n               SET revoked_at = (now() at time zone 'utc')\n               WHERE user_id = $1 AND revoked_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "71aeb54650b35e5669e3cc1a787f3c8d0e7cd8cca02a669103efca0f17f191a3"
+}

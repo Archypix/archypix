@@ -1,108 +1,107 @@
-use crate::domain::auth::{JwtClaims, TokenType};
-use crate::infrastructure::error::AppError;
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
-use chrono::Utc;
-use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
-use rand::Rng;
-use sha2::{Digest, Sha256};
+use crate::domain::auth::TokenType;
+use crate::domain::user::User;
+use crate::infra::config::Config;
+use crate::infra::crypto::{
+    JwtService, generate_refresh_token, hash_refresh_token, verify_password,
+};
+use crate::infra::error::AppError;
+use crate::repository::auth::{CredentialRepository, RefreshTokenRepository};
+use crate::repository::user::UserRepository;
+use chrono::{Duration, Utc};
+use sqlx::PgPool;
 use uuid::Uuid;
 
-#[derive(Clone)]
-pub struct JwtService {
-    encoding_key: EncodingKey,
-    decoding_key: DecodingKey,
-    issuer: String,
+pub struct AuthTokens {
+    pub access_token: String,
+    pub refresh_token: String,
 }
 
-impl JwtService {
-    pub fn new(secret: &str, issuer: &str) -> Self {
-        Self {
-            encoding_key: EncodingKey::from_secret(secret.as_bytes()),
-            decoding_key: DecodingKey::from_secret(secret.as_bytes()),
-            issuer: issuer.to_string(),
+pub async fn login(
+    db: &PgPool,
+    jwt: &JwtService,
+    config: &Config,
+    username: &str,
+    password: &str,
+) -> Result<AuthTokens, AppError> {
+    let user = UserRepository::find_by_username(db, username)
+        .await?
+        .ok_or_else(|| AppError::Unauthorized("Invalid credentials".to_string()))?;
+
+    let hash = CredentialRepository::get_password_hash(db, user.id)
+        .await?
+        .ok_or_else(|| AppError::Unauthorized("Invalid credentials".to_string()))?;
+
+    if !verify_password(password, &hash)? {
+        return Err(AppError::Unauthorized("Invalid credentials".to_string()));
+    }
+
+    issue_tokens(db, jwt, config, &user).await
+}
+
+pub async fn refresh(
+    db: &PgPool,
+    jwt: &JwtService,
+    config: &Config,
+    refresh_token_raw: &str,
+) -> Result<AuthTokens, AppError> {
+    let token_hash = hash_refresh_token(refresh_token_raw);
+    let stored = RefreshTokenRepository::find_valid(db, &token_hash)
+        .await?
+        .ok_or_else(|| AppError::Unauthorized("Invalid refresh token".to_string()))?;
+
+    RefreshTokenRepository::revoke(db, stored.id).await?;
+
+    let user = UserRepository::find_by_id(db, stored.user_id)
+        .await?
+        .ok_or_else(|| AppError::Unauthorized("User not found".to_string()))?;
+
+    issue_tokens(db, jwt, config, &user).await
+}
+
+pub async fn logout(
+    db: &PgPool,
+    user_id: Option<Uuid>,
+    refresh_token_raw: Option<&str>,
+) -> Result<(), AppError> {
+    if let Some(raw) = refresh_token_raw {
+        let hash = hash_refresh_token(raw);
+        if let Some(stored) = RefreshTokenRepository::find_valid(db, &hash).await? {
+            RefreshTokenRepository::revoke(db, stored.id).await?;
         }
+    } else if let Some(uid) = user_id {
+        RefreshTokenRepository::revoke_all_for_user(db, uid).await?;
     }
-
-    pub fn issue(
-        &self,
-        subject: &str,
-        uid: Option<Uuid>,
-        instance: &str,
-        token_type: TokenType,
-        is_admin: bool,
-        audience: &str,
-        ttl_secs: i64,
-    ) -> anyhow::Result<String> {
-        let now = Utc::now().timestamp();
-        let claims = JwtClaims {
-            sub: subject.to_string(),
-            uid,
-            instance: instance.to_string(),
-            token_type,
-            is_admin,
-            aud: audience.to_string(),
-            iss: self.issuer.clone(),
-            exp: now + ttl_secs,
-            iat: now,
-            jti: Uuid::new_v4().to_string(),
-        };
-        let header = Header::new(Algorithm::HS256);
-        Ok(encode(&header, &claims, &self.encoding_key)?)
-    }
-
-    pub fn decode(&self, token: &str, audience: &str) -> Result<JwtClaims, AppError> {
-        let mut validation = Validation::new(Algorithm::HS256);
-        validation.set_audience(&[audience]);
-        validation.set_issuer(&[self.issuer.clone()]);
-        let data = decode::<JwtClaims>(token, &self.decoding_key, &validation)
-            .map_err(|err| AppError::Unauthorized(err.to_string()))?;
-        Ok(data.claims)
-    }
-
-    pub fn decode_any_issuer(&self, token: &str, audience: &str) -> Result<JwtClaims, AppError> {
-        let mut validation = Validation::new(Algorithm::HS256);
-        validation.set_audience(&[audience]);
-        let data = decode::<JwtClaims>(token, &self.decoding_key, &validation)
-            .map_err(|err| AppError::Unauthorized(err.to_string()))?;
-        Ok(data.claims)
-    }
+    Ok(())
 }
 
-pub struct PasswordService;
+async fn issue_tokens(
+    db: &PgPool,
+    jwt: &JwtService,
+    config: &Config,
+    user: &User,
+) -> Result<AuthTokens, AppError> {
+    let token_type = if user.is_admin {
+        TokenType::Admin
+    } else {
+        TokenType::User
+    };
+    let access_token = jwt.issue(
+        &user.username,
+        Some(user.id),
+        &config.host,
+        token_type,
+        user.is_admin,
+        &config.host,
+        config.access_token_ttl_secs,
+    )?;
 
-impl PasswordService {
-    pub fn hash_password(password: &str) -> Result<String, AppError> {
-        let salt =
-            argon2::password_hash::SaltString::generate(argon2::password_hash::rand_core::OsRng);
-        let argon2 = Argon2::default();
-        let hash = argon2
-            .hash_password(password.as_bytes(), &salt)
-            .map_err(|err| AppError::InternalServerError(err.to_string()))?
-            .to_string();
-        Ok(hash)
-    }
+    let refresh_token_raw = generate_refresh_token();
+    let refresh_hash = hash_refresh_token(&refresh_token_raw);
+    let expires_at = Utc::now() + Duration::seconds(config.refresh_token_ttl_secs);
+    RefreshTokenRepository::create(db, user.id, &refresh_hash, expires_at).await?;
 
-    pub fn verify_password(password: &str, hash: &str) -> Result<bool, AppError> {
-        let parsed_hash = PasswordHash::new(hash)
-            .map_err(|err| AppError::InternalServerError(err.to_string()))?;
-        Ok(Argon2::default()
-            .verify_password(password.as_bytes(), &parsed_hash)
-            .is_ok())
-    }
-}
-
-pub struct RefreshTokenService;
-
-impl RefreshTokenService {
-    pub fn generate_refresh_token() -> String {
-        let mut bytes = [0u8; 32];
-        rand::rng().fill_bytes(&mut bytes);
-        hex::encode(bytes)
-    }
-
-    pub fn hash_refresh_token(token: &str) -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(token.as_bytes());
-        hex::encode(hasher.finalize())
-    }
+    Ok(AuthTokens {
+        access_token,
+        refresh_token: refresh_token_raw,
+    })
 }

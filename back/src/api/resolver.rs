@@ -1,7 +1,7 @@
 mod handlers;
 mod models;
 
-use crate::infrastructure::state::AppState;
+use crate::state::AppState;
 use axum::Router;
 use axum::routing::{get, post};
 

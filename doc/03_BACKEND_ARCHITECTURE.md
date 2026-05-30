@@ -17,47 +17,195 @@
 - Migration capabilities already in use
 - Reduced abstraction overhead compared to ORMs
 
+---
+
 ## B) Layered architecture and responsibilities
 
 **Goal:** clean separation between HTTP API, business workflows, domain rules, database access, and infrastructure connectivity.
 
-| Layer            | Responsibility                                                                                                 | Can depend on                                             | Must NOT depend on                                                                  |
-|------------------|----------------------------------------------------------------------------------------------------------------|-----------------------------------------------------------|-------------------------------------------------------------------------------------|
-| `api`            | HTTP handlers, auth extraction, request/response mapping. Can call repositories directly for single-step CRUD. | `services`, `domain`, `database`, `infrastructure::error` | External connectivity details (Redis/S3/HTTP clients) outside `AppState` injection. |
-| `services`       | Multi-step workflows and orchestration. Defines transaction boundaries.                                        | `domain`, `database`, infra traits                        | Axum request types, HTTP-specific models.                                           |
-| `domain`         | Business rules, validation, transformations, and pure value types.                                             | Nothing outside Rust std + lightweight crates             | `database`, `infrastructure`, or external clients.                                  |
-| `database`       | Repository-only SQL operations (no business logic).                                                            | `sqlx`, `domain` types, `infrastructure::error`           | `services`, external clients.                                                       |
-| `infrastructure` | Connectivity (config, error, Redis, S3, HTTP clients, app state). Implements service traits when applicable.   | External SDKs                                             | `api` business logic, `domain` rules.                                               |
+| Layer        | Responsibility                                                                                             | Can depend on                                                | Must NOT depend on                              |
+|--------------|------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------|-------------------------------------------------|
+| `api`        | HTTP handlers, auth extraction, request/response models. Calls repositories directly for single-step CRUD. | `services`, `repository`, `domain`, `infra::error`           | External connectivity details outside AppState. |
+| `services`   | Multi-step workflows and orchestration. Owns transaction boundaries.                                       | `repository`, `clients`, `domain`, `infra`                   | Axum request types, HTTP-specific models.       |
+| `clients`    | Outbound HTTP adapters. Wraps calls to external systems (federation backends, resolver, S3).               | `infra`, `domain`                                            | `services`, `repository`, `api`.                |
+| `repository` | SQL operations only — no business logic.                                                                   | `domain` (types), `infra::error`                             | `services`, `clients`.                          |
+| `domain`     | Business types, invariants, pure transformations, and the tagging pipeline evaluator.                      | std + lightweight crates (serde, uuid, chrono, sqlx derives) | `repository`, `infra`, external clients.        |
+| `infra`      | Raw connectivity primitives: config, error, Redis, S3, crypto (JWT, hashing).                              | External SDKs                                                | `api`, `services`, `clients`.                   |
+| `state`      | `AppState` — application bootstrap, holds all composed clients and infra handles.                          | `infra`, `clients`                                           | `services`, `repository`, `api`.                |
 
-Notes:
+**Key rules:**
 
-- Services should be oriented by **business capability** (e.g., `user_account`), not by API emitter (admin/public/resolver).
-- Infrastructure can expose adapters that implement traits used by services. This keeps services decoupled from concrete Redis/S3/HTTP
-  implementations.
+- Services are oriented by **business capability** (`users`, `auth`, `pictures`, `shares`), not by API emitter.
+- All repository functions accept `Executor<'e, Database = Postgres>` so they run on either a `PgPool` or a transaction.
+- Multi-step workflows (user creation, picture upload, share creation) **must** run in an explicit SQL transaction managed by a service.
+- API handlers call repositories directly **only** for single-step CRUD with no orchestration.
 
-## C) Transactions and database access
+### Dependency graph
 
-**Rule:** all repository functions accept an `Executor<'e, Database = Postgres>` so they can run on either a `PgPool` or a transaction.
+```
+api       → services, repository, domain, infra
+services  → repository, clients, domain, infra
+clients   → infra, domain
+repository→ domain, infra
+domain    → (std, serde, uuid, chrono, sqlx derives only)
+infra     → (external crates)
+state     → infra, clients        ← no cycle: clients depend on infra only
+```
 
-- Multi-step workflows (e.g., user creation, picture upload) **must** run in an explicit SQL transaction managed by a service.
-- API handlers can call repositories directly **only** for single-step CRUD with no domain rule composition.
+`AppState` lives in the top-level `state` module rather than inside `infra` to avoid a circular dependency (`infra → clients → infra`).
 
-Example signature (pattern):
+---
+
+## C) Module layout (`back/src/`)
+
+Rust's file-based module convention is followed throughout: a module `foo` with submodules lives at `foo.rs` (the parent file) + `foo/` (the submodule
+directory). No `mod.rs` files are used.
+
+```
+back/src/
+  main.rs              # Bootstrap: build AppState, start Axum server
+  state.rs             # AppState definition
+
+  domain.rs            # pub mod declarations
+  domain/
+    auth.rs            # TokenType, JwtClaims
+    user.rs            # User, UserCredential, RefreshToken
+    picture.rs         # Picture, UploadSession
+    tag.rs             # TagPath (newtype), TagSource, Tag
+    share.rs           # ShareStatus, OutgoingShare, IncomingShare
+    federation.rs      # FederationMessage, direction/status enums, BackendMapping
+    job.rs             # Job, JobStatus, JobType
+    tagging.rs         # TaggingService config types, Hierarchy; declares tagging/
+    tagging/
+      pipeline.rs      # Pure pipeline evaluator (no I/O)
+
+  repository.rs
+  repository/
+    user.rs            # UserRepository
+    picture.rs         # PictureRepository
+    tag.rs             # TagRepository
+    share.rs           # OutgoingShareRepository, IncomingShareRepository
+    auth.rs            # CredentialRepository, RefreshTokenRepository
+
+  clients.rs
+  clients/
+    federation.rs      # FederationClient (WebFinger, token lifecycle, announce_share)
+    resolver.rs        # ResolverClient (update_mapping, verify_token)
+
+  services.rs
+  services/
+    auth.rs            # login(), refresh(), logout()
+    users.rs           # create_user()
+    pictures.rs        # begin_upload(), complete_upload()
+    shares.rs          # create_outgoing_share()
+
+  api.rs               # Router composition
+  api/
+    middleware.rs      # bearer_token() helper
+    middleware/
+      auth_user.rs     # AuthUser extractor (user/admin JWT)
+      auth_admin.rs    # AuthAdmin extractor (admin JWT)
+      auth_resolver.rs # AuthResolver extractor (resolver JWT)
+      auth_federation.rs # AuthFederation extractor (federation JWT)
+    user.rs            # auth_routes(), public_routes(), authenticated_routes()
+    user/
+      auth.rs          # login, refresh, logout, me handlers
+      users.rs         # register, get_public, update_me handlers
+      pictures.rs      # upload, list, get, download handlers
+      shares.rs        # share create/list/accept/reject handlers
+      tags.rs          # tag list/assign/remove handlers
+    admin.rs           # routes()
+    admin/
+      handlers.rs
+      models.rs        # CreateUserRequest, UpdateUserRequest, UserResponse
+    federation.rs      # routes()
+    federation/
+      handlers.rs
+      models.rs        # FederationAuthRequest, ShareRevokeRequest, PresignRequest
+    resolver.rs        # routes()
+    resolver/
+      handlers.rs
+      models.rs
+
+  infra.rs
+  infra/
+    config.rs          # Config (loaded from env)
+    error.rs           # AppError, map_sqlx_error
+    redis.rs           # RedisClient, connect()
+    crypto.rs          # JwtService, hash_password(), verify_password(),
+                       # generate_refresh_token(), hash_refresh_token()
+    db.rs              # connect(), run_migrations()
+    s3.rs              # StorageClient (presign_get/put), connect()
+```
+
+---
+
+## D) What belongs where — decision guide
+
+| Code                                  | Layer                           | Reasoning                                                  |
+|---------------------------------------|---------------------------------|------------------------------------------------------------|
+| `TokenType`, `JwtClaims`              | `domain/auth.rs`                | Pure value types, no I/O                                   |
+| `TagPath` newtype + methods           | `domain/tag.rs`                 | Business invariants, pure                                  |
+| `OutgoingShare::would_loop_to()`      | `domain/share.rs`               | Domain rule, pure                                          |
+| Pipeline evaluator                    | `domain/tagging/pipeline.rs`    | Pure business logic, testable without I/O                  |
+| SQL queries                           | `repository/`                   | SQL only, no business logic                                |
+| WebFinger resolution, federation HTTP | `clients/federation.rs`         | Outbound HTTP adapter                                      |
+| Login/refresh workflow                | `services/auth.rs`              | Multi-step: DB + crypto + token generation                 |
+| Upload workflow                       | `services/pictures.rs`          | Multi-step: Redis session + S3 presign + DB record         |
+| Share creation                        | `services/shares.rs`            | Multi-step: DB + federation announce                       |
+| JWT signing keys, argon2 hashing      | `infra/crypto.rs`               | Infrastructure crypto primitives                           |
+| S3 presigned URLs                     | `infra/s3.rs` → `StorageClient` | Infrastructure adapter                                     |
+| HTTP handler                          | `api/*/`                        | Thin: extract input → call service/repo → serialize output |
+
+---
+
+## E) Transactions and database access
+
+**Rule:** all repository functions accept `Executor<'e, Database = Postgres>`:
 
 ```rust
 pub async fn create<'e, E>(ex: E, ...) -> Result<Entity, AppError>
 where
-    E: Executor<'e, Database=Postgres>,
+    E: Executor<'e, Database = Postgres>,
 ```
 
-# Backend REST API Structure (updated)
+This allows calling them on either `&PgPool` (single-step handlers) or `&mut PgTransaction` (multi-step services):
 
-This document defines the REST API layout for `/back/src/api`, middleware usage, and core flows (including federation). It aligns with the current
-Axum/SQLx stack and the existing schema.
+```rust
+// services/users.rs — transaction managed by the service
+let mut tx = db.begin().await?;
+let user = UserRepository::create( & mut * tx,...).await?;
+CredentialRepository::upsert_password( & mut * tx, user.id, & hash).await?;
+tx.commit().await?;
+```
+
+---
+
+## F) AppState
+
+`AppState` is defined in `state.rs` at the crate root. It holds all composed infrastructure handles — no business logic lives here.
+
+```rust
+pub struct AppState {
+    pub config: Config,
+    pub db: PgPool,
+    pub redis: RedisClient,
+    pub jwt: JwtService,        // user/admin/federation token verification
+    pub storage: StorageClient, // S3 presigned URL operations
+    pub federation: FederationClient, // outbound federation HTTP
+    pub resolver: ResolverClient,     // outbound resolver HTTP
+}
+```
+
+`FederationClient` and `ResolverClient` are constructed once in `main.rs` and cloned into each handler via Axum's `State` extractor.
+
+---
+
+# Backend REST API Structure
 
 ## 1) API layout and base paths
 
-The router lives directly in `src/api.rs` (no `routes.rs` files).
+The router is composed in `src/api.rs` (no `routes.rs` files).
 
 | Section                      | Base path                      | Auth                                    | Purpose                                                                    |
 |------------------------------|--------------------------------|-----------------------------------------|----------------------------------------------------------------------------|
@@ -67,13 +215,7 @@ The router lives directly in `src/api.rs` (no `routes.rs` files).
 | Authenticated user endpoints | `/api/authenticated/*`         | User JWT                                | Main user API (pictures, tags, shares).                                    |
 | Federation endpoints         | `/api/federation/*`            | Federation JWT (pairwise)               | Cross-instance messaging.                                                  |
 
-### Base path options for authenticated user endpoints
-
-**Recommended default:** `/api/authenticated/*` to make the auth boundary explicit.  
-**Alternatives:** `/api/user/*` (short), `/api/app/*` (generic), or `/api/general/*` (your initial suggestion).  
-The rest of this document assumes `/api/authenticated/*`.
-
-## 2) JWT tokens (users, admin, resolver, federation)
+## 2) JWT tokens
 
 All auth types use JWT with a shared claim shape:
 
@@ -87,42 +229,30 @@ All auth types use JWT with a shared claim shape:
 | `aud`               | Target backend instance domain.                     |
 | `exp`, `iat`, `jti` | Standard JWT lifecycle and replay protection.       |
 
-**Resolver JWT**  
-The Resolver signs JWTs using `RESOLVER_ADMIN_SECRET`. The backend validates `token_type=resolver` + `aud`.
-
-**User/admin JWT**  
-Issued by the backend after login (or admin auth). The backend validates `token_type=user/admin`.
-
 ## 3) Federation authentication protocol (pairwise JWT)
 
-We use a pairwise token scheme: the **recipient instance** issues a JWT to the **requesting instance**. This avoids public-key verification on every
-request and ensures tokens are delivered only to the true domain owner.
+We use a pairwise token scheme: the **recipient instance** issues a JWT to the **requesting instance**.
 
 ### Handshake
 
 1. **Token request**  
-   `A -> B`  
-   `POST /api/federation/auth/request`  
+   `A -> B`: `POST /api/federation/auth/request`  
    Body: `{ requester_instance, callback_url, scope, nonce }`
 
 2. **Token grant**  
-   `B -> A`  
-   `POST /api/federation/auth/grant` (to A’s callback URL)  
+   `B -> A`: `POST <callback_url>` (A's `auth/grant` endpoint)  
    Body: `{ issuer_instance, token, expires_at, scope, nonce }`
 
 3. **Usage**  
-   A stores the token and uses it to call `B`’s federation endpoints:  
-   `Authorization: Bearer <federation_jwt>`
+   A stores the token in Redis and uses it for subsequent calls to B's federation endpoints.
 
-**Notes**
+**Notes:**
 
-- The grant is sent server-to-server to the callback on the requester’s domain, ensuring only the real instance receives it.
+- The grant is sent server-to-server to a callback on the requester's domain, ensuring only the real instance receives it.
 - Tokens are short-lived; re-requested as needed.
-- All federation endpoints validate `token_type=federation`, `aud`, and optional scope.
+- Token lifecycle is managed by `FederationClient` (resolve, cache, request, store).
 
 ## 4) Middleware stack (Axum/Tower)
-
-Applied in this order (outermost first):
 
 | Middleware  | Applies to                           | Purpose                                          |
 |-------------|--------------------------------------|--------------------------------------------------|
@@ -135,36 +265,16 @@ Applied in this order (outermost first):
 | Rate limit  | Auth + federation + public endpoints | Abuse control (Redis-backed).                    |
 | Auth        | By route group                       | Enforce identity type.                           |
 
-## 5) File structure (`/back/src/api`)
+## 5) Endpoint layout (initial set)
 
-No `mod.rs` or `routes.rs` files. Each top-level module has a same-named file in the parent directory.
-
-```
-src/
-  api.rs                 # router composition (top-level)
-  api/
-    middleware.rs
-    middleware/
-    resolver.rs
-    resolver/
-    admin.rs
-    admin/
-    user.rs
-    user/
-    federation.rs
-    federation/
-```
-
-## 6) Endpoint layout (initial set)
-
-### 6.1 Resolver endpoints
+### 5.1 Resolver endpoints
 
 | Method | Path                             | Description                                                  |
 |--------|----------------------------------|--------------------------------------------------------------|
 | `POST` | `/api/resolver/users`            | Create user on this backend (only when `USE_RESOLVER=true`). |
 | `GET`  | `/api/resolver/users/{username}` | Fetch user by username for resolver validation.              |
 
-### 6.2 Admin endpoints
+### 5.2 Admin endpoints
 
 | Method   | Path                    | Description                   |
 |----------|-------------------------|-------------------------------|
@@ -172,10 +282,8 @@ src/
 | `POST`   | `/api/admin/users`      | Create user (admin override). |
 | `PATCH`  | `/api/admin/users/{id}` | Suspend/restore, set role.    |
 | `DELETE` | `/api/admin/users/{id}` | Delete user.                  |
-| `GET`    | `/api/admin/jobs`       | Inspect job queue/status.     |
-| `GET`    | `/api/admin/metrics`    | Metrics snapshot.             |
 
-### 6.3 Public/auth endpoints
+### 5.3 Public/auth endpoints
 
 | Method | Path                           | Description                                       |
 |--------|--------------------------------|---------------------------------------------------|
@@ -186,7 +294,7 @@ src/
 | `GET`  | `/api/public/users/{username}` | Public profile lookup.                            |
 | `POST` | `/api/public/users`            | Register user (**only if `USE_RESOLVER=false`**). |
 
-### 6.4 Authenticated user endpoints (`/api/authenticated/*`)
+### 5.4 Authenticated user endpoints (`/api/authenticated/*`)
 
 **Users**
 
@@ -224,7 +332,7 @@ src/
 | `POST` | `/api/authenticated/shares/incoming/{id}/accept` | Accept incoming share. |
 | `POST` | `/api/authenticated/shares/incoming/{id}/reject` | Reject incoming share. |
 
-### 6.5 Federation endpoints
+### 5.5 Federation endpoints
 
 | Method | Path                                | Description                                            |
 |--------|-------------------------------------|--------------------------------------------------------|
@@ -235,13 +343,15 @@ src/
 | `POST` | `/api/federation/pictures/announce` | Announce pictures for an active share.                 |
 | `POST` | `/api/federation/pictures/presign`  | Request presigned URL from original owner backend.     |
 
-### 6.6 WebDAV
+### 5.6 WebDAV
 
 WebDAV runs on a separate route, e.g. `/dav/*`, and uses the same user JWT auth.
 
-## 7) Main flows
+---
 
-### 7.1 User creation (with and without resolver)
+## 6) Main flows
+
+### 6.1 User creation (with and without resolver)
 
 ```mermaid
 sequenceDiagram
@@ -261,7 +371,7 @@ sequenceDiagram
     end
 ```
 
-### 7.2 Authentication and session flow
+### 6.2 Authentication and session flow
 
 ```mermaid
 sequenceDiagram
@@ -276,7 +386,7 @@ sequenceDiagram
     Backend -->> Client: new access_token
 ```
 
-### 7.3 Picture upload and tagging pipeline
+### 6.3 Picture upload and tagging pipeline
 
 ```mermaid
 sequenceDiagram
@@ -294,7 +404,7 @@ sequenceDiagram
     Backend -->> Client: 200 OK (picture available)
 ```
 
-### 7.4 Federation auth handshake
+### 6.4 Federation auth handshake
 
 ```mermaid
 sequenceDiagram
@@ -306,7 +416,7 @@ sequenceDiagram
     A ->> B: POST /api/federation/shares/announce (Bearer federation JWT)
 ```
 
-### 7.5 Federation: share announcement and receipt
+### 6.5 Federation: share announcement and receipt
 
 ```mermaid
 sequenceDiagram
@@ -318,7 +428,7 @@ sequenceDiagram
     BobBackend -->> AliceBackend: 202 Accepted
 ```
 
-### 7.6 Federation: share revocation
+### 6.6 Federation: share revocation
 
 ```mermaid
 sequenceDiagram
@@ -332,55 +442,56 @@ sequenceDiagram
     CarolBackend ->> CarolBackend: tombstone derived IncomingShare
 ```
 
-## 8) WebDAV + storage behavior
+---
+
+## 7) WebDAV + storage behavior
 
 - WebDAV lives under `/dav/*` and maps tags to virtual directories (see hierarchy spec).
 - For WebDAV clients, the backend **proxies** file downloads/uploads to MinIO when presigned URLs are not suitable.
 - REST clients can still use presigned URLs for direct MinIO transfers.
 
-## 9) Share consistency and deduplication (spec)
+---
 
-This spec builds on the current schema in `back/migrations/001_initial_schema.up.sql`.
+## 8) Share consistency and deduplication (spec)
 
-### 9.1 Picture identity
+### 8.1 Picture identity
 
 - **Owned picture:** `local_user_id = owner`, `owner_username/owner_instance_domain = NULL`.
 - **Received picture:** `local_user_id = recipient`, `owner_username/owner_instance_domain = original owner`.
-- **Global identity:** `(owner_username, owner_instance_domain, picture_id)` for received pictures; `(local_user_id, picture_id)` for owned pictures.
+- **Global identity:** `(owner_username, owner_instance_domain, picture_id)` for received pictures.
 
-### 9.2 Deduplication rules
+### 8.2 Deduplication rules
 
 When a share announcement includes picture IDs:
 
 1. Attempt `INSERT INTO pictures … ON CONFLICT (local_user_id, picture_id) DO UPDATE` (or `DO NOTHING`).
-2. The unique constraint `(local_user_id, picture_id)` is the deduplication key: `picture_id` is a UUID, globally unique in practice, so no extra
-   composite key is needed.
-3. On conflict, only update tags/shares for the existing row; do not overwrite storage fields.
+2. On conflict, only update tags/shares for the existing row; do not overwrite storage fields.
 
-Idempotency at the federation message level is enforced via `federation_messages.idempotency_key` (unique constraint).
+Idempotency at the federation message level is enforced via `federation_messages.idempotency_key`.
 
-### 9.3 Storage and access
+### 8.3 Storage and access
 
 - The original owner stores `s3_key` + `s3_bucket` in MinIO.
 - The receiving backend stores those values for reference only.
-- To access a remote file, the receiver requests a presigned URL from the owner backend:
-    - `POST /api/federation/pictures/presign` with `{ owner_username, owner_instance_domain, picture_id, variant }`
-    - Owner validates that an **active share** exists for the requesting instance.
-    - Owner returns a short-lived presigned URL.
+- To access a remote file, the receiver calls `POST /api/federation/pictures/presign` on the owner's backend.
 
-### 9.4 Transitive sharing
+### 8.4 Transitive sharing
 
-Transitive shares **never** re-upload or re-host blobs. The announcement always references the original owner identity and `picture_id`. Recipients
-fetch blobs directly from the original owner via presigned URLs.
+Transitive shares **never** re-upload or re-host blobs. Announcements always reference the original owner identity and `picture_id`. Recipients fetch
+blobs directly from the original owner via presigned URLs.
 
-### 9.5 s3_key stability
+### 8.5 Loop prevention
 
-- `s3_key` is **stable** for the lifetime of the picture.
-- Revocation is enforced by refusing presign for revoked shares (and keeping presigned URLs short-lived).
-- If a hard reset is required, rotate `s3_key`, then **re-announce** affected pictures to all active shares.
+`OutgoingShare::would_loop_to(owner_instance)` detects when an announcement would loop back to the original owner. Checked before sending any
+federation announcement.
 
-## 10) Not-yet-developed items
+---
 
-1. Federation token storage, rotation schedule, and retry logic.
-2. Concrete JWT claim validation rules and scopes for federation requests.
+## 9) Not-yet-developed items
+
+1. Full tagging pipeline execution in `services/tagging.rs` (domain evaluators are ready in `domain/tagging/pipeline.rs`).
+2. Federation token storage rotation schedule and retry logic.
 3. Redis-backed rate limits and session invalidation.
+4. NATS JetStream job publishing and result consumption.
+5. WebDAV implementation.
+6. Admin job and metrics endpoints.

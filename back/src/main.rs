@@ -1,20 +1,21 @@
 mod api;
-mod database;
+mod clients;
 mod domain;
-mod infrastructure;
+mod infra;
+mod repository;
 mod services;
+mod state;
 
-use crate::infrastructure::config::Config;
-use crate::infrastructure::state::AppState;
-use crate::services::auth::JwtService;
-use bb8_redis::redis::cmd;
-use bb8_redis::{RedisConnectionManager, bb8};
-use futures_util::future::join_all;
+use crate::clients::federation::FederationClient;
+use crate::clients::resolver::ResolverClient;
+use crate::infra::config::Config;
+use crate::infra::crypto::JwtService;
+use crate::state::AppState;
+use reqwest::Client as HttpClient;
 use tracing::info;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize tracing
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -24,28 +25,38 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Starting Archypix Backend...");
 
-    // Load configuration, setup DB and state
     let config = Config::from_env()?;
-    let db_pool = database::get_database_pool(&config).await?;
-    database::run_migrations(&db_pool).await?;
+    let db = infra::db::connect(&config).await?;
+    infra::db::run_migrations(&db).await?;
 
-    let redis = infrastructure::redis::get_redis_client(&config).await?;
-    let s3 = infrastructure::storage::get_s3_client(&config).await?;
-    let http = reqwest::Client::new();
+    let redis = infra::redis::connect(&config).await?;
+    let storage = infra::s3::connect(&config).await?;
+    let http = HttpClient::new();
+
     let jwt = JwtService::new(&config.jwt_secret, &config.host);
     let resolver_jwt = JwtService::new(&config.resolver_admin_secret, &config.host);
 
-    let state = AppState::new(config.clone(), db_pool, redis, s3, http, jwt, resolver_jwt);
+    let federation =
+        FederationClient::new(http.clone(), config.clone(), jwt.clone(), redis.clone());
+    let resolver = ResolverClient::new(http, config.clone(), resolver_jwt);
 
-    // Listen to listen_addr and build router with API routes
+    let state = AppState::new(
+        config.clone(),
+        db,
+        redis,
+        jwt,
+        storage,
+        federation,
+        resolver,
+    );
+
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
-    info!("Server listening on {}", config.listen_addr);
+    info!("Listening on {}", config.listen_addr);
 
     let app = api::routes(&config)
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state);
 
     axum::serve(listener, app).await?;
-
     Ok(())
 }

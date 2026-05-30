@@ -1,3 +1,8 @@
 pub mod auth;
 pub mod federation;
+pub mod job;
+pub mod picture;
+pub mod share;
 pub mod tag;
+pub mod tagging;
+pub mod user;

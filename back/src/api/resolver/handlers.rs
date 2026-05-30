@@ -1,9 +1,9 @@
 use crate::api::middleware::auth_resolver::AuthResolver;
 use crate::api::resolver::models::{CreateUserRequest, UserResponse};
-use crate::database::user::UserRepository;
-use crate::infrastructure::error::AppError;
-use crate::infrastructure::state::AppState;
-use crate::services::users::UserAccountService;
+use crate::infra::error::AppError;
+use crate::repository::user::UserRepository;
+use crate::services;
+use crate::state::AppState;
 use axum::Json;
 use axum::extract::{Path, State};
 use tracing::info;
@@ -13,17 +13,11 @@ pub async fn get_user(
     State(state): State<AppState>,
     Path(username): Path<String>,
 ) -> Result<Json<UserResponse>, AppError> {
-    info!("Resolver fetch user {}", username);
-    let user = UserRepository::find_by_username(&state.db, &username).await?;
-    let user = user.ok_or(AppError::NotFound)?;
-
-    Ok(Json(UserResponse {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        display_name: user.display_name,
-        is_admin: user.is_admin,
-    }))
+    info!("Resolver fetch user: {}", username);
+    let user = UserRepository::find_by_username(&state.db, &username)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(Json(UserResponse::from(user)))
 }
 
 pub async fn create_user(
@@ -31,7 +25,7 @@ pub async fn create_user(
     State(state): State<AppState>,
     Json(payload): Json<CreateUserRequest>,
 ) -> Result<Json<UserResponse>, AppError> {
-    let user = UserAccountService::create_user_with_password(
+    let user = services::users::create_user(
         &state.db,
         &payload.username,
         &payload.email,
@@ -40,12 +34,5 @@ pub async fn create_user(
         false,
     )
     .await?;
-
-    Ok(Json(UserResponse {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        display_name: user.display_name,
-        is_admin: user.is_admin,
-    }))
+    Ok(Json(UserResponse::from(user)))
 }

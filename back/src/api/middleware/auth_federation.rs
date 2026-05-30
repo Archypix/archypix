@@ -1,6 +1,6 @@
 use crate::domain::auth::{JwtClaims, TokenType};
-use crate::infrastructure::error::AppError;
-use crate::infrastructure::state::AppState;
+use crate::infra::error::AppError;
+use crate::state::AppState;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 

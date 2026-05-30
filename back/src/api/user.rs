@@ -4,7 +4,7 @@ mod shares;
 mod tags;
 mod users;
 
-use crate::infrastructure::state::AppState;
+use crate::state::AppState;
 use axum::Router;
 use axum::routing::{get, patch, post};
 
@@ -18,8 +18,8 @@ pub fn auth_routes() -> Router<AppState> {
 
 pub fn public_routes() -> Router<AppState> {
     Router::new()
-        .route("/users", post(users::register_public))
-        .route("/users/{username}", get(users::get_public_user))
+        .route("/users", post(users::register))
+        .route("/users/{username}", get(users::get_public))
 }
 
 pub fn authenticated_routes() -> Router<AppState> {
@@ -30,18 +30,16 @@ pub fn authenticated_routes() -> Router<AppState> {
             "/pictures/uploads/{id}/complete",
             post(pictures::complete_upload),
         )
-        .route("/pictures", get(pictures::list_pictures))
-        .route("/pictures/{id}", get(pictures::get_picture))
-        .route("/pictures/{id}/download", get(pictures::download_picture))
+        .route("/pictures", get(pictures::list))
+        .route("/pictures/{id}", get(pictures::get))
+        .route("/pictures/{id}/download", get(pictures::download))
         .route(
             "/tags",
-            get(tags::list_tags)
-                .post(tags::assign_tags)
-                .delete(tags::remove_tags),
+            get(tags::list).post(tags::assign).delete(tags::remove),
         )
         .route(
             "/pictures/{id}/tags",
-            post(tags::assign_picture_tags).delete(tags::remove_picture_tags),
+            post(tags::assign_to_picture).delete(tags::remove_from_picture),
         )
         .route(
             "/shares/outgoing",

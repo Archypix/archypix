@@ -1,6 +1,6 @@
 use crate::domain::auth::{JwtClaims, TokenType};
-use crate::infrastructure::error::AppError;
-use crate::infrastructure::state::AppState;
+use crate::infra::error::AppError;
+use crate::state::AppState;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 
@@ -23,11 +23,7 @@ impl FromRequestParts<AppState> for AuthAdmin {
 
         match claims.token_type {
             TokenType::Admin | TokenType::User => {}
-            _ => {
-                return Err(AppError::Unauthorized(
-                    "Invalid token type for admin access".to_string(),
-                ));
-            }
+            _ => return Err(AppError::Unauthorized("Invalid token type".to_string())),
         }
 
         if !claims.is_admin {
