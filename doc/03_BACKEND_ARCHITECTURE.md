@@ -82,7 +82,7 @@ pub struct AppState {
 | Section                      | Base path                      | Auth                      |
 |------------------------------|--------------------------------|---------------------------|
 | Resolver endpoints           | `/api/resolver/*`              | Resolver JWT              |
-| Admin endpoints              | `/api/admin/*`                 | Admin JWT                 |
+| Admin endpoints              | `/api/admin/*`                 | User JWT with `is_admin`  |
 | Public/auth endpoints        | `/api/auth/*`, `/api/public/*` | Mixed                     |
 | Authenticated user endpoints | `/api/authenticated/*`         | User JWT                  |
 | Federation endpoints         | `/api/federation/*`            | Federation JWT (pairwise) |
@@ -100,10 +100,11 @@ All persistent storage uses the **global domain**. Backend domains are derived o
 
 | Claim        | Description                                                               |
 |--------------|---------------------------------------------------------------------------|
-| `sub`        | Username (user/admin) or global domain (federation).                      |
-| `uid`        | User UUID (user/admin tokens).                                            |
+| `sub`        | Username (user tokens) or global domain (federation tokens).              |
+| `uid`        | User UUID (user tokens only).                                             |
+| `is_admin`   | Boolean. Admin endpoints check this, not a separate token type.           |
 | `instance`   | Global domain of the issuing instance.                                    |
-| `token_type` | `user` \| `admin` \| `resolver` \| `federation`.                          |
+| `token_type` | `user` \| `resolver` \| `federation`. There is no `admin` token type.     |
 | `aud`        | Backend domain of the verifying instance (checked against `BACK_DOMAIN`). |
 
 ## 4) Federation authentication (pairwise JWT)
@@ -200,14 +201,14 @@ via WebFinger and cached.
 
 ### Federation endpoints
 
-| Method | Path                                | Description                                     |
-|--------|-------------------------------------|-------------------------------------------------|
-| `POST` | `/api/federation/auth/request`      | Request a federation JWT.                       |
-| `POST` | `/api/federation/auth/grant`        | Receive a federation JWT from another instance. |
-| `POST` | `/api/federation/shares/announce`   | Share announcement.                             |
-| `POST` | `/api/federation/shares/revoke`     | Share revocation.                               |
-| `POST` | `/api/federation/pictures/announce` | Announce pictures for an active share.          |
-| `POST` | `/api/federation/pictures/presign`  | Request presigned URL from the original owner.  |
+| Method | Path                                | Description                                                        |
+|--------|-------------------------------------|--------------------------------------------------------------------|
+| `POST` | `/api/federation/auth/request`      | Request a federation JWT.                                          |
+| `POST` | `/api/federation/auth/grant`        | Receive a federation JWT from another instance.                    |
+| `POST` | `/api/federation/shares/announce`   | Share announcement. Requires federation JWT.                       |
+| `POST` | `/api/federation/shares/revoke`     | Share revocation. Requires federation JWT.                         |
+| `POST` | `/api/federation/pictures/announce` | Announce pictures for an active share. Requires federation JWT.    |
+| `POST` | `/api/federation/pictures/presign`  | Request presigned URL. Auth: `share_token` only — no JWT required. |
 
 ## 6) Key flows
 
@@ -222,9 +223,11 @@ S3 keys are derived as `{user_id}/{picture_id}` and never stored in the database
 
 ### Federation share announce
 
-1. Alice creates `OutgoingShare`; backend federates share announcement to Bob's backend.
+1. Alice creates `OutgoingShare`; backend federates the announcement to Bob's backend.
 2. Bob's backend creates `IncomingShare` + `/SharedToMe/alice@instance.com/...` tags on each announced picture.
-3. Bob's client resolves Alice's backend via WebFinger (cached in Redis) and fetches blobs directly — Alice's backend is in the blob path, not Bob's.
+3. When Bob accesses a picture, his backend resolves Alice's backend (WebFinger, cached) and calls `POST /api/federation/pictures/presign` with the
+   `share_token`. Alice's backend returns a presigned S3 URL; Bob's backend caches it and returns it to the client. The actual blob is fetched
+   directly from Alice's S3.
 
 ### Federation share revocation
 

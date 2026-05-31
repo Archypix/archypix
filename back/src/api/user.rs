@@ -36,14 +36,7 @@ pub fn authenticated_routes() -> Router<AppState> {
         .route("/pictures/{id}/url", get(pictures::picture_url))
         .route("/settings", get(settings::get_settings))
         .route("/settings", patch(settings::update_settings))
-        .route(
-            "/tags",
-            get(tags::list).post(tags::assign).delete(tags::remove),
-        )
-        .route(
-            "/pictures/{id}/tags",
-            post(tags::assign_to_picture).delete(tags::remove_from_picture),
-        )
+        .route("/tags", get(tags::list).patch(tags::edit))
         .route(
             "/shares/outgoing",
             post(shares::create_outgoing).get(shares::list_outgoing),

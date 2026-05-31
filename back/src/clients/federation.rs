@@ -2,7 +2,7 @@ use crate::domain::auth::TokenType;
 use crate::infra::config::Config;
 use crate::infra::crypto::JwtService;
 use crate::infra::error::AppError;
-use crate::infra::redis::RedisClient;
+use crate::infra::redis::{RedisClient, RedisKey};
 use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -45,8 +45,13 @@ impl FederationClient {
         username: &str,
         global_domain: &str,
     ) -> Result<String, AppError> {
-        let cache_key = backend_cache_key(username, global_domain);
-        if let Some(cached) = self.redis.get_string(&cache_key).await.ok().flatten() {
+        if let Some(cached) = self
+            .redis
+            .get_string(RedisKey::FederationBackend(username, global_domain))
+            .await
+            .ok()
+            .flatten()
+        {
             trace!(
                 username,
                 global_domain, "federation: backend domain resolved from cache"
@@ -99,7 +104,7 @@ impl FederationClient {
 
         self.redis
             .set_string_ex(
-                &cache_key,
+                RedisKey::FederationBackend(username, global_domain),
                 &backend_domain,
                 self.config.federation_backend_cache_ttl_secs,
             )
@@ -115,8 +120,13 @@ impl FederationClient {
         recipient_username: &str,
         recipient_global_domain: &str,
     ) -> Result<Option<String>, AppError> {
-        let cache_key = token_cache_key(recipient_global_domain);
-        if let Some(token) = self.redis.get_string(&cache_key).await.ok().flatten() {
+        if let Some(token) = self
+            .redis
+            .get_string(RedisKey::FederationToken(recipient_global_domain))
+            .await
+            .ok()
+            .flatten()
+        {
             trace!(
                 recipient_global_domain,
                 "federation: token resolved from cache"
@@ -180,12 +190,18 @@ impl FederationClient {
             recipient_global_domain,
             "federation: waiting for auth token grant"
         );
-        let cache_key = token_cache_key(recipient_global_domain);
         let deadline = Duration::from_millis(self.config.federation_request_timeout_ms);
+        let domain = recipient_global_domain;
 
-        timeout(deadline, async {
+        timeout(deadline, async move {
             loop {
-                if let Some(token) = self.redis.get_string(&cache_key).await.ok().flatten() {
+                if let Some(token) = self
+                    .redis
+                    .get_string(RedisKey::FederationToken(domain))
+                    .await
+                    .ok()
+                    .flatten()
+                {
                     return Ok(token);
                 }
                 sleep(Duration::from_millis(200)).await;
@@ -216,7 +232,7 @@ impl FederationClient {
             ttl_secs, "federation: storing auth token"
         );
         self.redis
-            .set_string_ex(&token_cache_key(issuer_global_domain), token, ttl)
+            .set_string_ex(RedisKey::FederationToken(issuer_global_domain), token, ttl)
             .await
     }
 
@@ -274,6 +290,55 @@ impl FederationClient {
             )));
         }
         Ok(())
+    }
+
+    /// Request a presigned URL for a picture stored on a remote instance.
+    ///
+    /// Used when serving thumbnails/originals for received (non-owned) pictures.
+    /// Pass the `share_token` received from the picture's origin `IncomingShare` so
+    /// the remote instance can authorize the request even for transitive shares.
+    /// Request a presigned URL for a picture stored on a remote instance.
+    /// No federation JWT needed — the share_token is the sole authorization proof.
+    /// The backend domain is resolved via WebFinger (cached in Redis).
+    pub async fn presign_remote_picture(
+        &self,
+        owner_username: &str,
+        owner_global_domain: &str,
+        picture_id: Uuid,
+        variant: &str,
+        share_token: Uuid,
+    ) -> Result<String, AppError> {
+        let backend_domain = self
+            .resolve_backend_domain(owner_username, owner_global_domain)
+            .await?;
+        let url = format!(
+            "{}://{}/api/federation/pictures/presign",
+            self.config.federation_scheme(),
+            backend_domain
+        );
+        let resp = self
+            .http
+            .post(&url)
+            .json(&RemotePresignRequest {
+                owner_username: owner_username.to_string(),
+                owner_instance: owner_global_domain.to_string(),
+                picture_id: picture_id.to_string(),
+                variant: variant.to_string(),
+                share_token,
+            })
+            .send()
+            .await
+            .map_err(|e| AppError::InternalServerError(e.to_string()))?
+            .error_for_status()
+            .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+        body["url"].as_str().map(str::to_string).ok_or_else(|| {
+            AppError::InternalServerError("Missing url in presign response".to_string())
+        })
     }
 
     /// Announce a new outgoing share to the recipient's backend.
@@ -337,6 +402,9 @@ pub struct ShareAnnouncement {
     pub allow_share_back: bool,
     pub future: bool,
     pub shareback_of: Option<Uuid>,
+    /// The sender's OutgoingShare token — forwarded to the recipient so they can
+    /// authorize presign requests for transitively shared pictures.
+    pub share_token: Uuid,
 }
 
 // ── Internal types ────────────────────────────────────────────────────────────
@@ -349,6 +417,15 @@ struct FederationTokenRequest {
     nonce: String,
 }
 
+#[derive(Serialize)]
+struct RemotePresignRequest {
+    owner_username: String,
+    owner_instance: String,
+    picture_id: String,
+    variant: String,
+    share_token: uuid::Uuid,
+}
+
 #[derive(Deserialize)]
 struct WebFingerResponse {
     links: Vec<WebFingerLink>,
@@ -358,14 +435,6 @@ struct WebFingerResponse {
 struct WebFingerLink {
     rel: String,
     href: String,
-}
-
-fn backend_cache_key(username: &str, global_domain: &str) -> String {
-    format!("federation:backend:{}@{}", username, global_domain)
-}
-
-fn token_cache_key(global_domain: &str) -> String {
-    format!("federation:token:{}", global_domain)
 }
 
 fn normalize_domain(url: &str) -> String {

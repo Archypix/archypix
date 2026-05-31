@@ -75,6 +75,7 @@ pub async fn list(
         &state.redis,
         &state.storage,
         &state.config,
+        &state.federation,
         auth.user_id()?,
         params,
     )
@@ -99,6 +100,7 @@ pub async fn picture_url(
         &state.redis,
         &state.storage,
         &state.config,
+        &state.federation,
         auth.user_id()?,
         picture_id,
         query.variant,

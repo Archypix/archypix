@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM tags\n               WHERE picture_id = ANY($1::uuid[])\n                 AND tag_path::text = ANY($2::text[])\n                 AND picture_id IN (\n                   SELECT id FROM pictures\n                   WHERE local_user_id = $3 AND deleted_at IS NULL\n                 )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "TextArray",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "58eb72fdce6eaf243f8ce0bbfd34e1f1dd9e55fb49269b7f43ec4d2ab47e5fb3"
+}

@@ -22,6 +22,8 @@ pub struct OutgoingShare {
     pub allow_share_back: bool,
     pub future: bool,
     pub status: ShareStatus,
+    /// Opaque token used to authorize presign requests for transitive federation shares.
+    pub share_token: Uuid,
     pub created_at: NaiveDateTime,
     pub revoked_at: Option<NaiveDateTime>,
 }
@@ -35,6 +37,8 @@ pub struct IncomingShare {
     pub outgoing_share_id: Uuid,
     pub local_mapping_service_id: Option<Uuid>,
     pub status: ShareStatus,
+    /// Share token from the upstream sender, forwarded here for transitive presign authorization.
+    pub origin_share_token: Option<Uuid>,
     pub created_at: NaiveDateTime,
     pub revoked_at: Option<NaiveDateTime>,
 }

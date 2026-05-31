@@ -58,6 +58,7 @@ pub async fn create_outgoing_share(
                 allow_share_back,
                 future,
                 shareback_of,
+                share_token: share.share_token,
             },
         )
         .await?;

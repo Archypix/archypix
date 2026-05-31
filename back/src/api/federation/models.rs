@@ -34,4 +34,7 @@ pub struct PresignRequest {
     pub owner_instance: String,
     pub picture_id: String,
     pub variant: Option<String>,
+    /// Share token authorizing this presign request. Required for transitive shares where
+    /// the requesting instance is not a direct recipient of the owner's OutgoingShare.
+    pub share_token: Option<uuid::Uuid>,
 }

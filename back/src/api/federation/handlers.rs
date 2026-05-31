@@ -9,6 +9,7 @@ use crate::infra::s3;
 use crate::repository::picture::PictureRepository;
 use crate::repository::share::{IncomingShareRepository, OutgoingShareRepository};
 use crate::repository::user::UserRepository;
+use crate::services::pictures::PictureVariant;
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::State;
@@ -112,6 +113,7 @@ pub async fn announce_share(
         &payload.sender_username,
         &payload.sender_instance,
         payload.outgoing_share_id,
+        Some(payload.share_token),
     )
     .await?;
 
@@ -159,39 +161,38 @@ pub async fn announce_pictures(
     Ok(Json(serde_json::json!({ "accepted": true })))
 }
 
+// No federation JWT required — the share_token is the sole proof of authorization.
+// This avoids the federation handshake for every blob fetch, keeping presign requests cheap.
 pub async fn presign_picture(
-    auth: AuthFederation,
     State(state): State<AppState>,
     Json(payload): Json<PresignRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     debug!(
-        user = %auth.claims.sub,
-        token_type = "federation",
         owner = %payload.owner_username,
         owner_instance = %payload.owner_instance,
         picture_id = %payload.picture_id,
+        variant = ?payload.variant,
         "federation: presign_picture"
     );
     if payload.owner_instance != state.config.global_domain {
         return Err(AppError::BadRequest("Invalid owner instance".to_string()));
     }
 
+    let share_token = payload
+        .share_token
+        .ok_or_else(|| AppError::Unauthorized("share_token required".to_string()))?;
+
+    let allowed =
+        OutgoingShareRepository::has_active_share_for_token(&state.db, share_token).await?;
+    if !allowed {
+        return Err(AppError::Unauthorized(
+            "share_token does not match any active share".to_string(),
+        ));
+    }
+
     let owner = UserRepository::find_by_username(&state.db, &payload.owner_username)
         .await?
         .ok_or(AppError::NotFound)?;
-
-    let allowed = OutgoingShareRepository::has_active_share_for_instance(
-        &state.db,
-        owner.id,
-        &auth.claims.sub,
-    )
-    .await?;
-
-    if !allowed {
-        return Err(AppError::Unauthorized(
-            "No active share for requesting instance".to_string(),
-        ));
-    }
 
     let picture_id: Uuid = payload
         .picture_id
@@ -206,10 +207,9 @@ pub async fn presign_picture(
         return Err(AppError::NotFound);
     }
 
+    let variant: PictureVariant = payload.variant.as_deref().unwrap_or("original").parse()?;
+    let bucket = variant.bucket(&state.config);
     let key = s3::picture_key(picture.local_user_id, picture.id);
-    let url = state
-        .storage
-        .presign_get(&state.config.s3_bucket_pictures, &key)
-        .await?;
+    let url = state.storage.presign_get(bucket, &key).await?;
     Ok(Json(serde_json::json!({ "url": url })))
 }

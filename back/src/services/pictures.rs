@@ -1,17 +1,21 @@
+use crate::clients::federation::FederationClient;
 use crate::domain::picture::{Picture, UploadSession};
 use crate::domain::user_settings::VersioningMode;
 use crate::infra::config::Config;
 use crate::infra::error::AppError;
-use crate::infra::redis::RedisClient;
+use crate::infra::redis::{RedisClient, RedisKey};
 use crate::infra::s3::{self, StorageClient};
 use crate::repository::picture::{
     PictureListFilter, PictureRepository, PictureSortField, SortOrder,
 };
 use crate::repository::picture_version::PictureVersionRepository;
+use crate::repository::share::IncomingShareRepository;
+use crate::repository::user::UserRepository;
 use crate::repository::user_settings::UserSettingsRepository;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::str::FromStr;
 use tracing::trace;
 use uuid::Uuid;
 
@@ -32,6 +36,28 @@ impl PictureVariant {
             PictureVariant::Small => &config.s3_bucket_small,
             PictureVariant::Medium => &config.s3_bucket_medium,
             PictureVariant::Large => &config.s3_bucket_large,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Original => "original",
+            Self::Small => "small",
+            Self::Medium => "medium",
+            Self::Large => "large",
+        }
+    }
+}
+
+impl FromStr for PictureVariant {
+    type Err = AppError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "original" => Ok(Self::Original),
+            "small" => Ok(Self::Small),
+            "medium" => Ok(Self::Medium),
+            "large" => Ok(Self::Large),
+            other => Err(AppError::BadRequest(format!("Unknown variant: {other}"))),
         }
     }
 }
@@ -124,7 +150,7 @@ pub async fn begin_upload(
     };
     redis
         .set_json_ex(
-            &upload_session_key(picture_id),
+            RedisKey::UploadSession(picture_id),
             &session,
             config.s3_presign_ttl_secs + 60,
         )
@@ -143,9 +169,8 @@ pub async fn complete_upload(
     meta: UploadMetadata,
 ) -> Result<Picture, AppError> {
     trace!(user_id = %user_id, picture_id = %picture_id, "pictures: complete_upload");
-    let key = upload_session_key(picture_id);
     let session: UploadSession = redis
-        .get_json(&key)
+        .get_json(RedisKey::UploadSession(picture_id))
         .await?
         .ok_or_else(|| AppError::BadRequest("Upload session not found or expired".to_string()))?;
 
@@ -205,7 +230,7 @@ pub async fn complete_upload(
         .await?;
     }
 
-    redis.del(&key).await?;
+    redis.del(RedisKey::UploadSession(picture_id)).await?;
     Ok(picture)
 }
 
@@ -214,6 +239,7 @@ pub async fn list_pictures(
     redis: &RedisClient,
     storage: &StorageClient,
     config: &Config,
+    federation: &FederationClient,
     user_id: Uuid,
     params: PictureListParams,
 ) -> Result<PictureListResult, AppError> {
@@ -241,12 +267,13 @@ pub async fn list_pictures(
 
     let mut items = Vec::with_capacity(pictures.len());
     for pic in pictures {
-        let thumbnail_url = match params.thumbnail {
-            Some(size) => {
-                let key = s3::picture_key(pic.local_user_id, pic.id);
-                Some(cached_presign_get(redis, storage, config, size.bucket(config), &key).await?)
-            }
-            None => None,
+        let thumbnail_url = if let Some(size) = params.thumbnail {
+            Some(
+                presign_for_picture(db, redis, storage, config, federation, user_id, &pic, size)
+                    .await?,
+            )
+        } else {
+            None
         };
         items.push(PictureListItem {
             id: pic.id,
@@ -267,25 +294,83 @@ pub async fn list_pictures(
     })
 }
 
-async fn cached_presign_get(
+/// Resolve the presigned URL for `pic` at the given `variant`.
+///
+/// Checks `PictureUrl` cache first. On miss: owned picture → local S3; received picture →
+/// look up owner in local DB (same-backend share) or call the owner's backend via share_token
+/// (cross-instance). Result is cached under the same key regardless of path taken.
+async fn presign_for_picture(
+    db: &PgPool,
     redis: &RedisClient,
     storage: &StorageClient,
     config: &Config,
-    bucket: &str,
-    key: &str,
+    federation: &FederationClient,
+    local_user_id: Uuid,
+    pic: &Picture,
+    variant: PictureVariant,
 ) -> Result<String, AppError> {
-    let cache_key = format!("presign:{}:{}", bucket, key);
-    if let Some(cached) = redis.get_string(&cache_key).await? {
-        trace!(bucket, key, "presign cache hit");
+    // Single cache check for all picture types (owned, same-backend share, cross-instance share).
+    if let Some(cached) = redis
+        .get_string(RedisKey::PictureUrl(pic.id, variant.as_str()))
+        .await?
+    {
+        trace!(picture_id = %pic.id, "presign cache hit");
         return Ok(cached);
     }
-    trace!(bucket, key, "presign cache miss — generating URL");
-    let url = storage.presign_get(bucket, key).await?;
+
+    let url = if pic.is_owned() {
+        let key = s3::picture_key(pic.local_user_id, pic.id);
+        let url = storage.presign_get(variant.bucket(config), &key).await?;
+        redis
+            .set_string_ex(
+                RedisKey::PictureUrl(pic.id, variant.as_str()),
+                &url,
+                config.s3_presign_ttl_secs,
+            )
+            .await?;
+        url
+    } else {
+        let owner_username = pic.owner_username.as_deref().unwrap_or_default();
+        let owner_instance = pic.owner_instance_domain.as_deref().unwrap_or_default();
+
+        // Check if the owner lives on this backend. Multiple backends can share the same global
+        // domain (resolver setup), so we must look the user up in the local DB
+        if let Some(owner) = UserRepository::find_by_username(db, owner_username).await? {
+            let key = s3::picture_key(owner.id, pic.id);
+            storage.presign_get(variant.bucket(config), &key).await?
+        } else {
+            // Owner is on a different backend — authorise via share_token and call remote.
+            let share_token = IncomingShareRepository::find_token_by_sender(
+                db,
+                local_user_id,
+                owner_username,
+                owner_instance,
+            )
+            .await?
+            .ok_or_else(|| {
+                AppError::Unauthorized(format!(
+                    "No active incoming share token for {owner_username}@{owner_instance}"
+                ))
+            })?;
+            federation
+                .presign_remote_picture(
+                    owner_username,
+                    owner_instance,
+                    pic.id,
+                    variant.as_str(),
+                    share_token,
+                )
+                .await?
+        }
+    };
+
     let ttl = config
         .s3_presign_ttl_secs
         .saturating_sub(config.s3_presign_cache_margin_secs);
     if ttl > 0 {
-        redis.set_string_ex(&cache_key, &url, ttl).await?;
+        redis
+            .set_string_ex(RedisKey::PictureUrl(pic.id, variant.as_str()), &url, ttl)
+            .await?;
     }
     Ok(url)
 }
@@ -295,6 +380,7 @@ pub async fn presign_picture_variant(
     redis: &RedisClient,
     storage: &StorageClient,
     config: &Config,
+    federation: &FederationClient,
     user_id: Uuid,
     picture_id: Uuid,
     variant: PictureVariant,
@@ -308,10 +394,8 @@ pub async fn presign_picture_variant(
         return Err(AppError::NotFound);
     }
 
-    let key = s3::picture_key(user_id, picture_id);
-    cached_presign_get(redis, storage, config, variant.bucket(config), &key).await
-}
-
-fn upload_session_key(picture_id: Uuid) -> String {
-    format!("upload:{}", picture_id)
+    presign_for_picture(
+        db, redis, storage, config, federation, user_id, &picture, variant,
+    )
+    .await
 }

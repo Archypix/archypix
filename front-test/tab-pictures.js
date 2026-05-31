@@ -1,0 +1,198 @@
+const PicturesTab = {
+    props: ['state'],
+    emits: ['update'],
+
+    data(){
+        return {
+            uploadProgress: '',
+            listPage: 1, listSize: 20, listThumbnail: 'small',
+            picGrid: [],
+            picId: '',
+            picUrl: {id: '', variant: 'original', imgSrc: null},
+            out: {
+                upload: {text: '', err: false}, list: {text: '', err: false},
+                detail: {text: '', err: false}, picUrl: {text: '', err: false}
+            },
+        };
+    },
+
+    methods: {
+        show(key, data, isErr = false){
+            this.out[key] = {
+                text: isErr ? `❌ ${data}` : (typeof data === 'string' ? data : JSON.stringify(data, null, 2)),
+                err: isErr,
+            };
+        },
+
+        async api(path, opts = {}, auth = true){
+            const doFetch = () => {
+                const h = {'Content-Type': 'application/json', ...(opts.headers || {})};
+                if(auth && this.state.accessToken) h['Authorization'] = `Bearer ${this.state.accessToken}`;
+                return fetch(this.state.backend + path, {...opts, headers: h});
+            };
+            let res = await doFetch();
+            if(res.status === 401 && auth){
+                const ok = await this.tryRefresh();
+                if(ok) res = await doFetch();
+                else this.$emit('update', {accessToken: '', refreshToken: '', username: ''});
+            }
+            const ct = res.headers.get('content-type') || '';
+            const data = ct.includes('json') ? await res.json() : await res.text();
+            return {ok: res.ok, status: res.status, data};
+        },
+
+        async tryRefresh(){
+            if(!this.state.refreshToken) return false;
+            const res = await fetch(`${this.state.backend}/api/auth/refresh`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({refresh_token: this.state.refreshToken}),
+            });
+            if(!res.ok) return false;
+            const d = await res.json();
+            this.$emit('update', {accessToken: d.access_token, refreshToken: d.refresh_token});
+            return true;
+        },
+
+        async doUpload(){
+            const file = this.$refs.fileInput.files[0];
+            if(!file) return this.show('upload', 'No file selected.', true);
+            try{
+                this.uploadProgress = '1/3 Requesting upload URL…';
+                const r1 = await this.api('/api/authenticated/pictures/uploads', {
+                    method: 'POST', body: JSON.stringify({filename: file.name}),
+                });
+                if(!r1.ok) return this.show('upload', `HTTP ${r1.status}: ${JSON.stringify(r1.data)}`, true);
+
+                const {picture_id, presigned_url} = r1.data;
+                this.uploadProgress = `2/3 Uploading to S3… id=${picture_id}`;
+                const put = await fetch(presigned_url, {
+                    method: 'PUT', body: file,
+                    headers: {'Content-Type': file.type || 'application/octet-stream'},
+                });
+                if(!put.ok) return this.show('upload', `S3 PUT failed: HTTP ${put.status}`, true);
+
+                this.uploadProgress = '3/3 Completing…';
+                const body = {mime_type: file.type || null, file_size: file.size || null};
+                if(file.type.startsWith('image/')){
+                    try{
+                        Object.assign(body, await this.getImageDimensions(file));
+                    }catch(_){
+                    }
+                }
+                const r3 = await this.api(`/api/authenticated/pictures/uploads/${picture_id}/complete`, {
+                    method: 'POST', body: JSON.stringify(body),
+                });
+                this.uploadProgress = r3.ok ? '✅ Done!' : '❌ Complete step failed.';
+                this.show('upload', r3.data, !r3.ok);
+            }catch(e){
+                this.uploadProgress = '';
+                this.show('upload', e.message, true);
+            }
+        },
+
+        getImageDimensions(file){
+            return new Promise((res, rej) => {
+                const url = URL.createObjectURL(file);
+                const img = new Image();
+                img.onload = () => {
+                    res({width: img.naturalWidth, height: img.naturalHeight});
+                    URL.revokeObjectURL(url);
+                };
+                img.onerror = rej;
+                img.src = url;
+            });
+        },
+
+        async doListPictures(){
+            const qs = `?page=${this.listPage}&page_size=${this.listSize}${this.listThumbnail ? '&thumbnail=' + this.listThumbnail : ''}`;
+            const r = await this.api('/api/authenticated/pictures' + qs);
+            this.show('list', r.data, !r.ok);
+            this.picGrid = (r.ok && r.data.items) ? r.data.items : [];
+        },
+
+        selectPicture(id){
+            this.picId = id;
+            this.picUrl.id = id;
+            this.doGetPicture();
+        },
+
+        async doGetPicture(){
+            if(!this.picId) return this.show('detail', 'Enter a picture ID.', true);
+            const r = await this.api(`/api/authenticated/pictures/${this.picId}`);
+            this.show('detail', r.data, !r.ok);
+        },
+
+        async doGetPictureUrl(){
+            if(!this.picUrl.id) return this.show('picUrl', 'Enter a picture ID.', true);
+            this.picUrl.imgSrc = null;
+            const r = await this.api(`/api/authenticated/pictures/${this.picUrl.id}/url?variant=${this.picUrl.variant}`);
+            this.show('picUrl', r.data, !r.ok);
+            if(r.ok && r.data.url) this.picUrl.imgSrc = r.data.url;
+        },
+    },
+
+    template: `
+    <div class="space-y-4">
+        <div class="card">
+            <h2 class="font-bold text-base mb-3 border-b pb-2">Upload</h2>
+            <div class="flex gap-2 items-center mb-1">
+                <input class="text-xs" ref="fileInput" type="file"/>
+                <button @click="doUpload" class="btn bg-blue-600 hover:bg-blue-700 text-white">Upload</button>
+            </div>
+            <div class="text-xs text-gray-500 mb-1">{{ uploadProgress }}</div>
+            <pre :class="{'text-red-600': out.upload.err}" class="out">{{ out.upload.text }}</pre>
+        </div>
+
+        <div class="card">
+            <h2 class="font-bold text-base mb-3 border-b pb-2">List</h2>
+            <div class="flex gap-2 mb-2 flex-wrap">
+                <input class="input w-16" min="1" placeholder="page" type="number" v-model.number="listPage"/>
+                <input class="input w-20" min="1" placeholder="page_size" type="number" v-model.number="listSize"/>
+                <select class="input" v-model="listThumbnail">
+                    <option value="">no thumbnail</option>
+                    <option value="small">small</option>
+                    <option value="medium">medium</option>
+                    <option value="large">large</option>
+                </select>
+                <button @click="doListPictures" class="btn bg-blue-600 hover:bg-blue-700 text-white">List</button>
+            </div>
+            <pre :class="{'text-red-600': out.list.err}" class="out mb-2">{{ out.list.text }}</pre>
+            <div class="grid grid-cols-3 md:grid-cols-6 gap-2">
+                <div :key="pic.id" @click="selectPicture(pic.id)"
+                     class="border rounded overflow-hidden cursor-pointer hover:shadow-md"
+                     v-for="pic in picGrid">
+                    <img :src="pic.thumbnail_url" class="w-full h-20 object-cover bg-gray-200" v-if="pic.thumbnail_url"/>
+                    <div class="w-full h-20 bg-gray-200 flex items-center justify-center text-xs text-gray-400" v-else>no thumb</div>
+                    <div class="p-1 text-xs truncate text-gray-700">{{ pic.filename }}</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2 class="font-bold text-base mb-3 border-b pb-2">Details</h2>
+            <div class="flex gap-2 mb-2">
+                <input class="input flex-1" placeholder="Picture ID (UUID)" v-model="picId"/>
+                <button @click="doGetPicture" class="btn bg-blue-600 hover:bg-blue-700 text-white">Details</button>
+            </div>
+            <pre :class="{'text-red-600': out.detail.err}" class="out">{{ out.detail.text }}</pre>
+        </div>
+
+        <div class="card">
+            <h2 class="font-bold text-base mb-3 border-b pb-2">Picture URL</h2>
+            <div class="flex gap-2 flex-wrap mb-3">
+                <input class="input flex-1" placeholder="Picture ID (UUID)" v-model="picUrl.id"/>
+                <select class="input" v-model="picUrl.variant">
+                    <option value="original">original</option>
+                    <option value="small">small</option>
+                    <option value="medium">medium</option>
+                    <option value="large">large</option>
+                </select>
+                <button @click="doGetPictureUrl" class="btn bg-blue-600 hover:bg-blue-700 text-white">Get URL</button>
+            </div>
+            <pre :class="{'text-red-600': out.picUrl.err}" class="out mb-3">{{ out.picUrl.text }}</pre>
+            <img :src="picUrl.imgSrc" @error="picUrl.imgSrc = null" alt="preview"
+                 class="max-h-96 rounded border shadow mx-auto block" v-if="picUrl.imgSrc"/>
+        </div>
+    </div>`,
+};

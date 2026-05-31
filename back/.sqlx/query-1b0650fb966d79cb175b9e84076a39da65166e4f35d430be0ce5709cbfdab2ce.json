@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO tags (picture_id, tag_path, source)\n               SELECT $1, unnest($2::text[])::ltree, 'manual'::tag_source\n               ON CONFLICT (picture_id, tag_path) DO NOTHING\n               RETURNING id, picture_id, tag_path::text as \"tag_path!\",\n                         source as \"source!: TagSource\", source_id, assigned_at",
+  "query": "SELECT t.id, t.picture_id, t.tag_path::text as \"tag_path!\",\n                      t.source as \"source!: TagSource\", t.source_id, t.assigned_at\n               FROM tags t\n               JOIN pictures p ON p.id = t.picture_id\n               WHERE t.picture_id = $1 AND p.local_user_id = $2 AND p.deleted_at IS NULL",
   "describe": {
     "columns": [
       {
@@ -81,7 +81,7 @@
     "parameters": {
       "Left": [
         "Uuid",
-        "TextArray"
+        "Uuid"
       ]
     },
     "nullable": [
@@ -93,5 +93,5 @@
       false
     ]
   },
-  "hash": "8b6fc9f8cc2b2170e9fcc4b794d6a55553cee2242e422f1ef82b0459654a7543"
+  "hash": "1b0650fb966d79cb175b9e84076a39da65166e4f35d430be0ce5709cbfdab2ce"
 }

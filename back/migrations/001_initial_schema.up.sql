@@ -184,6 +184,9 @@ CREATE TABLE outgoing_shares
     -- Status
     status             share_status NOT NULL DEFAULT 'active',
 
+    -- Capability token forwarded to recipients for transitive presign authorization
+    share_token UUID NOT NULL DEFAULT gen_random_uuid(),
+
     -- Timestamps
     created_at         TIMESTAMP    NOT NULL DEFAULT (now() at time zone 'utc'),
     revoked_at         TIMESTAMP,
@@ -196,6 +199,7 @@ CREATE INDEX idx_outgoing_shares_owner ON outgoing_shares (owner_id);
 CREATE INDEX idx_outgoing_shares_recipient ON outgoing_shares (recipient_username, recipient_instance);
 CREATE INDEX idx_outgoing_shares_tag ON outgoing_shares USING GIST (tag_path);
 CREATE INDEX idx_outgoing_shares_status ON outgoing_shares (status);
+CREATE UNIQUE INDEX idx_outgoing_shares_token ON outgoing_shares (share_token);
 
 -- ============================================================================
 -- INCOMING SHARES
@@ -217,6 +221,9 @@ CREATE TABLE incoming_shares
 
     -- Status
     status                   share_status NOT NULL DEFAULT 'active',
+
+    -- Share token from the upstream sender; propagated for transitive presign authorization
+    origin_share_token UUID,
 
     -- Timestamps
     created_at               TIMESTAMP    NOT NULL DEFAULT (now() at time zone 'utc'),
