@@ -87,19 +87,6 @@ graph TB
 | [**Backend**](https://github.com/ClementGre/Archypix/tree/main/back)      | Axum HTTP server. Authoritative store for users, pictures, tags, and shares. Serves the REST API and WebDAV.                 |
 | **Workers** *(planned)*                                                   | Async job pool for thumbnails, ML inference, face detection, geo clustering.                                                 |
 
-### Local development
-
-```bash
-docker compose -f docker-compose.dev.yml up --build
-```
-
-The dev stack includes:
-
-- **Resolver** — handles WebFinger lookups and routes new user registrations
-- **Three backend instances** — two sharing a domain via the Resolver, one running standalone
-- **MinIO** — local S3-compatible object store
-- **PostgreSQL** and **Redis** — one instance each, with separate databases per service
-
 ## The Story of Archypix
 
 ### December 2022 — PicturesManager
