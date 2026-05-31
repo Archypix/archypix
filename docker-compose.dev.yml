@@ -23,6 +23,7 @@ services:
     build:
       context: ./resolver
       target: dev
+    container_name: archypix-resolver
     ports:
       - "8080:8080"
     environment:
@@ -39,13 +40,21 @@ services:
       - ./resolver/Cargo.lock:/app/Cargo.lock
       - ./resolver/src:/app/src
       - resolver_target:/app/target
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8080/health" ]
+      interval: 10s
+      timeout: 1s
+      retries: 2
+      start_period: 5s
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
 
   backend1:
     build:
       context: ./back
       target: dev
+    container_name: archypix-back1
     ports:
       - "8001:8000"
     env_file:
@@ -78,16 +87,27 @@ services:
       - ./back/Cargo.toml:/app/Cargo.toml
       - ./back/Cargo.lock:/app/Cargo.lock
       - back_target:/app/target
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+      interval: 10s
+      timeout: 1s
+      retries: 2
+      start_period: 5s
     depends_on:
-      - postgres
-      - redis
-      - minio
-      - resolver
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      resolver:
+        condition: service_healthy
 
   backend2:
     build:
       context: ./back
       target: dev
+    container_name: archypix-back2
     ports:
       - "8002:8000"
     env_file:
@@ -120,16 +140,27 @@ services:
       - ./back/Cargo.toml:/app/Cargo.toml
       - ./back/Cargo.lock:/app/Cargo.lock
       - back_target:/app/target
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+      interval: 10s
+      timeout: 1s
+      retries: 2
+      start_period: 5s
     depends_on:
-      - postgres
-      - redis
-      - minio
-      - resolver
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      resolver:
+        condition: service_healthy
 
   backend3:
     build:
       context: ./back
       target: dev
+    container_name: archypix-back3
     ports:
       - "8003:8000"
     env_file:
@@ -159,40 +190,67 @@ services:
       - ./back/Cargo.toml:/app/Cargo.toml
       - ./back/Cargo.lock:/app/Cargo.lock
       - back_target:/app/target
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
+      interval: 10s
+      timeout: 1s
+      retries: 2
+      start_period: 5s
     depends_on:
-      - postgres
-      - redis
-      - minio
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
 
   postgres:
     image: postgres:18-alpine
+    container_name: archypix-postgres
+    ports:
+      - "5432:5432"
     environment:
       POSTGRES_DB: archypix_resolver
       POSTGRES_USER: archypix
       POSTGRES_PASSWORD: archypix
-    ports:
-      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/postgres-init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-U", "archypix", "-d", "archypix_resolver" ]
+      interval: 10s
+      timeout: 2s
+      retries: 2
 
   redis:
     image: redis:latest
+    container_name: archypix-redis
     command: redis-server --requirepass archypix --appendonly yes
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 2s
+      retries: 2
 
   minio:
     image: minio/minio:latest
-    environment:
-      MINIO_ROOT_USER: archypix
-      MINIO_ROOT_PASSWORD: archypix
+    container_name: archypix-minio
+    command: server /data --address :9000 --console-address :9001
     ports:
       - "9000:9000"
       - "9001:9001"
-    command: server /data --address :9000 --console-address :9001
+    environment:
+      MINIO_ROOT_USER: archypix
+      MINIO_ROOT_PASSWORD: archypix
     volumes:
       - minio_data:/data
+    healthcheck:
+      test: [ "CMD", "mc", "ready", "local" ]
+      interval: 10s
+      timeout: 2s
+      retries: 2
 
 volumes:
   # Cargo build caches — pre-seeded from image on first start, persist across restarts.

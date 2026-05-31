@@ -2,37 +2,43 @@ services:
   postgres:
     image: postgres:18-alpine
     container_name: archypix-back-db
+    ports:
+      - "5432:5432"
     environment:
       POSTGRES_DB: archypix_back
       POSTGRES_USER: archypix
       POSTGRES_PASSWORD: archypix
-    ports:
-      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U archypix" ]
+      test: [ "CMD", "pg_isready", "-U", "archypix", "-d", "archypix_back" ]
       interval: 10s
-      timeout: 5s
-      retries: 5
+      timeout: 2s
+      retries: 2
 
   minio:
     image: minio/minio:latest
     container_name: archypix-back-minio
-    environment:
-      MINIO_ROOT_USER: archypix
-      MINIO_ROOT_PASSWORD: archypix
+    command: [ "server", "/data", "--address", ":9000", "--console-address", ":9001" ]
     ports:
       - "9000:9000" # MinIO API
       - "9001:9001" # MinIO console
+    environment:
+      MINIO_ROOT_USER: archypix
+      MINIO_ROOT_PASSWORD: archypix
     volumes:
       - minio_data:/data
-    command: [ "server", "/data", "--address", ":9000", "--console-address", ":9001" ]
+    healthcheck:
+      test: [ "CMD", "mc", "ready", "local" ]
+      interval: 10s
+      timeout: 2s
+      retries: 2
 
 
   redis:
     image: redis:latest
     container_name: archypix-back-redis
+    command: redis-server --requirepass archypix --appendonly yes
     ports:
       - '6379:6379'
     volumes:
