@@ -93,14 +93,14 @@ back/src/
   clients.rs
   clients/
     federation.rs      # FederationClient (WebFinger, token lifecycle, announce_share)
-    resolver.rs        # ResolverClient (update_mapping, verify_token)
+    resolver.rs        # ResolverClient (self_register, update_mapping, verify_token)
 
   services.rs
   services/
     auth.rs            # login(), refresh(), logout()
     users.rs           # create_user()
-    pictures.rs        # begin_upload(), complete_upload(), list_pictures()
-                       # + ThumbnailSize, UploadMetadata, PictureListParams
+    pictures.rs        # begin_upload(), complete_upload(), list_pictures(), presign_picture_variant()
+                       # + PictureVariant (original|small|medium|large), UploadMetadata, PictureListParams
     user_settings.rs   # get(), update()
     shares.rs          # create_outgoing_share()
 
@@ -116,7 +116,7 @@ back/src/
     user/
       auth.rs          # login, refresh, logout, me handlers
       users.rs         # register, get_public, update_me handlers
-      pictures.rs      # create_upload, complete_upload, list, details handlers
+      pictures.rs      # create_upload, complete_upload, list, details, picture_url handlers
       settings.rs      # get_settings, update_settings handlers
       shares.rs        # share create/list/accept/reject handlers
       tags.rs          # tag list/assign/remove handlers
@@ -227,10 +227,13 @@ The router is composed in `src/api.rs` (no `routes.rs` files).
 
 Two domain concepts are used throughout the system:
 
-| Term               | Config field     | Example                | Description                                                                                                                                              |
-|--------------------|------------------|------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **Global domain**  | `WEBFINGER_HOST` | `example.com`          | Public identity domain. Used in `@user:example.com`, stored in JWTs, database, and all federation messages. Never changes from the user's perspective.   |
-| **Backend domain** | `HOST`           | `backend1.example.com` | Actual API server domain. Resolved at request time via WebFinger. Never stored persistently — it may change if users are migrated to a different server. |
+| Term               | Env var         | Example                | Description                                                                                                                                              |
+|--------------------|-----------------|------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **Global domain**  | `GLOBAL_DOMAIN` | `example.com`          | Public identity domain. Used in `@user:example.com`, stored in JWTs, database, and all federation messages. Never changes from the user's perspective.   |
+| **Backend domain** | `BACK_DOMAIN`   | `backend1.example.com` | Actual API server domain. Resolved at request time via WebFinger. Never stored persistently — it may change if users are migrated to a different server. |
+
+`GLOBAL_DOMAIN` does **not** need to equal `BACK_DOMAIN`. You can host your backend at `backend1.example.com` while identities are `@user:example.com`
+by forwarding `/.well-known/webfinger` on the global domain to the backend via a reverse proxy — the same delegation pattern used by Matrix.
 
 **Invariant:** all persistent storage (database fields, JWT claims) uses the **global domain**. The backend domain is derived from the global domain
 on demand via WebFinger and cached in Redis.
@@ -241,15 +244,15 @@ on demand via WebFinger and cached in Redis.
 
 All auth types use JWT with a shared claim shape:
 
-| Claim               | Description                                                                    |
-|---------------------|--------------------------------------------------------------------------------|
-| `sub`               | Username (for user/admin tokens) or global domain (for federation tokens).     |
-| `uid`               | User UUID (for user/admin tokens).                                             |
-| `instance`          | **Global (WebFinger) domain** of the issuing instance.                         |
-| `token_type`        | `user` \| `admin` \| `resolver` \| `federation`.                               |
-| `is_admin`          | Boolean (true for admin tokens).                                               |
-| `aud`               | **Backend domain** of the verifying instance (checked locally against `HOST`). |
-| `exp`, `iat`, `jti` | Standard JWT lifecycle and replay protection.                                  |
+| Claim               | Description                                                                           |
+|---------------------|---------------------------------------------------------------------------------------|
+| `sub`               | Username (for user/admin tokens) or global domain (for federation tokens).            |
+| `uid`               | User UUID (for user/admin tokens).                                                    |
+| `instance`          | **Global (WebFinger) domain** of the issuing instance.                                |
+| `token_type`        | `user` \| `admin` \| `resolver` \| `federation`.                                      |
+| `is_admin`          | Boolean (true for admin tokens).                                                      |
+| `aud`               | **Backend domain** of the verifying instance (checked locally against `BACK_DOMAIN`). |
+| `exp`, `iat`, `jti` | Standard JWT lifecycle and replay protection.                                         |
 
 The separation between `instance` (global domain) and `aud` (backend domain) means a token correctly identifies the issuing instance by its public
 identity while still being verifiable by the specific backend that received it.
@@ -295,22 +298,22 @@ via WebFinger at request time and cached in Redis.
 
 ## 5) Middleware stack (Axum/Tower)
 
-| Middleware  | Applies to                           | Purpose                                          |
-|-------------|--------------------------------------|--------------------------------------------------|
-| Request ID  | All                                  | Correlate logs across services.                  |
-| Trace       | All                                  | Structured request logs with latency and status. |
-| Timeout     | All                                  | Bound request time (e.g., 30s).                  |
-| Body limit  | Upload endpoints                     | Prevent oversized JSON payloads.                 |
-| CORS        | `/api/*`                             | Browser access from `front_url`.                 |
-| Compression | All (except uploads)                 | Reduce JSON response size.                       |
-| Rate limit  | Auth + federation + public endpoints | Abuse control (Redis-backed).                    |
-| Auth        | By route group                       | Enforce identity type.                           |
+| Middleware  | Applies to                           | Purpose                                               |
+|-------------|--------------------------------------|-------------------------------------------------------|
+| Request ID  | All                                  | Correlate logs across services.                       |
+| Trace       | All                                  | Structured request logs with latency and status.      |
+| Timeout     | All                                  | Bound request time (e.g., 30s).                       |
+| Body limit  | Upload endpoints                     | Prevent oversized JSON payloads.                      |
+| CORS        | `/api/*`                             | Browser access from origins listed in `CORS_ORIGINS`. |
+| Compression | All (except uploads)                 | Reduce JSON response size.                            |
+| Rate limit  | Auth + federation + public endpoints | Abuse control (Redis-backed).                         |
+| Auth        | By route group                       | Enforce identity type.                                |
 
 ## 6) Endpoint layout (initial set)
 
 ### 6.1 Resolver endpoints
 
-These endpoints are on the **backend** and are called by the Resolver service (authenticated with a resolver JWT signed by `RESOLVER_ADMIN_SECRET`).
+These endpoints are on the **backend** and are called by the Resolver service (authenticated with a resolver JWT signed by `RESOLVER_JWT_SECRET`).
 
 | Method | Path                             | Description                                                  |
 |--------|----------------------------------|--------------------------------------------------------------|
@@ -331,15 +334,29 @@ These endpoints are on the **Resolver service** itself (`resolver/`, port 8080).
 
 **Admin (resolver JWT required)**
 
-| Method | Path            | Description                                                              |
-|--------|-----------------|--------------------------------------------------------------------------|
-| `POST` | `/api/update`   | Manually update a `username → backend_url` mapping (called by backends). |
-| `POST` | `/api/backends` | Register a backend node with the resolver.                               |
-| `GET`  | `/api/backends` | List all registered backend nodes.                                       |
+| Method | Path            | Description                                                                                  |
+|--------|-----------------|----------------------------------------------------------------------------------------------|
+| `POST` | `/api/update`   | Update a `username → back_domain` mapping (called by backends when a user changes instance). |
+| `POST` | `/api/backends` | Backend self-registration at startup. Body: `{ back_domain, use_https, internal_url }`.      |
+| `GET`  | `/api/backends` | List all registered backend domains.                                                         |
+
+**Resolver database schema (backends table):**
+
+| Column         | Type    | Description                                                                                                      |
+|----------------|---------|------------------------------------------------------------------------------------------------------------------|
+| `back_domain`  | VARCHAR | **Primary key.** Public domain:port, used as JWT audience.                                                       |
+| `use_https`    | BOOLEAN | Whether the backend is served over HTTPS. Combined with `back_domain` to produce the URL in WebFinger responses. |
+| `internal_url` | VARCHAR | URL the resolver uses internally to forward registrations (e.g. Docker hostname).                                |
+
+The `user_mappings` table stores `back_domain` (FK → `backends.back_domain`) rather than a full URL; WebFinger responses derive the URL from
+`back_domain + use_https` at query time.
+
+**Backend self-registration:** at startup, each backend calls `POST /api/backends` with its own `back_domain`, `use_https`, and `internal_url`. The
+resolver upserts the record. If no backends are registered when a user tries to register, the resolver returns 503.
 
 **`POST /api/register` body:** `{ username, display_name, email, password }`  
-**Algorithm:** queries `user_mappings` grouped by `backends`, picks the backend with fewest users (or 503 if no backends registered), forwards to
-`POST {backend}/api/resolver/users` with a resolver JWT, then stores `username → backend_url`.
+**Algorithm:** queries `backends` ordered by fewest users; picks the least-loaded one; generates a resolver JWT with `aud = back_domain`; forwards to
+`POST {internal_url}/api/resolver/users`; stores `username → back_domain` in `user_mappings`.
 
 ### 6.2 Admin endpoints
 
@@ -387,26 +404,27 @@ User settings are **not** embedded in the JWT — they are loaded from the datab
 
 **Pictures — list & details**
 
-| Method | Path                               | Description                                      |
-|--------|------------------------------------|--------------------------------------------------|
-| `GET`  | `/api/authenticated/pictures`      | Paginated picture list (see query params below). |
-| `GET`  | `/api/authenticated/pictures/{id}` | Full picture details including version history.  |
+| Method | Path                                   | Description                                                                                                                                                        |
+|--------|----------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `GET`  | `/api/authenticated/pictures`          | Paginated picture list (see query params below).                                                                                                                   |
+| `GET`  | `/api/authenticated/pictures/{id}`     | Full picture details including version history.                                                                                                                    |
+| `GET`  | `/api/authenticated/pictures/{id}/url` | Get a presigned URL for a specific variant. Query param: `variant=original\|small\|medium\|large`. Returns `{ url, variant }`. URL points at `S3_PUBLIC_ENDPOINT`. |
 
 List query parameters:
 
-| Parameter         | Type                                           | Default       | Description                                                                                                                    |
-|-------------------|------------------------------------------------|---------------|--------------------------------------------------------------------------------------------------------------------------------|
-| `page`            | integer                                        | `1`           | Page number.                                                                                                                   |
-| `page_size`       | integer (max 200)                              | `50`          | Items per page.                                                                                                                |
-| `sort`            | `captured_at` \| `ingested_at` \| `updated_at` | `ingested_at` | Sort field.                                                                                                                    |
-| `order`           | `asc` \| `desc`                                | `desc`        | Sort direction.                                                                                                                |
-| `tag`             | ltree path string                              | —             | Filter to pictures under this tag path (inclusive descendants).                                                                |
-| `owned_only`      | boolean                                        | `false`       | Restrict to pictures owned by this user.                                                                                       |
-| `shared_with_me`  | boolean                                        | `false`       | Restrict to pictures received via a share.                                                                                     |
-| `include_deleted` | boolean                                        | `false`       | Include soft-deleted pictures.                                                                                                 |
-| `captured_after`  | ISO-8601 datetime                              | —             | Filter by capture date (inclusive lower bound).                                                                                |
-| `captured_before` | ISO-8601 datetime                              | —             | Filter by capture date (inclusive upper bound).                                                                                |
-| `thumbnail`       | `small` \| `medium` \| `large`                 | —             | If set, each item includes a `thumbnail_url` presigned URL. URLs are cached in Redis for `presign_ttl − cache_margin` seconds. |
+| Parameter         | Type                                           | Default       | Description                                                                                                                                                     |
+|-------------------|------------------------------------------------|---------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `page`            | integer                                        | `1`           | Page number.                                                                                                                                                    |
+| `page_size`       | integer (max 200)                              | `50`          | Items per page.                                                                                                                                                 |
+| `sort`            | `captured_at` \| `ingested_at` \| `updated_at` | `ingested_at` | Sort field.                                                                                                                                                     |
+| `order`           | `asc` \| `desc`                                | `desc`        | Sort direction.                                                                                                                                                 |
+| `tag`             | ltree path string                              | —             | Filter to pictures under this tag path (inclusive descendants).                                                                                                 |
+| `owned_only`      | boolean                                        | `false`       | Restrict to pictures owned by this user.                                                                                                                        |
+| `shared_with_me`  | boolean                                        | `false`       | Restrict to pictures received via a share.                                                                                                                      |
+| `include_deleted` | boolean                                        | `false`       | Include soft-deleted pictures.                                                                                                                                  |
+| `captured_after`  | ISO-8601 datetime                              | —             | Filter by capture date (inclusive lower bound).                                                                                                                 |
+| `captured_before` | ISO-8601 datetime                              | —             | Filter by capture date (inclusive upper bound).                                                                                                                 |
+| `thumbnail`       | `small` \| `medium` \| `large`                 | —             | If set, each item includes a `thumbnail_url` presigned URL pointing at `S3_PUBLIC_ENDPOINT`. URLs are cached in Redis for `presign_ttl − cache_margin` seconds. |
 
 List response: `{ total, page, page_size, items: [{ id, filename, width, height, captured_at, ingested_at, thumbnail_url? }] }`
 
@@ -537,8 +555,13 @@ sequenceDiagram
    Worker ->> Backend: publish results (metadata, face embeddings, etc.)
 ```
 
-**Presigned URL caching:** The list endpoint generates presigned GET URLs for thumbnails. URLs are cached in Redis under `presign:{bucket}:{key}` for
+**Presigned URL caching:** presigned GET URLs (list thumbnails and `GET /pictures/{id}/url`) are cached in Redis under `presign:{bucket}:{key}` for
 `S3_PRESIGN_TTL_SECS − S3_PRESIGN_CACHE_MARGIN_SECS` seconds. If the TTL is ≤ 0, caching is skipped entirely. Default: 3600s − 600s = 3000s cache.
+
+**Public vs internal S3 endpoint:** `S3_ENDPOINT` is used for all server-side S3 operations (uploads, copies, bucket management).
+`S3_PUBLIC_ENDPOINT` (defaults to `S3_ENDPOINT`) is used when generating presigned URLs, so the URLs embedded in API responses are reachable by
+browsers. Override when the backend reaches MinIO via an internal network address (e.g. Docker container hostname) but clients need to reach it via a
+publicly exposed port.
 
 **WebDAV presigned strategy (not yet implemented):** WebDAV clients authenticate against the backend and are unaware of MinIO. For full-resolution
 reads the backend issues an HTTP redirect to a presigned GET URL. For thumbnails the backend proxies the stream. WebDAV writes go through the backend,
@@ -644,27 +667,36 @@ federation announcement.
 
 ## 10) Local dev setup (Docker)
 
-A root-level `docker-compose.yml` provides a complete federation dev stack:
+Two compose files are provided:
+
+- `docker-compose.dev.yml` — hot-reloading dev stack (source mounted, no rebuild needed for code changes)
+- `docker-compose.yml` — production-like stack
 
 ```
-docker compose up --build
+docker compose -f docker-compose.dev.yml up --build
 ```
 
-| Service       | Port      | Description                                                       |
-|---------------|-----------|-------------------------------------------------------------------|
-| `resolver`    | 8080      | WebFinger resolver + user registration routing                    |
-| `backend1`    | 8001      | Backend with `USE_RESOLVER=true`, `WEBFINGER_HOST=archypix.local` |
-| `backend2`    | 8002      | Standalone backend, no resolver                                   |
-| `minio`       | 9000/9001 | Shared MinIO (API / console)                                      |
-| `postgres-*`  | —         | Separate Postgres per service (internal)                          |
-| `redis-back*` | —         | Separate Redis per backend (internal)                             |
+### Dev stack topology
 
-**Testing federation:** Open `front-test/index.html` in two browser tabs. Set one to `http://localhost:8001` and the other to `http://localhost:8002`.
-Use sharing endpoints to send pictures across instances.
+| Service    | Port      | `GLOBAL_DOMAIN`  | `USE_RESOLVER` | Description                           |
+|------------|-----------|------------------|----------------|---------------------------------------|
+| `resolver` | 8080      | `archypix.local` | —              | WebFinger + user registration routing |
+| `backend1` | 8001      | `archypix.local` | `true`         | Uses resolver (shared domain)         |
+| `backend2` | 8002      | `archypix.local` | `true`         | Uses resolver (shared domain)         |
+| `backend3` | 8003      | `localhost:8003` | `false`        | Standalone, self-resolves WebFinger   |
+| `minio`    | 9000/9001 | —                | —              | Shared MinIO (API / console)          |
+| `postgres` | 5432      | —                | —              | Single Postgres with separate DBs     |
+| `redis`    | 6379      | —                | —              | Single Redis with separate DB indices |
 
-**Registering a backend with the resolver (backend1 flow):**
-After startup, backend1 registers itself with the resolver by calling `POST /api/resolver/users` (via resolver JWT) whenever a user is created. The
-resolver stores `username → http://localhost:8001`.
+All inter-service traffic uses HTTP (`BACK_USE_HTTPS=false`, `FEDERATION_USE_HTTPS=false`). Common settings (S3, CORS, logging) are shared via
+`.env.back.common`.
+
+**Backend self-registration:** at startup each backend (when `USE_RESOLVER=true`) calls `POST {RESOLVER_INTERNAL_URL}/api/backends` with
+`{ back_domain, use_https, internal_url }`. The `internal_url` is the Docker-network URL the resolver uses to forward user registrations (e.g.
+`http://backend1:8000`), which differs from the `BACK_DOMAIN` (`localhost:8001`) visible externally.
+
+**Testing federation:** Open `front-test/index.html` in two browser tabs. Set one to `http://localhost:8001` and another to `http://localhost:8002` or
+`:8003`. Use sharing endpoints to send pictures across instances. Register via the resolver to test multi-backend routing.
 
 ---
 

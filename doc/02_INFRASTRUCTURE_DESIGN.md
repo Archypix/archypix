@@ -1,10 +1,16 @@
 - Resolver (Rust service)
-    - Purpose: map username → owning backend domain (implements WebFinger).
+    - Purpose: map username → owning backend domain (implements WebFinger). Enables multiple backends to share one global identity domain.
     - Processes / roles:
-        - WebFinger endpoint: answer /.well-known/webfinger requests.
+        - WebFinger endpoint: answer `/.well-known/webfinger` requests. Returns the full public backend URL derived from `back_domain + use_https` at
+          query time.
         - Registry access: read/write authoritative mapping in Postgres.
-        - Local cache: in‑process TTL cache (moka) for fast lookups.
-        - Admin/update API: allow backends to register users.
+        - Local cache: in‑process TTL cache (moka) for fast WebFinger lookups.
+        - Backend self-registration: `POST /api/backends` — backends call this at startup with `{ back_domain, use_https, internal_url }`. The
+          resolver stores the record and uses `internal_url` (internal Docker/VPC URL) to forward user registrations.
+        - User registration routing: `POST /api/register` — picks least-loaded backend, forwards via `internal_url`, stores `username → back_domain`
+          mapping.
+        - Mapping update API: `POST /api/update` — backends can update a user's mapping (e.g. after cross-instance migration).
+    - Key env vars: `GLOBAL_DOMAIN`, `RESOLVER_JWT_SECRET`, `DB_HOST/DB_USER/DB_PASSWORD/DB_NAME`.
 - Backend (Rust backend instance, per domain)
     - Purpose: authoritative per‑instance application server and metadata store.
     - Processes / roles:
@@ -51,8 +57,13 @@
       - Staging: `{user_id}/{picture_id}` (same UUID becomes the DB primary key on confirm)
   - `S3_BUCKET_STAGING` **must be unique** from all other bucket names — the backend applies a 1-day expiration lifecycle rule to it at startup, which
     would destroy data in any shared bucket.
-  - Presigned URLs: TTL controlled by `S3_PRESIGN_TTL_SECS` (default 3600s). The list endpoint caches presigned URLs in Redis for
-    `S3_PRESIGN_TTL_SECS − S3_PRESIGN_CACHE_MARGIN_SECS` (default 3000s). If cache TTL ≤ 0 caching is skipped entirely.
+  - Two S3 endpoint env vars:
+      - `S3_ENDPOINT` — used for all server-side operations (upload, copy, bucket management, lifecycle rules). May be an internal address (e.g.
+        `http://minio:9000`).
+      - `S3_PUBLIC_ENDPOINT` — used when generating presigned URLs returned to clients. Defaults to `S3_ENDPOINT`. Override when the internal and
+        public addresses differ (e.g. Docker vs. host-exposed port).
+  - Presigned URLs: TTL controlled by `S3_PRESIGN_TTL_SECS` (default 3600s). The list endpoint and `GET /pictures/{id}/url` cache presigned URLs in
+    Redis for `S3_PRESIGN_TTL_SECS − S3_PRESIGN_CACHE_MARGIN_SECS` (default 3000s). If cache TTL ≤ 0 caching is skipped entirely.
 - Frontend (static CDN + clients)
     - Purpose: single static frontend site + sync clients that reach the proper backend instance.
     - Roles:

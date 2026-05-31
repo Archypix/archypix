@@ -1,3 +1,4 @@
+use crate::infra::error::AppError;
 use crate::state::AppState;
 use axum::extract::{Query, State};
 use axum::http::{HeaderValue, header};
@@ -21,32 +22,61 @@ struct WebFingerLink {
     href: String,
 }
 
-/// Minimal WebFinger endpoint, active when `USE_RESOLVER=false`.
-/// Returns this backend's own public base URL for any resource query.
+/// Standalone WebFinger endpoint, active when `USE_RESOLVER=false`.
+///
+/// Parses `archypix:@username:global_domain` (domain may include a port),
+/// validates the domain against `GLOBAL_DOMAIN`, and returns this backend's
+/// public base URL. Returns 400 for malformed resources, 404 if the domain
+/// does not match this instance's `GLOBAL_DOMAIN`.
 pub async fn handler(
     State(state): State<AppState>,
     Query(query): Query<WebFingerQuery>,
-) -> Response {
+) -> Result<Response, AppError> {
+    let (username, domain) = parse_acct_resource(&query.resource).ok_or_else(|| {
+        AppError::BadRequest("Invalid resource format. Expected archypix:@user:domain".to_string())
+    })?;
+
+    if domain != state.config.global_domain {
+        return Err(AppError::NotFound);
+    }
+
     let public_base_url = state.config.public_base_url();
     tracing::info!(
         resource = %query.resource,
+        username,
         backend_url = %public_base_url,
         "WebFinger query"
     );
+
     let body = WebFingerResponse {
-        subject: query.resource.clone(),
+        subject: format!("archypix:@{}:{}", username, domain),
         links: vec![WebFingerLink {
             rel: "backend_url".to_string(),
             href: public_base_url,
         }],
     };
     let json = serde_json::to_string(&body).expect("WebFingerResponse is always serializable");
-    (
+    Ok((
         [(
             header::CONTENT_TYPE,
             HeaderValue::from_static("application/jrd+json"),
         )],
         json,
     )
-        .into_response()
+        .into_response())
+}
+
+/// Parse `archypix:@username:domain` into `(username, domain)`.
+/// Uses `splitn(2, ':')` on the part after the username so that a
+/// domain containing a port (e.g. `localhost:8003`) is preserved whole.
+fn parse_acct_resource(resource: &str) -> Option<(&str, &str)> {
+    let rest = resource.strip_prefix("archypix:@")?;
+    // splitn(2) → ["username", "domain_or_domain:port"]
+    let mut iter = rest.splitn(2, ':');
+    let username = iter.next()?;
+    let domain = iter.next()?;
+    if username.is_empty() || domain.is_empty() {
+        return None;
+    }
+    Some((username, domain))
 }
