@@ -4,7 +4,7 @@ use crate::infra::crypto::JwtService;
 use crate::infra::error::AppError;
 use reqwest::Client as HttpClient;
 use serde::Serialize;
-use tracing::info;
+use tracing::{debug, info, warn};
 
 /// Outbound client for the Resolver service.
 #[derive(Clone)]
@@ -31,6 +31,7 @@ impl ResolverClient {
     /// - Use the internal URL to forward user registration requests.
     pub async fn self_register(&self) -> Result<(), AppError> {
         if !self.config.use_resolver {
+            debug!("resolver: use_resolver=false, skipping self-registration");
             return Ok(());
         }
 
@@ -65,13 +66,21 @@ impl ResolverClient {
             })
             .send()
             .await
-            .map_err(|e| AppError::InternalServerError(format!("Resolver self-register: {e}")))?
+            .map_err(|e| {
+                warn!(resolver_url = %url, error = %e, "resolver: self-registration request failed");
+                AppError::InternalServerError(format!("Resolver self-register: {e}"))
+            })?
             .error_for_status()
-            .map_err(|e| AppError::InternalServerError(format!("Resolver self-register: {e}")))?;
+            .map_err(|e| {
+                warn!(resolver_url = %url, error = %e, "resolver: self-registration rejected");
+                AppError::InternalServerError(format!("Resolver self-register: {e}"))
+            })?;
 
         info!(
-            "Registered with resolver at {} (back_domain: {}, internal_url: {})",
-            self.config.resolver_internal_url, self.config.back_domain, internal_url,
+            resolver_url = %self.config.resolver_internal_url,
+            back_domain = %self.config.back_domain,
+            internal_url = %internal_url,
+            "Registered with resolver"
         );
         Ok(())
     }
@@ -82,6 +91,7 @@ impl ResolverClient {
         if !self.config.use_resolver {
             return Ok(());
         }
+        debug!(username, back_domain = %self.config.back_domain, "resolver: update_mapping");
 
         let token = self.jwt.issue(
             "resolver-update",
@@ -107,7 +117,10 @@ impl ResolverClient {
             })
             .send()
             .await
-            .map_err(|e| AppError::InternalServerError(e.to_string()))?
+            .map_err(|e| {
+                warn!(username, error = %e, "resolver: update_mapping request failed");
+                AppError::InternalServerError(e.to_string())
+            })?
             .error_for_status()
             .map_err(|e| AppError::InternalServerError(e.to_string()))?;
 

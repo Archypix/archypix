@@ -3,7 +3,7 @@ use axum::response::{IntoResponse, Response};
 use sqlx::Error;
 use std::borrow::Cow;
 use thiserror::Error;
-use tracing::warn;
+use tracing::{error, warn};
 
 #[derive(Error, Debug)]
 pub enum AppError {
@@ -32,7 +32,11 @@ impl IntoResponse for AppError {
             AppError::Conflict(_) => StatusCode::CONFLICT,
         };
         let body = serde_json::json!({ "error": self.to_string() });
-        warn!("responding with error: {:?}", self);
+        if status.is_server_error() {
+            error!(status = status.as_u16(), error = ?self, "server error");
+        } else {
+            warn!(status = status.as_u16(), error = ?self, "client error");
+        }
         (status, axum::Json(body)).into_response()
     }
 }

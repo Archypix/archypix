@@ -4,6 +4,7 @@ use crate::infra::error::{AppError, map_sqlx_error};
 use crate::repository::auth::CredentialRepository;
 use crate::repository::user::UserRepository;
 use sqlx::PgPool;
+use tracing::trace;
 
 pub async fn create_user(
     db: &PgPool,
@@ -13,6 +14,7 @@ pub async fn create_user(
     password: &str,
     is_admin: bool,
 ) -> Result<User, AppError> {
+    trace!(username, email, is_admin, "users: create_user");
     if password.trim().is_empty() {
         return Err(AppError::BadRequest("Password cannot be empty".to_string()));
     }

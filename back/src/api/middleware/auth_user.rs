@@ -18,6 +18,16 @@ impl AuthUser {
             .uid
             .ok_or_else(|| AppError::Unauthorized("Missing user id in token".to_string()))
     }
+
+    /// Returns `"admin"` or `"user"` depending on the `is_admin` claim — used as a consistent
+    /// `token_type` field in structured log records.
+    pub fn token_type(&self) -> &'static str {
+        if self.claims.is_admin {
+            "admin"
+        } else {
+            "user"
+        }
+    }
 }
 
 impl FromRequestParts<AppState> for AuthUser {

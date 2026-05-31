@@ -10,6 +10,7 @@ use crate::state::AppState;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
@@ -28,6 +29,7 @@ pub async fn create_upload(
     State(state): State<AppState>,
     Json(payload): Json<CreateUploadRequest>,
 ) -> Result<Json<CreateUploadResponse>, AppError> {
+    debug!(user = %auth.claims.sub, token_type = auth.token_type(), filename = %payload.filename, "create_upload");
     let (picture_id, presigned_url) = services::pictures::begin_upload(
         &state.redis,
         &state.storage,
@@ -48,6 +50,7 @@ pub async fn complete_upload(
     Path(picture_id): Path<Uuid>,
     Json(meta): Json<UploadMetadata>,
 ) -> Result<Json<Picture>, AppError> {
+    debug!(user = %auth.claims.sub, token_type = auth.token_type(), picture_id = %picture_id, "complete_upload");
     let picture = services::pictures::complete_upload(
         &state.db,
         &state.redis,
@@ -66,6 +69,7 @@ pub async fn list(
     State(state): State<AppState>,
     Query(params): Query<PictureListParams>,
 ) -> Result<Json<PictureListResult>, AppError> {
+    debug!(user = %auth.claims.sub, token_type = auth.token_type(), page = params.page, page_size = params.page_size, "list_pictures");
     let result = services::pictures::list_pictures(
         &state.db,
         &state.redis,
@@ -89,6 +93,7 @@ pub async fn picture_url(
     Path(picture_id): Path<Uuid>,
     Query(query): Query<PictureUrlQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    debug!(user = %auth.claims.sub, token_type = auth.token_type(), picture_id = %picture_id, variant = ?query.variant, "picture_url");
     let url = services::pictures::presign_picture_variant(
         &state.db,
         &state.redis,
@@ -109,6 +114,7 @@ pub async fn details(
     State(state): State<AppState>,
     Path(picture_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    debug!(user = %auth.claims.sub, token_type = auth.token_type(), picture_id = %picture_id, "picture_details");
     use crate::repository::picture::PictureRepository;
 
     let picture = PictureRepository::find_by_id(&state.db, picture_id)

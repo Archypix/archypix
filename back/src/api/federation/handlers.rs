@@ -13,13 +13,19 @@ use crate::state::AppState;
 use axum::Json;
 use axum::extract::State;
 use chrono::Utc;
-use tracing::info;
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 pub async fn auth_request(
     State(state): State<AppState>,
     Json(payload): Json<FederationAuthRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    debug!(
+        user = %payload.username,
+        token_type = "federation",
+        requester_instance = %payload.requester_instance,
+        "federation: auth_request"
+    );
     let token = state
         .federation
         .issue_federation_token(&payload.requester_instance)?;
@@ -47,6 +53,7 @@ pub async fn auth_grant(
     State(state): State<AppState>,
     Json(payload): Json<FederationAuthGrant>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    debug!(user = "-", token_type = "federation", issuer_instance = %payload.issuer_instance, "federation: auth_grant");
     let ttl = payload.expires_at - Utc::now().timestamp();
     if ttl <= 0 {
         return Err(AppError::BadRequest("Token already expired".to_string()));
@@ -63,16 +70,37 @@ pub async fn announce_share(
     State(state): State<AppState>,
     Json(payload): Json<ShareAnnouncement>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    debug!(
+        user = %auth.claims.sub,
+        token_type = "federation",
+        sender = %payload.sender_username,
+        sender_instance = %payload.sender_instance,
+        recipient = %payload.recipient_username,
+        tag_path = %payload.tag_path,
+        "federation: announce_share"
+    );
     let recipient = UserRepository::find_by_username(&state.db, &payload.recipient_username)
         .await?
         .ok_or(AppError::NotFound)?;
 
     if payload.recipient_instance != state.config.global_domain {
+        warn!(
+            user = %auth.claims.sub,
+            token_type = "federation",
+            recipient_instance = %payload.recipient_instance,
+            "federation: announce_share rejected — invalid recipient instance"
+        );
         return Err(AppError::BadRequest(
             "Invalid recipient instance".to_string(),
         ));
     }
     if payload.sender_instance != auth.claims.sub {
+        warn!(
+            user = %auth.claims.sub,
+            token_type = "federation",
+            sender_instance = %payload.sender_instance,
+            "federation: announce_share rejected — sender instance mismatch"
+        );
         return Err(AppError::Unauthorized(
             "Sender instance does not match authenticated instance".to_string(),
         ));
@@ -87,9 +115,13 @@ pub async fn announce_share(
     )
     .await?;
 
-    info!(
-        "Incoming share {} stored from {}@{}",
-        incoming.id, payload.sender_username, payload.sender_instance
+    debug!(
+        user = %auth.claims.sub,
+        token_type = "federation",
+        share_id = %incoming.id,
+        sender = %payload.sender_username,
+        sender_instance = %payload.sender_instance,
+        "federation: incoming share stored"
     );
     Ok(Json(serde_json::json!({ "accepted": true })))
 }
@@ -99,6 +131,12 @@ pub async fn revoke_share(
     State(state): State<AppState>,
     Json(payload): Json<ShareRevokeRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    debug!(
+        user = %auth.claims.sub,
+        token_type = "federation",
+        share_id = %payload.incoming_share_id,
+        "federation: revoke_share"
+    );
     let share = IncomingShareRepository::get_by_id(&state.db, payload.incoming_share_id).await?;
     if share.sender_instance != auth.claims.sub {
         return Err(AppError::Unauthorized(
@@ -126,6 +164,14 @@ pub async fn presign_picture(
     State(state): State<AppState>,
     Json(payload): Json<PresignRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    debug!(
+        user = %auth.claims.sub,
+        token_type = "federation",
+        owner = %payload.owner_username,
+        owner_instance = %payload.owner_instance,
+        picture_id = %payload.picture_id,
+        "federation: presign_picture"
+    );
     if payload.owner_instance != state.config.global_domain {
         return Err(AppError::BadRequest("Invalid owner instance".to_string()));
     }

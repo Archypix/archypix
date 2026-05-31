@@ -9,6 +9,7 @@ use crate::repository::auth::{CredentialRepository, RefreshTokenRepository};
 use crate::repository::user::UserRepository;
 use chrono::{Duration, Utc};
 use sqlx::PgPool;
+use tracing::trace;
 use uuid::Uuid;
 
 pub struct AuthTokens {
@@ -23,6 +24,7 @@ pub async fn login(
     username: &str,
     password: &str,
 ) -> Result<AuthTokens, AppError> {
+    trace!(username, "auth: login");
     let user = UserRepository::find_by_username(db, username)
         .await?
         .ok_or_else(|| AppError::Unauthorized("Invalid credentials".to_string()))?;
@@ -44,6 +46,7 @@ pub async fn refresh(
     config: &Config,
     refresh_token_raw: &str,
 ) -> Result<AuthTokens, AppError> {
+    trace!("auth: refresh");
     let token_hash = hash_refresh_token(refresh_token_raw);
     let stored = RefreshTokenRepository::find_valid(db, &token_hash)
         .await?
@@ -63,6 +66,7 @@ pub async fn logout(
     user_id: Option<Uuid>,
     refresh_token_raw: Option<&str>,
 ) -> Result<(), AppError> {
+    trace!(user_id = ?user_id, "auth: logout");
     if let Some(raw) = refresh_token_raw {
         let hash = hash_refresh_token(raw);
         if let Some(stored) = RefreshTokenRepository::find_valid(db, &hash).await? {

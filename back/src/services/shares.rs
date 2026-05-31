@@ -4,6 +4,7 @@ use crate::infra::config::Config;
 use crate::infra::error::AppError;
 use crate::repository::share::OutgoingShareRepository;
 use sqlx::PgPool;
+use tracing::trace;
 use uuid::Uuid;
 
 pub async fn create_outgoing_share(
@@ -19,6 +20,14 @@ pub async fn create_outgoing_share(
     future: bool,
     shareback_of: Option<Uuid>,
 ) -> Result<OutgoingShare, AppError> {
+    trace!(
+        owner_id = %owner_id,
+        sender = sender_username,
+        tag_path,
+        recipient = recipient_username,
+        recipient_instance,
+        "shares: create_outgoing_share"
+    );
     let share = OutgoingShareRepository::create(
         db,
         owner_id,

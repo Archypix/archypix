@@ -5,6 +5,7 @@ use crate::state::AppState;
 use axum::Json;
 use axum::extract::State;
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 #[derive(Debug, Deserialize)]
 pub struct LoginRequest {
@@ -32,6 +33,7 @@ pub async fn login(
     State(state): State<AppState>,
     Json(payload): Json<LoginRequest>,
 ) -> Result<Json<TokenResponse>, AppError> {
+    debug!(user = %payload.username, token_type = "-", "login");
     let tokens = services::auth::login(
         &state.db,
         &state.jwt,
@@ -50,6 +52,7 @@ pub async fn refresh(
     State(state): State<AppState>,
     Json(payload): Json<RefreshRequest>,
 ) -> Result<Json<TokenResponse>, AppError> {
+    debug!(user = "-", token_type = "-", "token refresh");
     let tokens =
         services::auth::refresh(&state.db, &state.jwt, &state.config, &payload.refresh_token)
             .await?;
@@ -64,6 +67,7 @@ pub async fn logout(
     State(state): State<AppState>,
     Json(payload): Json<LogoutRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    debug!(user = %auth.claims.sub, token_type = auth.token_type(), "logout");
     services::auth::logout(&state.db, auth.claims.uid, payload.refresh_token.as_deref()).await?;
     Ok(Json(serde_json::json!({ "logged_out": true })))
 }
@@ -72,6 +76,7 @@ pub async fn me(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    debug!(user = %auth.claims.sub, token_type = auth.token_type(), "me");
     use crate::repository::user::UserRepository;
     let user_id = auth.user_id()?;
     let user = UserRepository::find_by_id(&state.db, user_id)

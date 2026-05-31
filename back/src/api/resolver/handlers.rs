@@ -6,12 +6,14 @@ use crate::services;
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::{Path, State};
+use tracing::debug;
 
 pub async fn get_user(
-    _auth: AuthResolver,
+    auth: AuthResolver,
     State(state): State<AppState>,
     Path(username): Path<String>,
 ) -> Result<Json<UserResponse>, AppError> {
+    debug!(user = %username, token_type = "resolver", requester = %auth.claims.sub, "resolver: get_user");
     let user = UserRepository::find_by_username(&state.db, &username)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -19,10 +21,11 @@ pub async fn get_user(
 }
 
 pub async fn create_user(
-    _auth: AuthResolver,
+    auth: AuthResolver,
     State(state): State<AppState>,
     Json(payload): Json<CreateUserRequest>,
 ) -> Result<Json<UserResponse>, AppError> {
+    debug!(user = %payload.username, token_type = "resolver", requester = %auth.claims.sub, "resolver: create_user");
     let user = services::users::create_user(
         &state.db,
         &payload.username,

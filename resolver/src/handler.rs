@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 // ── WebFinger ────────────────────────────────────────────────────────────────
@@ -39,7 +39,7 @@ pub async fn webfinger_handler(
     let username = parse_acct_resource(&query.resource, &state)?;
 
     if let Some(backend_url) = state.cache.get(&username).await {
-        info!("Cache hit for username: {}", username);
+        debug!(user = %username, token_type = "-", source = "cache", "webfinger");
         return Ok(jrd_response(build_webfinger_response(
             &username,
             &backend_url,
@@ -50,7 +50,7 @@ pub async fn webfinger_handler(
     let backend_url = get_backend_url(&state.db, &username).await?;
 
     if let Some(backend_url) = backend_url {
-        info!("Database hit for username: {}", username);
+        debug!(user = %username, token_type = "-", source = "db", "webfinger");
         state
             .cache
             .insert(username.clone(), backend_url.clone())
@@ -61,7 +61,7 @@ pub async fn webfinger_handler(
             &state.global_domain,
         )))
     } else {
-        warn!("Unknown username: {}", username);
+        warn!(user = %username, token_type = "-", "webfinger: username not found");
         Err(AppError::NotFound)
     }
 }
@@ -110,9 +110,11 @@ pub async fn update_handler(
     // Invalidate the cache entry so the next WebFinger query rebuilds it from the DB.
     state.cache.invalidate(&payload.username).await;
 
-    info!(
-        "Updated mapping: {} -> {}",
-        payload.username, payload.back_domain
+    debug!(
+        user = %payload.username,
+        token_type = "resolver",
+        back_domain = %payload.back_domain,
+        "update_mapping"
     );
 
     Ok(Json(UpdateResponse {
@@ -165,8 +167,10 @@ pub async fn register_backend_handler(
     .await?;
 
     info!(
-        "Backend registered: {} (https={}, internal: {})",
-        payload.back_domain, payload.use_https, payload.internal_url
+        back_domain = %payload.back_domain,
+        use_https = payload.use_https,
+        internal_url = %payload.internal_url,
+        "Backend registered"
     );
 
     Ok(Json(RegisterBackendResponse {
@@ -206,6 +210,7 @@ pub async fn register_handler(
     State(state): State<AppState>,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Json<RegisterResponse>, AppError> {
+    debug!(user = %payload.username, token_type = "-", "register");
     if payload.username.is_empty() || payload.email.is_empty() {
         return Err(AppError::BadRequest(
             "username and email are required".to_string(),
@@ -270,9 +275,11 @@ pub async fn register_handler(
 
     upsert_mapping(&state.db, &payload.username, chosen_back_domain).await?;
 
-    info!(
-        "Registered user '{}' on backend '{}'",
-        payload.username, chosen_back_domain
+    debug!(
+        user = %payload.username,
+        token_type = "-",
+        back_domain = %chosen_back_domain,
+        "register: user registered"
     );
 
     Ok(Json(RegisterResponse {
@@ -324,7 +331,9 @@ fn extract_bearer_token(headers: &HeaderMap) -> Result<&str, AppError> {
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .ok_or(AppError::Unauthorized)
+        .ok_or_else(|| {
+            AppError::Unauthorized("Missing or invalid Authorization header".to_string())
+        })
 }
 
 fn verify_resolver_jwt(token: &str, state: &AppState) -> Result<ResolverJwtClaims, AppError> {
@@ -335,11 +344,12 @@ fn verify_resolver_jwt(token: &str, state: &AppState) -> Result<ResolverJwtClaim
         &DecodingKey::from_secret(state.resolver_jwt_secret.as_bytes()),
         &validation,
     )
-    .map_err(|_| AppError::Unauthorized)?;
+    .map_err(|_| AppError::Unauthorized("Invalid resolver JWT".to_string()))?;
 
     if data.claims.token_type != "resolver" {
-        warn!("Invalid resolver token type");
-        return Err(AppError::Unauthorized);
+        return Err(AppError::Unauthorized(
+            "Invalid token type: expected resolver".to_string(),
+        ));
     }
 
     Ok(data.claims)
@@ -366,7 +376,7 @@ fn generate_resolver_jwt(state: &AppState, back_domain: &str) -> Result<String, 
         &claims,
         &EncodingKey::from_secret(state.resolver_jwt_secret.as_bytes()),
     )
-    .map_err(|e| AppError::Internal(e.into()))
+    .map_err(|e| AppError::InternalServerError(e.to_string()))
 }
 
 // ── Resource parsing / response building ──────────────────────────────────────

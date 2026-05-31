@@ -7,6 +7,7 @@ use crate::state::AppState;
 use axum::Json;
 use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 #[derive(Debug, Deserialize)]
 pub struct CreateOutgoingRequest {
@@ -32,6 +33,14 @@ pub async fn create_outgoing(
     State(state): State<AppState>,
     Json(payload): Json<CreateOutgoingRequest>,
 ) -> Result<Json<ShareResponse>, AppError> {
+    debug!(
+        user = %auth.claims.sub,
+        token_type = auth.token_type(),
+        tag_path = %payload.tag_path,
+        recipient = %payload.recipient_username,
+        recipient_instance = %payload.recipient_instance,
+        "create_outgoing_share"
+    );
     let share = services::shares::create_outgoing_share(
         &state.db,
         &state.federation,
@@ -60,6 +69,7 @@ pub async fn list_outgoing(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<ShareResponse>>, AppError> {
+    debug!(user = %auth.claims.sub, token_type = auth.token_type(), "list_outgoing_shares");
     let shares = OutgoingShareRepository::list_by_owner(&state.db, auth.user_id()?).await?;
     Ok(Json(
         shares
@@ -79,6 +89,7 @@ pub async fn list_incoming(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+    debug!(user = %auth.claims.sub, token_type = auth.token_type(), "list_incoming_shares");
     let shares = IncomingShareRepository::list_by_recipient(&state.db, auth.user_id()?).await?;
     Ok(Json(
         shares
@@ -97,19 +108,21 @@ pub async fn list_incoming(
 }
 
 pub async fn accept_incoming(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Path(share_id): Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    debug!(user = %auth.claims.sub, token_type = auth.token_type(), share_id = %share_id, "accept_incoming_share");
     IncomingShareRepository::set_status(&state.db, share_id, ShareStatus::Active).await?;
     Ok(Json(serde_json::json!({ "accepted": true })))
 }
 
 pub async fn reject_incoming(
-    _auth: AuthUser,
+    auth: AuthUser,
     State(state): State<AppState>,
     Path(share_id): Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    debug!(user = %auth.claims.sub, token_type = auth.token_type(), share_id = %share_id, "reject_incoming_share");
     IncomingShareRepository::set_status(&state.db, share_id, ShareStatus::Tombstoned).await?;
     Ok(Json(serde_json::json!({ "rejected": true })))
 }

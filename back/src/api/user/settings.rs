@@ -6,11 +6,13 @@ use crate::state::AppState;
 use axum::Json;
 use axum::extract::State;
 use serde::Deserialize;
+use tracing::debug;
 
 pub async fn get_settings(
     auth: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<UserSettings>, AppError> {
+    debug!(user = %auth.claims.sub, token_type = auth.token_type(), "get_settings");
     let settings = services::user_settings::get(&state.db, auth.user_id()?).await?;
     Ok(Json(settings))
 }
@@ -25,6 +27,7 @@ pub async fn update_settings(
     State(state): State<AppState>,
     Json(body): Json<UpdateSettingsBody>,
 ) -> Result<Json<UserSettings>, AppError> {
+    debug!(user = %auth.claims.sub, token_type = auth.token_type(), versioning_mode = ?body.versioning_mode, "update_settings");
     let settings =
         services::user_settings::update(&state.db, auth.user_id()?, body.versioning_mode).await?;
     Ok(Json(settings))

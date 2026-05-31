@@ -6,6 +6,7 @@ use crate::state::AppState;
 use axum::Json;
 use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 #[derive(Debug, Serialize)]
 pub struct UserResponse {
@@ -33,6 +34,7 @@ pub async fn register(
     State(state): State<AppState>,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Json<UserResponse>, AppError> {
+    debug!(user = %payload.username, token_type = "-", "register");
     if state.config.use_resolver {
         return Err(AppError::BadRequest(
             "Registration is handled by the resolver".to_string(),
@@ -59,6 +61,7 @@ pub async fn get_public(
     State(state): State<AppState>,
     Path(username): Path<String>,
 ) -> Result<Json<UserResponse>, AppError> {
+    debug!(user = %username, token_type = "-", "get_public");
     let user = UserRepository::find_by_username(&state.db, &username)
         .await?
         .ok_or(AppError::NotFound)?;
@@ -75,6 +78,7 @@ pub async fn update_me(
     State(state): State<AppState>,
     Json(payload): Json<UpdateMeRequest>,
 ) -> Result<Json<UserResponse>, AppError> {
+    debug!(user = %auth.claims.sub, token_type = auth.token_type(), "update_me");
     let user = UserRepository::update_profile(
         &state.db,
         auth.user_id()?,

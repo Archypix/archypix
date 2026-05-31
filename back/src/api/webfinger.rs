@@ -4,6 +4,7 @@ use axum::extract::{Query, State};
 use axum::http::{HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 #[derive(Deserialize)]
 pub struct WebFingerQuery {
@@ -41,11 +42,12 @@ pub async fn handler(
     }
 
     let public_base_url = state.config.public_base_url();
-    tracing::info!(
+    debug!(
+        user = username,
+        token_type = "-",
         resource = %query.resource,
-        username,
         backend_url = %public_base_url,
-        "WebFinger query"
+        "webfinger"
     );
 
     let body = WebFingerResponse {

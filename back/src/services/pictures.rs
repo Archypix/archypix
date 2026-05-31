@@ -12,6 +12,7 @@ use crate::repository::user_settings::UserSettingsRepository;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use tracing::trace;
 use uuid::Uuid;
 
 /// Selectable picture variant for presigning. Used both in list thumbnails and the per-picture URL endpoint.
@@ -103,6 +104,7 @@ pub async fn begin_upload(
     user_id: Uuid,
     filename: &str,
 ) -> Result<(Uuid, String), AppError> {
+    trace!(user_id = %user_id, filename, "pictures: begin_upload");
     if filename.trim().is_empty() {
         return Err(AppError::BadRequest("Filename cannot be empty".to_string()));
     }
@@ -140,6 +142,7 @@ pub async fn complete_upload(
     picture_id: Uuid,
     meta: UploadMetadata,
 ) -> Result<Picture, AppError> {
+    trace!(user_id = %user_id, picture_id = %picture_id, "pictures: complete_upload");
     let key = upload_session_key(picture_id);
     let session: UploadSession = redis
         .get_json(&key)
@@ -214,6 +217,7 @@ pub async fn list_pictures(
     user_id: Uuid,
     params: PictureListParams,
 ) -> Result<PictureListResult, AppError> {
+    trace!(user_id = %user_id, page = params.page, page_size = params.page_size, "pictures: list");
     if params.page_size > 200 {
         return Err(AppError::BadRequest(
             "page_size cannot exceed 200".to_string(),
@@ -272,8 +276,10 @@ async fn cached_presign_get(
 ) -> Result<String, AppError> {
     let cache_key = format!("presign:{}:{}", bucket, key);
     if let Some(cached) = redis.get_string(&cache_key).await? {
+        trace!(bucket, key, "presign cache hit");
         return Ok(cached);
     }
+    trace!(bucket, key, "presign cache miss — generating URL");
     let url = storage.presign_get(bucket, key).await?;
     let ttl = config
         .s3_presign_ttl_secs
@@ -293,6 +299,7 @@ pub async fn presign_picture_variant(
     picture_id: Uuid,
     variant: PictureVariant,
 ) -> Result<String, AppError> {
+    trace!(user_id = %user_id, picture_id = %picture_id, variant = ?variant, "pictures: presign_variant");
     let picture = PictureRepository::find_by_id(db, picture_id)
         .await?
         .ok_or(AppError::NotFound)?;

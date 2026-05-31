@@ -7,6 +7,7 @@ use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::time::{sleep, timeout};
+use tracing::{debug, trace, warn};
 use uuid::Uuid;
 
 /// Outbound federation HTTP client — resolves remote backends via WebFinger,
@@ -46,9 +47,17 @@ impl FederationClient {
     ) -> Result<String, AppError> {
         let cache_key = backend_cache_key(username, global_domain);
         if let Some(cached) = self.redis.get_string(&cache_key).await.ok().flatten() {
+            trace!(
+                username,
+                global_domain, "federation: backend domain resolved from cache"
+            );
             return Ok(cached);
         }
 
+        debug!(
+            username,
+            global_domain, "federation: resolving backend domain via WebFinger"
+        );
         let url = format!(
             "{}://{}/.well-known/webfinger",
             self.config.federation_scheme(),
@@ -63,7 +72,10 @@ impl FederationClient {
             )])
             .send()
             .await
-            .map_err(|e| AppError::InternalServerError(e.to_string()))?
+            .map_err(|e| {
+                warn!(username, global_domain, error = %e, "federation: WebFinger request failed");
+                AppError::InternalServerError(e.to_string())
+            })?
             .error_for_status()
             .map_err(|e| AppError::InternalServerError(e.to_string()))?;
 
@@ -80,6 +92,10 @@ impl FederationClient {
             .ok_or_else(|| AppError::BadRequest("Missing backend_url in WebFinger".to_string()))?;
 
         let backend_domain = normalize_domain(&backend_url);
+        debug!(
+            username,
+            global_domain, backend_domain, "federation: backend domain resolved via WebFinger"
+        );
 
         self.redis
             .set_string_ex(
@@ -101,6 +117,10 @@ impl FederationClient {
     ) -> Result<Option<String>, AppError> {
         let cache_key = token_cache_key(recipient_global_domain);
         if let Some(token) = self.redis.get_string(&cache_key).await.ok().flatten() {
+            trace!(
+                recipient_global_domain,
+                "federation: token resolved from cache"
+            );
             return Ok(Some(token));
         }
 
@@ -108,6 +128,10 @@ impl FederationClient {
             .resolve_backend_domain(recipient_username, recipient_global_domain)
             .await?;
 
+        debug!(
+            sender = sender_username,
+            recipient_global_domain, backend_domain, "federation: requesting auth token"
+        );
         let request_url = format!(
             "{}://{}/api/federation/auth/request",
             self.config.federation_scheme(),
@@ -127,7 +151,10 @@ impl FederationClient {
             ))
             .send()
             .await
-            .map_err(|e| AppError::InternalServerError(e.to_string()))?
+            .map_err(|e| {
+                warn!(recipient_global_domain, error = %e, "federation: auth request failed");
+                AppError::InternalServerError(e.to_string())
+            })?
             .error_for_status()
             .map_err(|e| AppError::BadRequest(format!("Federation auth request failed: {e}")))?;
 
@@ -149,6 +176,10 @@ impl FederationClient {
             return Ok(token);
         }
 
+        debug!(
+            recipient_global_domain,
+            "federation: waiting for auth token grant"
+        );
         let cache_key = token_cache_key(recipient_global_domain);
         let deadline = Duration::from_millis(self.config.federation_request_timeout_ms);
 
@@ -161,7 +192,13 @@ impl FederationClient {
             }
         })
         .await
-        .map_err(|_| AppError::BadRequest("Federation token request timed out".to_string()))?
+        .map_err(|_| {
+            warn!(
+                recipient_global_domain,
+                "federation: auth token grant timed out"
+            );
+            AppError::BadRequest("Federation token request timed out".to_string())
+        })?
     }
 
     /// Store a federation token received via the `/api/federation/auth/grant` callback.
@@ -174,6 +211,10 @@ impl FederationClient {
         let ttl = ttl_secs
             .try_into()
             .map_err(|_| AppError::BadRequest("Invalid token TTL".to_string()))?;
+        trace!(
+            issuer_global_domain,
+            ttl_secs, "federation: storing auth token"
+        );
         self.redis
             .set_string_ex(&token_cache_key(issuer_global_domain), token, ttl)
             .await
@@ -205,6 +246,10 @@ impl FederationClient {
         let backend_domain = self
             .resolve_backend_domain(username, requester_global_domain)
             .await?;
+        debug!(
+            requester_global_domain,
+            backend_domain, "federation: sending auth grant"
+        );
         let callback_url = format!(
             "{}://{}/api/federation/auth/grant",
             self.config.federation_scheme(),
@@ -216,9 +261,13 @@ impl FederationClient {
             .json(grant)
             .send()
             .await
-            .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+            .map_err(|e| {
+                warn!(requester_global_domain, error = %e, "federation: auth grant delivery failed");
+                AppError::InternalServerError(e.to_string())
+            })?;
 
         if !resp.status().is_success() {
+            warn!(requester_global_domain, status = %resp.status(), "federation: auth grant rejected by remote");
             return Err(AppError::InternalServerError(format!(
                 "Callback rejected grant: {}",
                 resp.status()
@@ -238,6 +287,13 @@ impl FederationClient {
         let backend_domain = self
             .resolve_backend_domain(recipient_username, recipient_global_domain)
             .await?;
+        debug!(
+            recipient = recipient_username,
+            recipient_global_domain,
+            backend_domain,
+            tag_path = %announcement.tag_path,
+            "federation: announcing share"
+        );
         let url = format!(
             "{}://{}/api/federation/shares/announce",
             self.config.federation_scheme(),
@@ -249,7 +305,10 @@ impl FederationClient {
             .json(announcement)
             .send()
             .await
-            .map_err(|e| AppError::InternalServerError(e.to_string()))?
+            .map_err(|e| {
+                warn!(recipient_global_domain, error = %e, "federation: share announcement delivery failed");
+                AppError::InternalServerError(e.to_string())
+            })?
             .error_for_status()
             .map_err(|e| AppError::InternalServerError(e.to_string()))?;
         Ok(())
