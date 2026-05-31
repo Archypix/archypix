@@ -1,22 +1,57 @@
 #[derive(Debug, Clone)]
 pub struct Config {
+    // ── Server ────────────────────────────────────────────────────────────────
     pub listen_addr: String,
-    pub database_url: String,
-    pub front_url: String,
+
+    // ── Database (split) ──────────────────────────────────────────────────────
+    pub db_host: String,
+    pub db_port: u16,
+    pub db_user: String,
+    pub db_password: Option<String>,
+    pub db_name: String,
+
+    // ── Redis (split) ─────────────────────────────────────────────────────────
+    pub redis_host: String,
+    pub redis_port: u16,
+    pub redis_user: Option<String>,
+    pub redis_password: Option<String>,
+    pub redis_db: u8,
+
+    // ── CORS ──────────────────────────────────────────────────────────────────
+    /// Comma-separated list of allowed origins. Use `*` to allow any origin (dev only).
+    pub cors_origins: Vec<String>,
+
+    // ── Identity / Domains ────────────────────────────────────────────────────
+    /// This backend's public-facing domain (host:port). Used as JWT audience and WebFinger href.
+    pub back_domain: String,
+    /// Whether this backend is served over HTTPS. Determines the scheme in public URLs.
+    pub back_use_https: bool,
+    /// Global domain that appears in user identities (@user:global_domain).
+    pub global_domain: String,
+
+    // ── Resolver ──────────────────────────────────────────────────────────────
     pub use_resolver: bool,
-    pub host: String,
-    pub public_base_url: String,
-    pub webfinger_host: String,
-    pub resolver_url: String,
-    pub resolver_admin_secret: String,
+    /// Internal URL of the resolver (e.g. http://resolver:8080). Only used when use_resolver=true.
+    pub resolver_internal_url: String,
+    /// Shared JWT secret between this backend and the resolver.
+    pub resolver_jwt_secret: String,
+    /// Internal URL that the resolver uses to reach this backend for API calls
+    /// (e.g. http://backend1:8000 in Docker). Defaults to `public_base_url()` if not set.
+    pub back_internal_url: Option<String>,
+
+    // ── JWT / Auth ────────────────────────────────────────────────────────────
     pub jwt_secret: String,
     pub access_token_ttl_secs: i64,
     pub refresh_token_ttl_secs: i64,
+
+    // ── Federation ────────────────────────────────────────────────────────────
+    /// Whether to use HTTPS when contacting remote federated backends.
+    pub federation_use_https: bool,
     pub federation_jwt_ttl_secs: i64,
     pub federation_backend_cache_ttl_secs: u64,
     pub federation_request_timeout_ms: u64,
-    pub federation_scheme: String,
-    pub redis_url: String,
+
+    // ── S3 / Object storage ───────────────────────────────────────────────────
     pub s3_endpoint: String,
     pub s3_access_key: String,
     pub s3_secret_key: String,
@@ -35,35 +70,68 @@ impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
         dotenvy::dotenv().ok();
 
+        let use_resolver = require_bool_env("USE_RESOLVER")?;
+
+        // Extract early so they can be used to derive defaults for other fields.
+        let back_use_https = env_bool("BACK_USE_HTTPS", true)?;
+        let global_domain = require_env("GLOBAL_DOMAIN")?;
+        let back_scheme = if back_use_https { "https" } else { "http" };
+
         let config = Config {
-            listen_addr: env("LISTEN_ADDR", "0.0.0.0:80".to_string()),
-            database_url: require_env("DATABASE_URL")?,
-            front_url: require_env("FRONT_URL")?,
-            use_resolver: require_bool_env("USE_RESOLVER")?,
-            host: require_env("HOST")?,
-            public_base_url: env("PUBLIC_BASE_URL", String::default()),
-            webfinger_host: require_env("WEBFINGER_HOST")?,
-            resolver_url: env("RESOLVER_URL", String::default()),
-            resolver_admin_secret: env("RESOLVER_ADMIN_SECRET", String::default()),
+            listen_addr: env("LISTEN_ADDR", "0.0.0.0:8000".to_string()),
+
+            db_host: require_env("DB_HOST")?,
+            db_port: env_u16("DB_PORT", 5432)?,
+            db_user: env("DB_USER", "postgres".to_string()),
+            db_password: optional_env("DB_PASSWORD"),
+            db_name: env("DB_NAME", "archypix".to_string()),
+
+            redis_host: require_env("REDIS_HOST")?,
+            redis_port: env_u16("REDIS_PORT", 6379)?,
+            redis_user: optional_env("REDIS_USER"),
+            redis_password: optional_env("REDIS_PASSWORD"),
+            redis_db: env_u8("REDIS_DB", 0)?,
+
+            cors_origins: require_env("CORS_ORIGINS")?
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+
+            back_domain: require_env("BACK_DOMAIN")?,
+            back_use_https,
+            global_domain: global_domain.clone(),
+
+            use_resolver,
+            // Default: assume the resolver is reachable at the global domain using the
+            // same scheme as this backend. Override when using an internal network address.
+            resolver_internal_url: env(
+                "RESOLVER_INTERNAL_URL",
+                format!("{}://{}", back_scheme, global_domain),
+            ),
+            resolver_jwt_secret: env("RESOLVER_JWT_SECRET", String::new()),
+            back_internal_url: optional_env("BACK_INTERNAL_URL"),
+
             jwt_secret: require_env("JWT_SECRET")?,
             access_token_ttl_secs: env_i64("ACCESS_TOKEN_TTL_SECS", 900)?,
-            refresh_token_ttl_secs: env_i64("REFRESH_TOKEN_TTL_SECS", 2_592_000)?,
-            federation_jwt_ttl_secs: env_i64("FEDERATION_JWT_TTL_SECS", 900)?,
+            refresh_token_ttl_secs: env_i64("REFRESH_TOKEN_TTL_SECS", 15_552_000)?,
+
+            federation_use_https: env_bool("FEDERATION_USE_HTTPS", true)?,
+            federation_jwt_ttl_secs: env_i64("FEDERATION_JWT_TTL_SECS", 86_400)?,
             federation_backend_cache_ttl_secs: env_u64("FEDERATION_BACKEND_CACHE_TTL_SECS", 3600)?,
-            federation_request_timeout_ms: env_u64("FEDERATION_REQUEST_TIMEOUT_MS", 5000)?,
-            federation_scheme: env("FEDERATION_SCHEME", "https".to_string()),
-            redis_url: require_env("REDIS_URL")?,
+            federation_request_timeout_ms: env_u64("FEDERATION_REQUEST_TIMEOUT_MS", 1000)?,
+
             s3_endpoint: require_env("S3_ENDPOINT")?,
             s3_access_key: require_env("S3_ACCESS_KEY")?,
             s3_secret_key: require_env("S3_SECRET_KEY")?,
             s3_region: env("S3_REGION", "us-east-1".to_string()),
-            s3_bucket_staging: require_env("S3_BUCKET_STAGING")?,
-            s3_bucket_pictures: require_env("S3_BUCKET_PICTURES")?,
-            s3_bucket_versions: require_env("S3_BUCKET_VERSIONS")?,
-            s3_bucket_small: require_env("S3_BUCKET_SMALL")?,
-            s3_bucket_medium: require_env("S3_BUCKET_MEDIUM")?,
-            s3_bucket_large: require_env("S3_BUCKET_LARGE")?,
-            s3_presign_ttl_secs: env_u64("S3_PRESIGN_TTL_SECS", 300)?,
+            s3_bucket_staging: env("S3_BUCKET_STAGING", "archypix-staging".to_string()),
+            s3_bucket_pictures: env("S3_BUCKET_PICTURES", "archypix-pictures".to_string()),
+            s3_bucket_versions: env("S3_BUCKET_VERSIONS", "archypix-versions".to_string()),
+            s3_bucket_small: env("S3_BUCKET_SMALL", "archypix-small".to_string()),
+            s3_bucket_medium: env("S3_BUCKET_MEDIUM", "archypix-medium".to_string()),
+            s3_bucket_large: env("S3_BUCKET_LARGE", "archypix-large".to_string()),
+            s3_presign_ttl_secs: env_u64("S3_PRESIGN_TTL_SECS", 3600)?,
             s3_presign_cache_margin_secs: env_u64("S3_PRESIGN_CACHE_MARGIN_SECS", 600)?,
         };
 
@@ -76,88 +144,176 @@ impl Config {
         ];
         if storage_buckets.contains(&&config.s3_bucket_staging) {
             return Err(anyhow::anyhow!(
-                "S3_BUCKET_STAGING must be different from all other bucket names \
+                "S3_BUCKET_STAGING must differ from all other bucket names \
                  (pictures/versions/small/medium/large) — it has an expiration rule applied at startup."
             ));
         }
 
-        if config.public_base_url.trim().is_empty() {
+        if config.use_resolver && config.resolver_jwt_secret.trim().is_empty() {
             return Err(anyhow::anyhow!(
-                "PUBLIC_BASE_URL must be specified (e.g. https://backend.example.com)."
+                "RESOLVER_JWT_SECRET must be specified when USE_RESOLVER=true."
             ));
-        }
-
-        if config.use_resolver {
-            if config.resolver_url.trim().is_empty() {
-                return Err(anyhow::anyhow!(
-                    "WEBFINGER_HOST must be specified when using a resolver."
-                ));
-            }
-
-            if config.resolver_admin_secret.trim().is_empty() {
-                return Err(anyhow::anyhow!(
-                    "RESOLVER_ADMIN_SECRET must be specified when using a resolver."
-                ));
-            }
         }
 
         Ok(config)
     }
+
+    // ── Derived URL builders ──────────────────────────────────────────────────
+
+    pub fn back_scheme(&self) -> &'static str {
+        if self.back_use_https { "https" } else { "http" }
+    }
+
+    /// Full public base URL of this backend, e.g. `https://backend1.example.com`.
+    pub fn public_base_url(&self) -> String {
+        format!("{}://{}", self.back_scheme(), self.back_domain)
+    }
+
+    pub fn federation_scheme(&self) -> &'static str {
+        if self.federation_use_https {
+            "https"
+        } else {
+            "http"
+        }
+    }
+
+    pub fn database_url(&self) -> String {
+        build_postgres_url(
+            &self.db_host,
+            self.db_port,
+            &self.db_user,
+            self.db_password.as_deref(),
+            &self.db_name,
+        )
+    }
+
+    pub fn database_url_masked(&self) -> String {
+        build_postgres_url(
+            &self.db_host,
+            self.db_port,
+            &self.db_user,
+            self.db_password.as_ref().map(|_| "***"),
+            &self.db_name,
+        )
+    }
+
+    pub fn redis_url(&self) -> String {
+        build_redis_url(
+            &self.redis_host,
+            self.redis_port,
+            self.redis_user.as_deref(),
+            self.redis_password.as_deref(),
+            self.redis_db,
+        )
+    }
+
+    pub fn redis_url_masked(&self) -> String {
+        build_redis_url(
+            &self.redis_host,
+            self.redis_port,
+            self.redis_user.as_deref(),
+            self.redis_password.as_ref().map(|_| "***"),
+            self.redis_db,
+        )
+    }
+}
+
+fn build_postgres_url(
+    host: &str,
+    port: u16,
+    user: &str,
+    password: Option<&str>,
+    db: &str,
+) -> String {
+    match password {
+        Some(pw) => format!("postgres://{}:{}@{}:{}/{}", user, pw, host, port, db),
+        None => format!("postgres://{}@{}:{}/{}", user, host, port, db),
+    }
+}
+
+fn build_redis_url(
+    host: &str,
+    port: u16,
+    user: Option<&str>,
+    password: Option<&str>,
+    db: u8,
+) -> String {
+    match (user, password) {
+        (Some(u), Some(pw)) => format!("redis://{}:{}@{}:{}/{}", u, pw, host, port, db),
+        (None, Some(pw)) => format!("redis://:{}@{}:{}/{}", pw, host, port, db),
+        (Some(u), None) => format!("redis://{}@{}:{}/{}", u, host, port, db),
+        (None, None) => format!("redis://{}:{}/{}", host, port, db),
+    }
 }
 
 fn env(name: &str, default: String) -> String {
-    std::env::var(name).unwrap_or_else(|_| default)
+    std::env::var(name).unwrap_or(default)
 }
 
-fn env_i64(name: &str, default: i64) -> anyhow::Result<i64> {
-    let val = std::env::var(name).unwrap_or_else(|_| default.to_string());
-    if val.trim().is_empty() {
-        return Err(anyhow::anyhow!(
-            "{} environment variable cannot be empty.",
-            name
-        ));
-    }
-    val.trim()
-        .parse()
-        .map_err(|_| anyhow::anyhow!("{} must be an integer.", name))
-}
-
-fn env_u64(name: &str, default: u64) -> anyhow::Result<u64> {
-    let val = std::env::var(name).unwrap_or_else(|_| default.to_string());
-    if val.trim().is_empty() {
-        return Err(anyhow::anyhow!(
-            "{} environment variable cannot be empty.",
-            name
-        ));
-    }
-    val.trim()
-        .parse()
-        .map_err(|_| anyhow::anyhow!("{} must be an integer.", name))
+fn optional_env(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
 
 fn require_env(name: &str) -> anyhow::Result<String> {
     let val = std::env::var(name)
-        .map_err(|_| anyhow::anyhow!("{} environment variable must be specified.", name));
-    if let Ok(val) = &val
-        && val.trim().is_empty()
-    {
+        .map_err(|_| anyhow::anyhow!("{} environment variable must be specified.", name))?;
+    if val.trim().is_empty() {
         return Err(anyhow::anyhow!(
             "{} environment variable cannot be empty.",
             name
         ));
     }
-    val
+    Ok(val)
 }
+
+fn env_bool(name: &str, default: bool) -> anyhow::Result<bool> {
+    match std::env::var(name) {
+        Err(_) => Ok(default),
+        Ok(val) => parse_bool(name, &val),
+    }
+}
+
 fn require_bool_env(name: &str) -> anyhow::Result<bool> {
-    require_env(name)
-        .map(|s| {
-            Ok(match s.trim().to_lowercase().as_str() {
-                "true" => true,
-                "false" => false,
-                "1" => true,
-                "0" => false,
-                _ => anyhow::bail!("Invalid boolean value: {}", s),
-            })
-        })
-        .flatten()
+    let val = require_env(name)?;
+    parse_bool(name, &val)
+}
+
+fn parse_bool(name: &str, val: &str) -> anyhow::Result<bool> {
+    match val.trim().to_lowercase().as_str() {
+        "true" | "1" | "yes" => Ok(true),
+        "false" | "0" | "no" => Ok(false),
+        _ => Err(anyhow::anyhow!(
+            "{} must be a boolean (true/false/1/0/yes/no), got: {}",
+            name,
+            val
+        )),
+    }
+}
+
+fn env_i64(name: &str, default: i64) -> anyhow::Result<i64> {
+    let val = std::env::var(name).unwrap_or_else(|_| default.to_string());
+    val.trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("{} must be an integer.", name))
+}
+
+fn env_u8(name: &str, default: u8) -> anyhow::Result<u8> {
+    let val = std::env::var(name).unwrap_or_else(|_| default.to_string());
+    val.trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("{} must be a non-negative integer (0-255).", name))
+}
+
+fn env_u16(name: &str, default: u16) -> anyhow::Result<u16> {
+    let val = std::env::var(name).unwrap_or_else(|_| default.to_string());
+    val.trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("{} must be a valid port number (0-65535).", name))
+}
+
+fn env_u64(name: &str, default: u64) -> anyhow::Result<u64> {
+    let val = std::env::var(name).unwrap_or_else(|_| default.to_string());
+    val.trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("{} must be a non-negative integer.", name))
 }

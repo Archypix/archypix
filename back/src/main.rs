@@ -26,6 +26,12 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting Archypix Backend...");
 
     let config = Config::from_env()?;
+
+    info!("Back domain:   {}", config.back_domain);
+    info!("Global domain: {}", config.global_domain);
+    info!("Database:      {}", config.database_url_masked());
+    info!("Redis:         {}", config.redis_url_masked());
+
     let db = infra::db::connect(&config).await?;
     infra::db::run_migrations(&db).await?;
 
@@ -33,12 +39,15 @@ async fn main() -> anyhow::Result<()> {
     let storage = infra::s3::connect(&config).await?;
     let http = HttpClient::new();
 
-    let jwt = JwtService::new(&config.jwt_secret, &config.host);
-    let resolver_jwt = JwtService::new(&config.resolver_admin_secret, &config.host);
+    let jwt = JwtService::new(&config.jwt_secret, &config.back_domain);
+    let resolver_jwt = JwtService::new(&config.resolver_jwt_secret, &config.back_domain);
 
     let federation =
         FederationClient::new(http.clone(), config.clone(), jwt.clone(), redis.clone());
     let resolver = ResolverClient::new(http, config.clone(), resolver_jwt);
+
+    // Register with the resolver so it can route user registrations to this backend.
+    resolver.self_register().await?;
 
     let state = AppState::new(
         config.clone(),

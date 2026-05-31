@@ -1,16 +1,13 @@
 # Archypix production stack
 #
-# Resolver:  archypix.com         → port 8080
+# Resolver:  archypix.com          → port 8080
 # Backend 1: backend1.archypix.com → port 8001
 # Backend 2: backend2.archypix.com → port 8002
 #
 # Both backends share the same resolver (archypix.com).
 # For TLS, put nginx or Caddy in front and proxy each domain to its port.
 #
-# For local testing without a reverse proxy, add to /etc/hosts:
-#   127.0.0.1  archypix.com  backend1.archypix.com  backend2.archypix.com
-#
-# Secrets: set JWT_SECRET, RESOLVER_ADMIN_SECRET via environment or a .env file.
+# Secrets: set JWT_SECRET_*, RESOLVER_JWT_SECRET, MINIO_ROOT_PASSWORD via a .env file.
 # Do NOT use the placeholder values below in production.
 #
 # Usage:
@@ -22,10 +19,13 @@ services:
     ports:
       - "8080:8080"
     environment:
-      DATABASE_URL: postgres://archypix:archypix@postgres/archypix_resolver
-      MANAGED_DOMAIN: archypix.com
-      RESOLVER_ADMIN_SECRET: ${RESOLVER_ADMIN_SECRET:-change-me-in-production}
-      LISTEN_ADDR: 0.0.0.0:8080
+      DB_HOST: postgres
+      DB_USER: archypix
+      DB_PASSWORD: ${DB_PASSWORD:-change-me-in-production}
+      DB_NAME: archypix_resolver
+      GLOBAL_DOMAIN: archypix.com
+      RESOLVER_JWT_SECRET: ${RESOLVER_JWT_SECRET:-change-me-in-production}
+      CORS_ORIGINS: https://archypix.com
       RUST_LOG: info
     depends_on:
       - postgres
@@ -35,36 +35,32 @@ services:
     ports:
       - "8001:8000"
     environment:
-      LISTEN_ADDR: 0.0.0.0:8000
+      BACK_DOMAIN: backend1.archypix.com
+      BACK_USE_HTTPS: "true"
+      BACK_INTERNAL_URL: http://backend1:8000
+      GLOBAL_DOMAIN: archypix.com
       USE_RESOLVER: "true"
-      HOST: backend1.archypix.com
-      PUBLIC_BASE_URL: https://backend1.archypix.com
-      WEBFINGER_HOST: archypix.com
-      RESOLVER_URL: http://resolver:8080
-      RESOLVER_ADMIN_SECRET: ${RESOLVER_ADMIN_SECRET:-change-me-in-production}
+      RESOLVER_INTERNAL_URL: http://resolver:8080
+      RESOLVER_JWT_SECRET: ${RESOLVER_JWT_SECRET:-change-me-in-production}
       JWT_SECRET: ${JWT_SECRET_BACKEND1:-change-me-in-production}
-      DATABASE_URL: postgres://archypix:archypix@postgres/archypix_back1
-      REDIS_URL: redis://default:archypix@redis:6379/0
+      CORS_ORIGINS: https://archypix.com
+      DB_HOST: postgres
+      DB_USER: archypix
+      DB_PASSWORD: ${DB_PASSWORD:-change-me-in-production}
+      DB_NAME: archypix_back1
+      REDIS_HOST: redis
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-change-me-in-production}
+      REDIS_DB: "0"
       S3_ENDPOINT: http://minio:9000
       S3_ACCESS_KEY: ${MINIO_ROOT_USER:-archypix}
-      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-archypix}
-      S3_REGION: us-east-1
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-change-me-in-production}
       S3_BUCKET_STAGING: b1-archypix-staging
       S3_BUCKET_PICTURES: b1-archypix-pictures
       S3_BUCKET_VERSIONS: b1-archypix-versions
       S3_BUCKET_SMALL: b1-archypix-small
       S3_BUCKET_MEDIUM: b1-archypix-medium
       S3_BUCKET_LARGE: b1-archypix-large
-      S3_PRESIGN_TTL_SECS: "3600"
-      S3_PRESIGN_CACHE_MARGIN_SECS: "600"
-      FRONT_URL: https://archypix.com
-      FEDERATION_SCHEME: https
-      ACCESS_TOKEN_TTL_SECS: "900"
-      REFRESH_TOKEN_TTL_SECS: "2592000"
-      FEDERATION_JWT_TTL_SECS: "900"
-      FEDERATION_BACKEND_CACHE_TTL_SECS: "3600"
-      FEDERATION_REQUEST_TIMEOUT_MS: "5000"
-      SQLX_OFFLINE: "false"
+      FEDERATION_USE_HTTPS: "true"
       RUST_LOG: info
     depends_on:
       - postgres
@@ -77,36 +73,32 @@ services:
     ports:
       - "8002:8000"
     environment:
-      LISTEN_ADDR: 0.0.0.0:8000
+      BACK_DOMAIN: backend2.archypix.com
+      BACK_USE_HTTPS: "true"
+      BACK_INTERNAL_URL: http://backend2:8000
+      GLOBAL_DOMAIN: archypix.com
       USE_RESOLVER: "true"
-      HOST: backend2.archypix.com
-      PUBLIC_BASE_URL: https://backend2.archypix.com
-      WEBFINGER_HOST: archypix.com
-      RESOLVER_URL: http://resolver:8080
-      RESOLVER_ADMIN_SECRET: ${RESOLVER_ADMIN_SECRET:-change-me-in-production}
+      RESOLVER_INTERNAL_URL: http://resolver:8080
+      RESOLVER_JWT_SECRET: ${RESOLVER_JWT_SECRET:-change-me-in-production}
       JWT_SECRET: ${JWT_SECRET_BACKEND2:-change-me-in-production}
-      DATABASE_URL: postgres://archypix:archypix@postgres/archypix_back2
-      REDIS_URL: redis://default:archypix@redis:6379/1
+      CORS_ORIGINS: https://archypix.com
+      DB_HOST: postgres
+      DB_USER: archypix
+      DB_PASSWORD: ${DB_PASSWORD:-change-me-in-production}
+      DB_NAME: archypix_back2
+      REDIS_HOST: redis
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-change-me-in-production}
+      REDIS_DB: "1"
       S3_ENDPOINT: http://minio:9000
       S3_ACCESS_KEY: ${MINIO_ROOT_USER:-archypix}
-      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-archypix}
-      S3_REGION: us-east-1
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-change-me-in-production}
       S3_BUCKET_STAGING: b2-archypix-staging
       S3_BUCKET_PICTURES: b2-archypix-pictures
       S3_BUCKET_VERSIONS: b2-archypix-versions
       S3_BUCKET_SMALL: b2-archypix-small
       S3_BUCKET_MEDIUM: b2-archypix-medium
       S3_BUCKET_LARGE: b2-archypix-large
-      S3_PRESIGN_TTL_SECS: "3600"
-      S3_PRESIGN_CACHE_MARGIN_SECS: "600"
-      FRONT_URL: https://archypix.com
-      FEDERATION_SCHEME: https
-      ACCESS_TOKEN_TTL_SECS: "900"
-      REFRESH_TOKEN_TTL_SECS: "2592000"
-      FEDERATION_JWT_TTL_SECS: "900"
-      FEDERATION_BACKEND_CACHE_TTL_SECS: "3600"
-      FEDERATION_REQUEST_TIMEOUT_MS: "5000"
-      SQLX_OFFLINE: "false"
+      FEDERATION_USE_HTTPS: "true"
       RUST_LOG: info
     depends_on:
       - postgres
@@ -119,14 +111,14 @@ services:
     environment:
       POSTGRES_DB: archypix_resolver
       POSTGRES_USER: archypix
-      POSTGRES_PASSWORD: archypix
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-change-me-in-production}
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/postgres-init.sql:/docker-entrypoint-initdb.d/init.sql
 
   redis:
     image: redis:latest
-    command: redis-server --requirepass archypix --appendonly yes
+    command: redis-server --requirepass ${REDIS_PASSWORD:-change-me-in-production} --appendonly yes
     volumes:
       - redis_data:/data
 
@@ -134,7 +126,7 @@ services:
     image: minio/minio:latest
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-archypix}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-archypix}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me-in-production}
     ports:
       - "9000:9000"
       - "9001:9001"

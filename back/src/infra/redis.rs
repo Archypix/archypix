@@ -93,8 +93,8 @@ impl RedisClient {
 }
 
 pub async fn connect(config: &Config) -> anyhow::Result<RedisClient> {
-    info!("Connecting to Redis: {}", config.redis_url);
-    let manager = RedisConnectionManager::new(config.redis_url.clone())?;
+    info!("Connecting to Redis: {}", config.redis_url_masked());
+    let manager = RedisConnectionManager::new(config.redis_url())?;
     let pool = bb8::Pool::builder()
         .connection_timeout(std::time::Duration::from_secs(5))
         .build(manager)

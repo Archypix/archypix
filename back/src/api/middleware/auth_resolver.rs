@@ -19,7 +19,7 @@ impl FromRequestParts<AppState> for AuthResolver {
     ) -> Result<Self, Self::Rejection> {
         if !state.config.use_resolver {
             return Err(AppError::Unauthorized(
-                "Resolver is disabled on this backend instance. Set USE_RESOLVER=true and RESOLVER_ADMIN_SECRET to use a resolver.".to_string(),
+                "Resolver is disabled on this backend. Set USE_RESOLVER=true and RESOLVER_JWT_SECRET to enable it.".to_string(),
             ));
         }
 

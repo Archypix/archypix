@@ -31,7 +31,7 @@ pub async fn auth_request(
             &payload.username,
             &payload.requester_instance,
             &FederationAuthGrant {
-                issuer_instance: state.config.webfinger_host.clone(),
+                issuer_instance: state.config.global_domain.clone(),
                 token,
                 expires_at,
                 scope: payload.scope,
@@ -67,7 +67,7 @@ pub async fn announce_share(
         .await?
         .ok_or(AppError::NotFound)?;
 
-    if payload.recipient_instance != state.config.webfinger_host {
+    if payload.recipient_instance != state.config.global_domain {
         return Err(AppError::BadRequest(
             "Invalid recipient instance".to_string(),
         ));
@@ -126,7 +126,7 @@ pub async fn presign_picture(
     State(state): State<AppState>,
     Json(payload): Json<PresignRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    if payload.owner_instance != state.config.webfinger_host {
+    if payload.owner_instance != state.config.global_domain {
         return Err(AppError::BadRequest("Invalid owner instance".to_string()));
     }
 

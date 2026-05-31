@@ -28,7 +28,7 @@ impl FromRequestParts<AppState> for AuthUser {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let token = bearer_token(&parts.headers)?;
-        let claims = state.jwt.decode(&token, &state.config.host)?;
+        let claims = state.jwt.decode(&token, &state.config.back_domain)?;
 
         if claims.token_type != TokenType::User {
             return Err(AppError::Unauthorized("Invalid token type".to_string()));

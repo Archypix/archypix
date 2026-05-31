@@ -18,7 +18,7 @@ impl FromRequestParts<AppState> for AuthFederation {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let token = bearer_token(&parts.headers)?;
-        let claims = state.jwt.decode(&token, &state.config.host)?;
+        let claims = state.jwt.decode(&token, &state.config.back_domain)?;
 
         if claims.token_type != TokenType::Federation {
             return Err(AppError::Unauthorized(

@@ -51,7 +51,8 @@ impl FederationClient {
 
         let url = format!(
             "{}://{}/.well-known/webfinger",
-            self.config.federation_scheme, global_domain
+            self.config.federation_scheme(),
+            global_domain
         );
         let response = self
             .http
@@ -92,15 +93,6 @@ impl FederationClient {
     }
 
     /// Request a federation token from the remote instance identified by `recipient_global_domain`.
-    ///
-    /// - `sender_username`: a local user included in the request so the remote can resolve our
-    ///   backend domain via WebFinger when sending the grant callback.
-    /// - `recipient_username`: used to resolve the remote backend domain via WebFinger.
-    /// - `recipient_global_domain`: the remote instance's global (WebFinger) domain.
-    ///
-    /// The token is cached under `recipient_global_domain`.
-    /// Returns `Some(token)` if already cached, `None` if a request was sent and the token will
-    /// arrive asynchronously via the `/api/federation/auth/grant` callback.
     pub async fn ensure_federation_token(
         &self,
         sender_username: &str,
@@ -118,13 +110,14 @@ impl FederationClient {
 
         let request_url = format!(
             "{}://{}/api/federation/auth/request",
-            self.config.federation_scheme, backend_domain
+            self.config.federation_scheme(),
+            backend_domain
         );
 
         self.http
             .post(&request_url)
             .json(&FederationTokenRequest {
-                requester_instance: self.config.webfinger_host.clone(),
+                requester_instance: self.config.global_domain.clone(),
                 username: sender_username.to_string(),
                 scope: "federation".to_string(),
                 nonce: Uuid::new_v4().to_string(),
@@ -172,7 +165,6 @@ impl FederationClient {
     }
 
     /// Store a federation token received via the `/api/federation/auth/grant` callback.
-    /// `issuer_global_domain` is the global (WebFinger) domain of the issuing instance.
     pub async fn store_federation_token(
         &self,
         issuer_global_domain: &str,
@@ -188,10 +180,6 @@ impl FederationClient {
     }
 
     /// Issue a federation JWT for a requesting instance (used in the auth handshake).
-    ///
-    /// - `sub` = `requester_global_domain` (the requester's global identity)
-    /// - `instance` = our own global (WebFinger) domain
-    /// - `aud` = our backend domain (so this instance can verify tokens locally)
     pub fn issue_federation_token(
         &self,
         requester_global_domain: &str,
@@ -199,18 +187,15 @@ impl FederationClient {
         self.jwt.issue(
             requester_global_domain,
             None,
-            &self.config.webfinger_host,
+            &self.config.global_domain,
             TokenType::Federation,
             false,
-            &self.config.host,
+            &self.config.back_domain,
             self.config.federation_jwt_ttl_secs,
         )
     }
 
     /// Send the federation token grant to the requester's backend.
-    ///
-    /// Resolves the requester's backend domain via WebFinger using `(username, requester_global_domain)`
-    /// before sending, so no explicit callback URL is required in the auth request.
     pub async fn send_auth_grant(
         &self,
         username: &str,
@@ -222,7 +207,8 @@ impl FederationClient {
             .await?;
         let callback_url = format!(
             "{}://{}/api/federation/auth/grant",
-            self.config.federation_scheme, backend_domain
+            self.config.federation_scheme(),
+            backend_domain
         );
         let resp = self
             .http
@@ -242,8 +228,6 @@ impl FederationClient {
     }
 
     /// Announce a new outgoing share to the recipient's backend.
-    ///
-    /// Resolves the recipient's backend domain via WebFinger (cached after the token was obtained).
     pub async fn announce_share(
         &self,
         recipient_username: &str,
@@ -256,7 +240,8 @@ impl FederationClient {
             .await?;
         let url = format!(
             "{}://{}/api/federation/shares/announce",
-            self.config.federation_scheme, backend_domain
+            self.config.federation_scheme(),
+            backend_domain
         );
         self.http
             .post(&url)
@@ -271,11 +256,10 @@ impl FederationClient {
     }
 }
 
-// ── Federation protocol types (shared between inbound handlers and outbound client) ──
+// ── Federation protocol types ─────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FederationAuthGrant {
-    /// Global (WebFinger) domain of the issuing instance.
     pub issuer_instance: String,
     pub token: String,
     pub expires_at: i64,
@@ -286,10 +270,8 @@ pub struct FederationAuthGrant {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ShareAnnouncement {
     pub sender_username: String,
-    /// Global (WebFinger) domain of the sender's instance.
     pub sender_instance: String,
     pub recipient_username: String,
-    /// Global (WebFinger) domain of the recipient's instance.
     pub recipient_instance: String,
     pub outgoing_share_id: Uuid,
     pub tag_path: String,
@@ -298,14 +280,11 @@ pub struct ShareAnnouncement {
     pub shareback_of: Option<Uuid>,
 }
 
-// ── Internal types ──
+// ── Internal types ────────────────────────────────────────────────────────────
 
-/// Outbound auth request sent to a remote backend's `/api/federation/auth/request`.
 #[derive(Serialize)]
 struct FederationTokenRequest {
-    /// Global (WebFinger) domain of the requesting instance.
     requester_instance: String,
-    /// A user on the requesting instance; used by the remote to resolve our backend via WebFinger.
     username: String,
     scope: String,
     nonce: String,

@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 use uuid::Uuid;
 
+// ── WebFinger ────────────────────────────────────────────────────────────────
+
 #[derive(Debug, Deserialize)]
 pub struct WebFingerQuery {
     resource: String,
@@ -30,10 +32,46 @@ pub struct WebFingerLink {
     href: String,
 }
 
+pub async fn webfinger_handler(
+    Query(query): Query<WebFingerQuery>,
+    State(state): State<AppState>,
+) -> Result<Json<WebFingerResponse>, AppError> {
+    let username = parse_acct_resource(&query.resource, &state)?;
+
+    if let Some(backend_url) = state.cache.get(&username).await {
+        info!("Cache hit for username: {}", username);
+        return Ok(Json(build_webfinger_response(
+            &username,
+            &backend_url,
+            &state.global_domain,
+        )));
+    }
+
+    let backend_url = get_backend_url(&state.db, &username).await?;
+
+    if let Some(backend_url) = backend_url {
+        info!("Database hit for username: {}", username);
+        state
+            .cache
+            .insert(username.clone(), backend_url.clone())
+            .await;
+        Ok(Json(build_webfinger_response(
+            &username,
+            &backend_url,
+            &state.global_domain,
+        )))
+    } else {
+        warn!("Unknown username: {}", username);
+        Err(AppError::NotFound)
+    }
+}
+
+// ── Update mapping ────────────────────────────────────────────────────────────
+
 #[derive(Debug, Deserialize)]
 pub struct UpdateRequest {
     username: String,
-    backend_url: String,
+    back_domain: String,
 }
 #[derive(Debug, Serialize)]
 pub struct UpdateResponse {
@@ -41,21 +79,101 @@ pub struct UpdateResponse {
     message: String,
 }
 
+pub async fn update_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateRequest>,
+) -> Result<Json<UpdateResponse>, AppError> {
+    let token = extract_bearer_token(&headers)?;
+    verify_resolver_jwt(token, &state)?;
+
+    if payload.username.is_empty() || payload.back_domain.is_empty() {
+        return Err(AppError::BadRequest(
+            "username and back_domain are required".to_string(),
+        ));
+    }
+
+    upsert_mapping(&state.db, &payload.username, &payload.back_domain).await?;
+    // Invalidate the cache entry so the next WebFinger query rebuilds it from the DB.
+    state.cache.invalidate(&payload.username).await;
+
+    info!(
+        "Updated mapping: {} -> {}",
+        payload.username, payload.back_domain
+    );
+
+    Ok(Json(UpdateResponse {
+        success: true,
+        message: format!("Mapping updated for user {}", payload.username),
+    }))
+}
+
+// ── Backend self-registration ─────────────────────────────────────────────────
+
+/// Payload sent by a backend at startup to register itself with the resolver.
 #[derive(Debug, Deserialize)]
 pub struct RegisterBackendRequest {
-    backend_url: String,
-    name: String,
+    /// Public-facing domain (and optional port) of this backend, e.g. `backend1.example.com`
+    /// or `localhost:8001`. Used as JWT audience and to derive the public URL.
+    pub back_domain: String,
+    /// Whether this backend is served over HTTPS. Combined with `back_domain` to produce the
+    /// public URL that is stored in WebFinger responses.
+    pub use_https: bool,
+    /// Internal URL the resolver should use for API calls, e.g. `http://backend1:8000`.
+    pub internal_url: String,
 }
+
 #[derive(Debug, Serialize)]
 pub struct RegisterBackendResponse {
     success: bool,
     message: String,
 }
 
-#[derive(Debug, Serialize)]
-pub struct ListBackendsResponse {
-    backends: Vec<String>,
+pub async fn register_backend_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<RegisterBackendRequest>,
+) -> Result<Json<RegisterBackendResponse>, AppError> {
+    let token = extract_bearer_token(&headers)?;
+    verify_resolver_jwt(token, &state)?;
+
+    if payload.back_domain.is_empty() || payload.internal_url.is_empty() {
+        return Err(AppError::BadRequest(
+            "back_domain and internal_url are required".to_string(),
+        ));
+    }
+
+    upsert_backend(
+        &state.db,
+        &payload.back_domain,
+        payload.use_https,
+        &payload.internal_url,
+    )
+    .await?;
+
+    info!(
+        "Backend registered: {} (https={}, internal: {})",
+        payload.back_domain, payload.use_https, payload.internal_url
+    );
+
+    Ok(Json(RegisterBackendResponse {
+        success: true,
+        message: format!("Backend {} registered", payload.back_domain),
+    }))
 }
+
+pub async fn list_backends_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let token = extract_bearer_token(&headers)?;
+    verify_resolver_jwt(token, &state)?;
+
+    let backends = list_backends(&state.db).await?;
+    Ok(Json(serde_json::json!({ "backends": backends })))
+}
+
+// ── User registration (forwarded to a backend) ────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct RegisterRequest {
@@ -71,131 +189,16 @@ pub struct RegisterResponse {
     message: String,
 }
 
-pub async fn webfinger_handler(
-    Query(query): Query<WebFingerQuery>,
-    State(state): State<AppState>,
-) -> Result<Json<WebFingerResponse>, AppError> {
-    // Parse acct:username@domain from resource
-    let username = parse_acct_resource(&query.resource, &state)?;
-
-    // Check cache first
-    if let Some(backend_url) = state.cache.get(&username).await {
-        info!("Cache hit for username: {}", username);
-        return Ok(Json(build_webfinger_response(
-            &username,
-            &backend_url,
-            &state.managed_domain,
-        )));
-    }
-
-    // Cache miss - query database
-    let backend_url = get_backend_url(&state.db, &username).await?;
-
-    if let Some(backend_url) = backend_url {
-        info!("Database hit for username: {}", username);
-        // Update cache
-        state
-            .cache
-            .insert(username.clone(), backend_url.clone())
-            .await;
-
-        Ok(Json(build_webfinger_response(
-            &username,
-            &backend_url,
-            &state.managed_domain,
-        )))
-    } else {
-        warn!("Unknown username: {}", username);
-        Err(AppError::NotFound)
-    }
-}
-
-pub async fn update_handler(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(payload): Json<UpdateRequest>,
-) -> Result<Json<UpdateResponse>, AppError> {
-    let token = extract_bearer_token(&headers)?;
-    verify_resolver_jwt(token, &state)?;
-
-    // Validate inputs
-    if payload.username.is_empty() || payload.backend_url.is_empty() {
-        return Err(AppError::BadRequest(
-            "Username and backend_url are required".to_string(),
-        ));
-    }
-
-    // Update database
-    upsert_mapping(&state.db, &payload.username, &payload.backend_url).await?;
-
-    // Invalidate/update cache
-    state
-        .cache
-        .insert(payload.username.clone(), payload.backend_url.clone())
-        .await;
-
-    info!(
-        "Updated mapping: {} -> {}",
-        payload.username, payload.backend_url
-    );
-
-    Ok(Json(UpdateResponse {
-        success: true,
-        message: format!("Mapping updated for user {}", payload.username),
-    }))
-}
-
-pub async fn register_backend_handler(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(payload): Json<RegisterBackendRequest>,
-) -> Result<Json<RegisterBackendResponse>, AppError> {
-    let token = extract_bearer_token(&headers)?;
-    verify_resolver_jwt(token, &state)?;
-
-    if payload.backend_url.is_empty() || payload.name.is_empty() {
-        return Err(AppError::BadRequest(
-            "backend_url and name are required".to_string(),
-        ));
-    }
-
-    upsert_backend(&state.db, &payload.backend_url, &payload.name).await?;
-
-    info!(
-        "Registered backend: {} ({})",
-        payload.backend_url, payload.name
-    );
-
-    Ok(Json(RegisterBackendResponse {
-        success: true,
-        message: "Backend registered".to_string(),
-    }))
-}
-
-pub async fn list_backends_handler(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<ListBackendsResponse>, AppError> {
-    let token = extract_bearer_token(&headers)?;
-    verify_resolver_jwt(token, &state)?;
-
-    let backends = list_backends(&state.db).await?;
-
-    Ok(Json(ListBackendsResponse { backends }))
-}
-
 pub async fn register_handler(
     State(state): State<AppState>,
     Json(payload): Json<RegisterRequest>,
 ) -> Result<Json<RegisterResponse>, AppError> {
-    // Validate inputs
     if payload.username.is_empty() || payload.email.is_empty() {
         return Err(AppError::BadRequest(
             "username and email are required".to_string(),
         ));
     }
 
-    // Check username not already taken
     if username_exists(&state.db, &payload.username).await? {
         return Err(AppError::BadRequest(format!(
             "Username '{}' is already taken",
@@ -203,7 +206,6 @@ pub async fn register_handler(
         )));
     }
 
-    // Get backend load counts
     let backend_counts = count_users_per_backend(&state.db).await?;
     if backend_counts.is_empty() {
         return Err(AppError::ServiceUnavailable(
@@ -211,14 +213,13 @@ pub async fn register_handler(
         ));
     }
 
-    // Pick the backend with the lowest user count (first result from ordered query)
-    let (chosen_backend_url, chosen_backend_host, _) = &backend_counts[0];
+    let (chosen_back_domain, chosen_use_https, chosen_internal_url, _) = &backend_counts[0];
+    let scheme = if *chosen_use_https { "https" } else { "http" };
+    let chosen_backend_url = format!("{}://{}", scheme, chosen_back_domain);
 
-    // Generate a resolver JWT to authenticate with the backend
-    let resolver_jwt = generate_resolver_jwt(&state, &chosen_backend_host)?;
+    let resolver_jwt = generate_resolver_jwt(&state, chosen_back_domain)?;
 
-    // Forward registration to the chosen backend
-    let backend_register_url = format!("{}/api/resolver/users", chosen_backend_url);
+    let backend_register_url = format!("{}/api/resolver/users", chosen_internal_url);
     let body = serde_json::json!({
         "username": payload.username,
         "display_name": payload.display_name,
@@ -234,7 +235,10 @@ pub async fn register_handler(
         .send()
         .await
         .map_err(|e| {
-            warn!("Failed to contact backend {}: {}", chosen_backend_url, e);
+            warn!(
+                "Failed to contact backend {} (internal: {}): {}",
+                chosen_back_domain, chosen_internal_url, e
+            );
             AppError::ServiceUnavailable(format!("Failed to contact backend: {e}"))
         })?;
 
@@ -246,25 +250,35 @@ pub async fn register_handler(
             .unwrap_or_else(|_| "unknown error".to_string());
         warn!(
             "Backend {} returned error {}: {}",
-            chosen_backend_url, status, error_body
+            chosen_back_domain, status, error_body
         );
         return Err(AppError::BackendError(status.as_u16(), error_body));
     }
 
-    // Backend succeeded — record the mapping
-    upsert_mapping(&state.db, &payload.username, &chosen_backend_url).await?;
+    upsert_mapping(&state.db, &payload.username, chosen_back_domain).await?;
 
     info!(
         "Registered user '{}' on backend '{}'",
-        payload.username, chosen_backend_url
+        payload.username, chosen_back_domain
     );
 
     Ok(Json(RegisterResponse {
         username: payload.username,
-        backend_url: chosen_backend_url.clone(),
+        backend_url: chosen_backend_url,
         message: "User registered successfully".to_string(),
     }))
 }
+
+// ── Health ────────────────────────────────────────────────────────────────────
+
+pub async fn health_handler() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "status": "healthy",
+        "service": "archypix-resolver"
+    }))
+}
+
+// ── JWT helpers ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct ResolverJwtClaims {
@@ -292,13 +306,6 @@ struct ResolverJwtClaimsEncode {
     jti: String,
 }
 
-pub async fn health_handler() -> impl IntoResponse {
-    Json(serde_json::json!({
-        "status": "healthy",
-        "service": "archypix-resolver"
-    }))
-}
-
 fn extract_bearer_token(headers: &HeaderMap) -> Result<&str, AppError> {
     headers
         .get(AUTHORIZATION)
@@ -309,10 +316,10 @@ fn extract_bearer_token(headers: &HeaderMap) -> Result<&str, AppError> {
 
 fn verify_resolver_jwt(token: &str, state: &AppState) -> Result<ResolverJwtClaims, AppError> {
     let mut validation = Validation::new(Algorithm::HS256);
-    validation.set_audience(&[state.managed_domain.clone()]);
+    validation.set_audience(&[state.global_domain.clone()]);
     let data = decode::<ResolverJwtClaims>(
         token,
-        &DecodingKey::from_secret(state.resolver_admin_secret.as_bytes()),
+        &DecodingKey::from_secret(state.resolver_jwt_secret.as_bytes()),
         &validation,
     )
     .map_err(|_| AppError::Unauthorized)?;
@@ -325,59 +332,59 @@ fn verify_resolver_jwt(token: &str, state: &AppState) -> Result<ResolverJwtClaim
     Ok(data.claims)
 }
 
-fn generate_resolver_jwt(state: &AppState, backend_host: &str) -> Result<String, AppError> {
+/// Generate a short-lived JWT the resolver sends to a backend when forwarding registration.
+/// Audience is the backend's `back_domain` so only that backend can accept the token.
+fn generate_resolver_jwt(state: &AppState, back_domain: &str) -> Result<String, AppError> {
     let now = Utc::now().timestamp();
     let claims = ResolverJwtClaimsEncode {
         sub: "resolver".to_string(),
         is_admin: false,
-        instance: state.managed_domain.clone(),
+        instance: state.global_domain.clone(),
         token_type: "resolver".to_string(),
-        aud: backend_host.to_string(),
+        aud: back_domain.to_string(),
         iss: "resolver".to_string(),
         exp: now + 300,
         iat: now,
         jti: Uuid::new_v4().to_string(),
     };
 
-    let token = encode(
+    encode(
         &Header::new(Algorithm::HS256),
         &claims,
-        &EncodingKey::from_secret(state.resolver_admin_secret.as_bytes()),
+        &EncodingKey::from_secret(state.resolver_jwt_secret.as_bytes()),
     )
-    .map_err(|e| AppError::Internal(e.into()))?;
-
-    Ok(token)
+    .map_err(|e| AppError::Internal(e.into()))
 }
 
+// ── Resource parsing / response building ──────────────────────────────────────
+
 fn parse_acct_resource(resource: &str, state: &AppState) -> Result<String, AppError> {
-    // Expected format: archypix:@user:domain
-    if let Some(rest) = resource.strip_prefix("archypix:@") {
-        let mut iter = rest.split(':');
-        let user = iter.next().ok_or(AppError::BadRequest(
-            "Invalid resource format. Expected archypix:@user:domain".to_string(),
-        ))?;
-        let domain = iter.next().ok_or(AppError::BadRequest(
-            "Invalid resource format. Expected archypix:@user:domain".to_string(),
-        ))?;
+    let rest = resource.strip_prefix("archypix:@").ok_or_else(|| {
+        AppError::BadRequest("Invalid resource format. Expected archypix:@user:domain".to_string())
+    })?;
 
-        if domain != state.managed_domain {
-            return Err(AppError::BadRequest(format!("Invalid domain: {}", domain)));
-        }
+    let mut iter = rest.split(':');
+    let user = iter.next().ok_or_else(|| {
+        AppError::BadRequest("Invalid resource format. Expected archypix:@user:domain".to_string())
+    })?;
+    let domain = iter.next().ok_or_else(|| {
+        AppError::BadRequest("Invalid resource format. Expected archypix:@user:domain".to_string())
+    })?;
 
-        return Ok(user.to_string());
+    if domain != state.global_domain {
+        return Err(AppError::BadRequest(format!("Invalid domain: {}", domain)));
     }
-    Err(AppError::BadRequest(
-        "Invalid resource format. Expected archypix:@user:domain".to_string(),
-    ))
+
+    Ok(user.to_string())
 }
 
 fn build_webfinger_response(
     username: &str,
     backend_url: &str,
-    managed_domain: &str,
+    global_domain: &str,
 ) -> WebFingerResponse {
     WebFingerResponse {
-        subject: format!("archypix:@{}:{}", username, managed_domain),
+        subject: format!("archypix:@{}:{}", username, global_domain),
         links: vec![WebFingerLink {
             rel: "backend_url".to_string(),
             href: backend_url.to_string(),

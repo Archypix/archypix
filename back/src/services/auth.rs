@@ -83,10 +83,10 @@ async fn issue_tokens(
     let access_token = jwt.issue(
         &user.username,
         Some(user.id),
-        &config.webfinger_host,
+        &config.global_domain,
         TokenType::User,
         user.is_admin,
-        &config.host,
+        &config.back_domain,
         config.access_token_ttl_secs,
     )?;
 

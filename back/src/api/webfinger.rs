@@ -21,21 +21,22 @@ pub struct WebFingerLink {
 }
 
 /// Minimal WebFinger endpoint, active when `USE_RESOLVER=false`.
-/// Returns this backend's own `PUBLIC_BASE_URL` for any resource query.
+/// Returns this backend's own public base URL for any resource query.
 pub async fn handler(
     State(state): State<AppState>,
     Query(query): Query<WebFingerQuery>,
 ) -> Json<WebFingerResponse> {
+    let public_base_url = state.config.public_base_url();
     tracing::info!(
         resource = %query.resource,
-        backend_url = %state.config.public_base_url,
+        backend_url = %public_base_url,
         "WebFinger query"
     );
     Json(WebFingerResponse {
         subject: query.resource.clone(),
         links: vec![WebFingerLink {
             rel: "backend_url".to_string(),
-            href: state.config.public_base_url.clone(),
+            href: public_base_url,
         }],
     })
 }

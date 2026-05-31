@@ -1,19 +1,22 @@
-# Archypix development federation stack
+# Archypix development federation stack — 3 backends
+#
+# Topology:
+#   resolver:  manages archypix.local          → port 8080
+#   backend1:  uses resolver, archypix.local   → port 8001
+#   backend2:  uses resolver, archypix.local   → port 8002
+#   backend3:  standalone (own resolver)       → port 8003
+#
+# All inter-service traffic uses HTTP (BACK_USE_HTTPS=false, FEDERATION_USE_HTTPS=false).
 #
 # Source code is mounted directly — restart a container to recompile:
 #   docker compose -f docker-compose.dev.yml restart backend1
-#   docker compose -f docker-compose.dev.yml restart resolver
 #
-# First start builds the images and pre-caches dependencies (~2-3 min).
-# Subsequent restarts only recompile changed files (~10-30s).
-#
-# Named target/ volumes persist compiled artifacts across restarts.
 # If you change Cargo.toml/Cargo.lock, rebuild the image:
 #   docker compose -f docker-compose.dev.yml build backend1
 #
 # Usage:
 #   docker compose -f docker-compose.dev.yml up --build
-#   Frontend: open front-test/index.html — set backend to http://localhost:8001 or :8002
+#   Frontend: open front-test/index.html — set backend to http://localhost:8001, :8002, or :8003
 
 services:
   resolver:
@@ -23,17 +26,19 @@ services:
     ports:
       - "8080:8080"
     environment:
-      DATABASE_URL: postgres://archypix:archypix@postgres/archypix_resolver
-      MANAGED_DOMAIN: archypix.local
-      RESOLVER_ADMIN_SECRET: devsecret
-      LISTEN_ADDR: 0.0.0.0:8080
-      RUST_LOG: debug,archypix_resolver=trace
-      FRONT_URL: "*"
+      DB_HOST: postgres
+      DB_USER: archypix
+      DB_PASSWORD: archypix
+      DB_NAME: archypix_resolver
+      GLOBAL_DOMAIN: archypix.local
+      RESOLVER_JWT_SECRET: devsecret
+      CORS_ORIGINS: "*"
+      RUST_LOG: info,archypix_resolver=trace
     volumes:
       - ./resolver/Cargo.toml:/app/Cargo.toml
       - ./resolver/Cargo.lock:/app/Cargo.lock
       - ./resolver/src:/app/src
-      - ./resolver/target:/app/target
+      - resolver_target:/app/target
     depends_on:
       - postgres
 
@@ -43,45 +48,36 @@ services:
       target: dev
     ports:
       - "8001:8000"
+    env_file:
+      - .env.back.common
     environment:
-      LISTEN_ADDR: 0.0.0.0:8000
+      BACK_DOMAIN: localhost:8001
+      BACK_INTERNAL_URL: http://backend1:8000
+      GLOBAL_DOMAIN: archypix.local
       USE_RESOLVER: "true"
-      HOST: localhost:8001
-      PUBLIC_BASE_URL: http://localhost:8001
-      WEBFINGER_HOST: archypix.local
-      RESOLVER_URL: http://resolver:8080
-      RESOLVER_ADMIN_SECRET: devsecret
+      RESOLVER_INTERNAL_URL: http://resolver:8080
+      RESOLVER_JWT_SECRET: devsecret
       JWT_SECRET: devjwtsecret1
-      DATABASE_URL: postgres://archypix:archypix@postgres/archypix_back1
-      REDIS_URL: redis://default:archypix@redis:6379/0
-      S3_ENDPOINT: http://minio:9000
-      S3_ACCESS_KEY: archypix
-      S3_SECRET_KEY: archypix
-      S3_REGION: us-east-1
+      DB_HOST: postgres
+      DB_USER: archypix
+      DB_PASSWORD: archypix
+      DB_NAME: archypix_back1
+      REDIS_HOST: redis
+      REDIS_PASSWORD: archypix
+      REDIS_DB: "0"
       S3_BUCKET_STAGING: b1-archypix-staging
       S3_BUCKET_PICTURES: b1-archypix-pictures
       S3_BUCKET_VERSIONS: b1-archypix-versions
       S3_BUCKET_SMALL: b1-archypix-small
       S3_BUCKET_MEDIUM: b1-archypix-medium
       S3_BUCKET_LARGE: b1-archypix-large
-      S3_PRESIGN_TTL_SECS: "3600"
-      S3_PRESIGN_CACHE_MARGIN_SECS: "600"
-      FRONT_URL: "*"
-      FEDERATION_SCHEME: http
-      ACCESS_TOKEN_TTL_SECS: "900"
-      REFRESH_TOKEN_TTL_SECS: "2592000"
-      FEDERATION_JWT_TTL_SECS: "900"
-      FEDERATION_BACKEND_CACHE_TTL_SECS: "3600"
-      FEDERATION_REQUEST_TIMEOUT_MS: "5000"
-      SQLX_OFFLINE: "true"
-      RUST_LOG: debug,archypix_back=trace
     volumes:
       - ./back/.sqlx:/app/.sqlx
       - ./back/migrations:/app/migrations
       - ./back/src:/app/src
       - ./back/Cargo.toml:/app/Cargo.toml
       - ./back/Cargo.lock:/app/Cargo.lock
-      - ./back/target:/app/target
+      - back_target:/app/target
     depends_on:
       - postgres
       - redis
@@ -94,43 +90,75 @@ services:
       target: dev
     ports:
       - "8002:8000"
+    env_file:
+      - .env.back.common
     environment:
-      LISTEN_ADDR: 0.0.0.0:8000
-      USE_RESOLVER: "false"
-      HOST: localhost:8002
-      PUBLIC_BASE_URL: http://localhost:8002
-      WEBFINGER_HOST: localhost:8002
+      BACK_DOMAIN: localhost:8002
+      BACK_INTERNAL_URL: http://backend2:8000
+      GLOBAL_DOMAIN: archypix.local
+      USE_RESOLVER: "true"
+      RESOLVER_INTERNAL_URL: http://resolver:8080
+      RESOLVER_JWT_SECRET: devsecret
       JWT_SECRET: devjwtsecret2
-      DATABASE_URL: postgres://archypix:archypix@postgres/archypix_back2
-      REDIS_URL: redis://default:archypix@redis:6379/1
-      S3_ENDPOINT: http://minio:9000
-      S3_ACCESS_KEY: archypix
-      S3_SECRET_KEY: archypix
-      S3_REGION: us-east-1
+      DB_HOST: postgres
+      DB_USER: archypix
+      DB_PASSWORD: archypix
+      DB_NAME: archypix_back2
+      REDIS_HOST: redis
+      REDIS_PASSWORD: archypix
+      REDIS_DB: "1"
       S3_BUCKET_STAGING: b2-archypix-staging
       S3_BUCKET_PICTURES: b2-archypix-pictures
       S3_BUCKET_VERSIONS: b2-archypix-versions
       S3_BUCKET_SMALL: b2-archypix-small
       S3_BUCKET_MEDIUM: b2-archypix-medium
       S3_BUCKET_LARGE: b2-archypix-large
-      S3_PRESIGN_TTL_SECS: "3600"
-      S3_PRESIGN_CACHE_MARGIN_SECS: "600"
-      FRONT_URL: "*"
-      FEDERATION_SCHEME: http
-      ACCESS_TOKEN_TTL_SECS: "900"
-      REFRESH_TOKEN_TTL_SECS: "2592000"
-      FEDERATION_JWT_TTL_SECS: "900"
-      FEDERATION_BACKEND_CACHE_TTL_SECS: "3600"
-      FEDERATION_REQUEST_TIMEOUT_MS: "5000"
-      SQLX_OFFLINE: "true"
-      RUST_LOG: debug,archypix_back=trace
     volumes:
       - ./back/.sqlx:/app/.sqlx
       - ./back/migrations:/app/migrations
       - ./back/src:/app/src
       - ./back/Cargo.toml:/app/Cargo.toml
       - ./back/Cargo.lock:/app/Cargo.lock
-      - ./back/target:/app/target
+      - back_target:/app/target
+    depends_on:
+      - postgres
+      - redis
+      - minio
+      - resolver
+
+  backend3:
+    build:
+      context: ./back
+      target: dev
+    ports:
+      - "8003:8000"
+    env_file:
+      - .env.back.common
+    environment:
+      BACK_DOMAIN: localhost:8003
+      GLOBAL_DOMAIN: localhost:8003
+      USE_RESOLVER: "false"
+      JWT_SECRET: devjwtsecret3
+      DB_HOST: postgres
+      DB_USER: archypix
+      DB_PASSWORD: archypix
+      DB_NAME: archypix_back3
+      REDIS_HOST: redis
+      REDIS_PASSWORD: archypix
+      REDIS_DB: "2"
+      S3_BUCKET_STAGING: b3-archypix-staging
+      S3_BUCKET_PICTURES: b3-archypix-pictures
+      S3_BUCKET_VERSIONS: b3-archypix-versions
+      S3_BUCKET_SMALL: b3-archypix-small
+      S3_BUCKET_MEDIUM: b3-archypix-medium
+      S3_BUCKET_LARGE: b3-archypix-large
+    volumes:
+      - ./back/.sqlx:/app/.sqlx
+      - ./back/migrations:/app/migrations
+      - ./back/src:/app/src
+      - ./back/Cargo.toml:/app/Cargo.toml
+      - ./back/Cargo.lock:/app/Cargo.lock
+      - back_target:/app/target
     depends_on:
       - postgres
       - redis
