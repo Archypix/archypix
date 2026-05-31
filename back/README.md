@@ -72,8 +72,6 @@ The `.sqlx/` directory contains cached query metadata for offline builds (CI wit
 cargo sqlx prepare
 ```
 
----
-
 ## Code structure
 
 - `domain/` — pure business types and rules, no I/O

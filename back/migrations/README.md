@@ -27,8 +27,6 @@ sqlx migrate run
 cargo sqlx prepare
 ```
 
----
-
 ## Overview
 
 PostgreSQL schema for the Archypix decentralized picture management backend. Supports hierarchical tags, federation, sharing, and async job
