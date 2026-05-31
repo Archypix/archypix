@@ -1,83 +1,44 @@
 - Resolver (Rust service)
     - Purpose: map username → owning backend domain (implements WebFinger). Enables multiple backends to share one global identity domain.
-    - Processes / roles:
-        - WebFinger endpoint: answer `/.well-known/webfinger` requests. Returns the full public backend URL derived from `back_domain + use_https` at
-          query time.
-        - Registry access: read/write authoritative mapping in Postgres.
-        - Local cache: in‑process TTL cache (moka) for fast WebFinger lookups.
-        - Backend self-registration: `POST /api/backends` — backends call this at startup with `{ back_domain, use_https, internal_url }`. The
-          resolver stores the record and uses `internal_url` (internal Docker/VPC URL) to forward user registrations.
-        - User registration routing: `POST /api/register` — picks least-loaded backend, forwards via `internal_url`, stores `username → back_domain`
-          mapping.
-        - Mapping update API: `POST /api/update` — backends can update a user's mapping (e.g. after cross-instance migration).
+  - Roles:
+      - WebFinger endpoint: answer `/.well-known/webfinger` requests with the resolved backend URL.
+      - User registration routing: `POST /api/register` — picks least-loaded backend, forwards registration, stores `username → back_domain` mapping.
+      - Backend self-registration: `POST /api/backends` — backends call this at startup; the resolver stores `back_domain`, `use_https`, and
+        `internal_url`.
+      - Mapping update: `POST /api/update` — called by backends when a user migrates to another instance.
     - Key env vars: `GLOBAL_DOMAIN`, `RESOLVER_JWT_SECRET`, `DB_HOST/DB_USER/DB_PASSWORD/DB_NAME`.
-- Backend (Rust backend instance, per domain)
-    - Purpose: authoritative per‑instance application server and metadata store.
-    - Processes / roles:
-        - HTTP API & WebDAV: serve user requests, uploads, sync client endpoints.
-        - WebFinger client: consult resolver when needed for cross‑instance discovery.
-        - Postgres: authoritative metadata (users, jobs, faces, persons).
-        - Job producer: create job record in Postgres, publish compact job
-          message to job stream (NATS JetStream) including job_id, user_id,
-          s3_key, snapshot_version, result_subject and ephemeral token.
-        - Result consumer: durable consumer on jobs.results.<instance> — verify worker signature/token, persist results (faces, embeddings, thumbnails) into Postgres/vector index.
-        - Local caches: Redis (required) + in‑process caches for hot data and sessions.
-        - Federation endpoints: handle inbound/outbound federation messages.
-- Workers (central pool: Rust worker processes)
-    - Purpose: perform CPU/GPU work (thumbnails, ML) and publish compact results back to owning backend.
-    - Processes / roles:
-        - Job consumer: durable JetStream consumer of jobs.requests (or subject); ack / nack semantics, DLQ handling.
-        - Snapshot cache: on job, load per‑user snapshot (from MinIO) keyed by user_id+version; keep in memory/disk LRU.
-        - Task types:
-            - gen_thumbnail: download image from S3, generate thumbnails, upload derivatives.
-            - ml_style: compute style/object metadata and return structured tags.
-            - ml_people: detect faces, compute embeddings, run ANN match against cached user snapshot, return matched person ids + scores.
-            - ml_group_location: cluster images by geo/time and return clustering data.
-        - Result publisher: upload derivatives/crops to MinIO, publish compact result message to jobs.results.<instance> (job_id, s3_keys, matches, signature/token).
-        - Security: use scoped credentials or presigned URLs to access MinIO; sign results or use broker auth.
-- MinIO (S3-compatible object storage)
-    - Purpose: durable blob store for original images, derivatives, snapshots, and exports.
-    - Roles:
-        - Store full-resolution pictures, thumbnails, face crops, per‑user snapshot files, and picture version snapshots.
-        - Provide presigned URLs for upload/download to clients and workers.
-        - Serve as the medium for large bulk transfers (workers fetch snapshots from MinIO rather than inlining them in messages).
-  - Buckets (configured via env vars; multiple vars may point to the same bucket expect for staging):
-    | Env var | Default name | Purpose |
-    |--------------------------|-----------------------|---------------------------------------------------------------------|
-    | `S3_BUCKET_STAGING`      | `archypix-staging`    | Temporary upload target; 1-day lifecycle expiry set at startup |
-    | `S3_BUCKET_PICTURES`     | `archypix-pictures`   | Full-resolution pictures after upload confirmation |
-    | `S3_BUCKET_VERSIONS`     | `archypix-versions`   | Version snapshots when user has versioning enabled |
-    | `S3_BUCKET_SMALL`        | `archypix-small`      | Small thumbnails generated by workers |
-    | `S3_BUCKET_MEDIUM`       | `archypix-medium`     | Medium thumbnails generated by workers |
-    | `S3_BUCKET_LARGE`        | `archypix-large`      | Large thumbnails generated by workers |
 
-  - Key format (deterministic — never stored in DB):
-      - Pictures and thumbnails: `{user_id}/{picture_id}` (bucket distinguishes size)
-      - Version snapshots: `{user_id}/{picture_id}/{version_id}`
-      - Staging: `{user_id}/{picture_id}` (same UUID becomes the DB primary key on confirm)
-  - `S3_BUCKET_STAGING` **must be unique** from all other bucket names — the backend applies a 1-day expiration lifecycle rule to it at startup, which
-    would destroy data in any shared bucket.
-  - Two S3 endpoint env vars:
-      - `S3_ENDPOINT` — used for all server-side operations (upload, copy, bucket management, lifecycle rules). May be an internal address (e.g.
-        `http://minio:9000`).
-      - `S3_PUBLIC_ENDPOINT` — used when generating presigned URLs returned to clients. Defaults to `S3_ENDPOINT`. Override when the internal and
-        public addresses differ (e.g. Docker vs. host-exposed port).
-  - Presigned URLs: TTL controlled by `S3_PRESIGN_TTL_SECS` (default 3600s). The list endpoint and `GET /pictures/{id}/url` cache presigned URLs in
-    Redis for `S3_PRESIGN_TTL_SECS − S3_PRESIGN_CACHE_MARGIN_SECS` (default 3000s). If cache TTL ≤ 0 caching is skipped entirely.
-- Frontend (static CDN + clients)
-    - Purpose: single static frontend site + sync clients that reach the proper backend instance.
+- Backend (Rust backend instance, per domain)
+    - Purpose: authoritative per-instance application server and metadata store.
     - Roles:
-        - Static assets served via CDN / frontend pool (single codebase for all instances).
-        - Discovery: browser and sync clients call WebFinger to resolve username → backend domain.
-        - API/WebDAV calls: interact with the resolved backend for uploads, sync, gallery, etc.
-        - UI flows: trigger upload ➜ backend enqueues job ➜ worker processes ➜ backend displays result when result message persisted.
-          Developer notes (important invariants)
-- Authority: each backend is authoritative for its users (Postgres is
-  single source of truth per instance). Workers do not write backend DB
-  directly — workers publish results and backends persist.
-- Messaging: NATS JetStream for jobs + results; messages are compact (pointers/versions), snapshots live in MinIO.
-- Security: ephemeral tokens or signed results + broker auth; presigned URLs for S3 access; authenticate resolver/backend calls.
-- Caching & invalidation: use versioned snapshots and publish
-  invalidation events so workers/ resolvers can evict caches safely.
-- Reliability: JetStream durable consumers + DLQ; backends must verify
-  and idempotently upsert job results (use job_id as idempotency key).
+        - HTTP API & WebDAV: serve user requests, uploads, sync client endpoints.
+      - WebFinger client: consult resolver/WebFinger when needed for cross-instance discovery; caches backend domains in Redis.
+      - Postgres: authoritative metadata (users, pictures, tags, shares, jobs).
+      - Federation endpoints: handle inbound/outbound federation messages (share announce/revoke, presign requests).
+      - Job producer/consumer: publish job messages to NATS JetStream; consume and persist results from workers.
+      - Local caches: Redis for sessions, presigned URLs, federation tokens, and backend domain mappings.
+
+- Workers (central pool: Rust worker processes)
+    - Purpose: perform CPU/GPU work and publish compact results back to owning backends; never write to backend databases directly.
+    - Task types: thumbnail generation, ML style/object tagging, face detection and embedding, geo/time clustering.
+    - Results are published to the backend via NATS JetStream; large artifacts (thumbnails, crops, snapshots) go to MinIO.
+
+- MinIO (S3-compatible object storage)
+    - Purpose: durable blob store for original images, derivatives, ML snapshots, and exports.
+    - Buckets: staging (short-lived uploads), pictures (confirmed originals), versions (version snapshots), small/medium/large (thumbnails).
+    - S3 keys are derived deterministically (`{user_id}/{picture_id}`) and never stored in the database.
+    - Two S3 endpoints: `S3_ENDPOINT` for server-side operations; `S3_PUBLIC_ENDPOINT` for presigned URLs returned to clients (differs in Docker
+      setups).
+
+- Frontend (static CDN + clients)
+    - Single static site served from CDN; no per-instance build.
+    - Discovery: resolve `@username:domain` → backend URL via WebFinger before making API calls.
+    - All API and WebDAV calls go to the resolved backend for that user.
+
+**Invariants**
+
+- Each backend is authoritative for its users (Postgres is the single source of truth per instance).
+- Workers publish results; backends persist — workers never write backend databases directly.
+- All persistent storage (DB fields, JWT claims, federation messages) uses the **global domain**. Backend domains are resolved on demand via WebFinger
+  and cached in Redis.
+- NATS JetStream for jobs + results; messages are compact (IDs and pointers), large data lives in MinIO.
