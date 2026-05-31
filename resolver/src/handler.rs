@@ -6,9 +6,9 @@ use crate::database::{
 use crate::error::AppError;
 use axum::Json;
 use axum::extract::{Query, State};
-use axum::http::HeaderMap;
 use axum::http::header::AUTHORIZATION;
-use axum::response::IntoResponse;
+use axum::http::{HeaderMap, HeaderValue, header};
+use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
@@ -35,12 +35,12 @@ pub struct WebFingerLink {
 pub async fn webfinger_handler(
     Query(query): Query<WebFingerQuery>,
     State(state): State<AppState>,
-) -> Result<Json<WebFingerResponse>, AppError> {
+) -> Result<Response, AppError> {
     let username = parse_acct_resource(&query.resource, &state)?;
 
     if let Some(backend_url) = state.cache.get(&username).await {
         info!("Cache hit for username: {}", username);
-        return Ok(Json(build_webfinger_response(
+        return Ok(jrd_response(build_webfinger_response(
             &username,
             &backend_url,
             &state.global_domain,
@@ -55,7 +55,7 @@ pub async fn webfinger_handler(
             .cache
             .insert(username.clone(), backend_url.clone())
             .await;
-        Ok(Json(build_webfinger_response(
+        Ok(jrd_response(build_webfinger_response(
             &username,
             &backend_url,
             &state.global_domain,
@@ -64,6 +64,19 @@ pub async fn webfinger_handler(
         warn!("Unknown username: {}", username);
         Err(AppError::NotFound)
     }
+}
+
+/// Serialize a WebFinger response with the RFC 7033-mandated Content-Type.
+fn jrd_response(body: WebFingerResponse) -> Response {
+    let json = serde_json::to_string(&body).expect("WebFingerResponse is always serializable");
+    (
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/jrd+json"),
+        )],
+        json,
+    )
+        .into_response()
 }
 
 // ── Update mapping ────────────────────────────────────────────────────────────
@@ -363,7 +376,8 @@ fn parse_acct_resource(resource: &str, state: &AppState) -> Result<String, AppEr
         AppError::BadRequest("Invalid resource format. Expected archypix:@user:domain".to_string())
     })?;
 
-    let mut iter = rest.split(':');
+    // splitn(2) keeps a domain:port like `localhost:8001` intact as the second part.
+    let mut iter = rest.splitn(2, ':');
     let user = iter.next().ok_or_else(|| {
         AppError::BadRequest("Invalid resource format. Expected archypix:@user:domain".to_string())
     })?;

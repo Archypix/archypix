@@ -25,14 +25,18 @@ pub fn version_key(user_id: Uuid, picture_id: Uuid, version_id: Uuid) -> String 
 /// Thin wrapper around the S3 client that adds presigned URL helpers.
 #[derive(Clone)]
 pub struct StorageClient {
+    /// Used for internal operations: uploads, copies, deletes, bucket management.
     client: Client,
+    /// Configured with `s3_public_endpoint` so presigned URLs are reachable by browsers.
+    presign_client: Client,
     presign_ttl: Duration,
 }
 
 impl StorageClient {
-    pub fn new(client: Client, presign_ttl: Duration) -> Self {
+    pub fn new(client: Client, presign_client: Client, presign_ttl: Duration) -> Self {
         Self {
             client,
+            presign_client,
             presign_ttl,
         }
     }
@@ -40,7 +44,7 @@ impl StorageClient {
     pub async fn presign_get(&self, bucket: &str, key: &str) -> Result<String, AppError> {
         let config = PresigningConfig::expires_in(self.presign_ttl)
             .map_err(|e| AppError::InternalServerError(format!("presign config: {e}")))?;
-        self.client
+        self.presign_client
             .get_object()
             .bucket(bucket)
             .key(key)
@@ -53,7 +57,7 @@ impl StorageClient {
     pub async fn presign_put(&self, bucket: &str, key: &str) -> Result<String, AppError> {
         let config = PresigningConfig::expires_in(self.presign_ttl)
             .map_err(|e| AppError::InternalServerError(format!("presign config: {e}")))?;
-        self.client
+        self.presign_client
             .put_object()
             .bucket(bucket)
             .key(key)
@@ -103,17 +107,30 @@ pub async fn connect(config: &Config) -> anyhow::Result<StorageClient> {
         None,
         "static",
     );
+    // Build shared config without an endpoint — each client sets its own below.
     let shared_config = aws_config::from_env()
         .region(region_provider)
         .credentials_provider(credentials)
-        .endpoint_url(config.s3_endpoint.clone())
         .load()
         .await;
-    let s3_config = aws_sdk_s3::config::Builder::from(&shared_config)
-        .force_path_style(true)
-        .build();
-    info!("Connecting to MinIO/S3: {}", config.s3_endpoint);
-    let client = Client::from_conf(s3_config);
+
+    let client = Client::from_conf(
+        aws_sdk_s3::config::Builder::from(&shared_config)
+            .endpoint_url(config.s3_endpoint.clone())
+            .force_path_style(true)
+            .build(),
+    );
+    let presign_client = Client::from_conf(
+        aws_sdk_s3::config::Builder::from(&shared_config)
+            .endpoint_url(config.s3_public_endpoint.clone())
+            .force_path_style(true)
+            .build(),
+    );
+
+    info!(
+        "Connecting to MinIO/S3: {} (public: {})",
+        config.s3_endpoint, config.s3_public_endpoint
+    );
     client
         .list_buckets()
         .send()
@@ -153,6 +170,7 @@ pub async fn connect(config: &Config) -> anyhow::Result<StorageClient> {
 
     Ok(StorageClient::new(
         client,
+        presign_client,
         Duration::from_secs(config.s3_presign_ttl_secs),
     ))
 }

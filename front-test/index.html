@@ -20,14 +20,14 @@
 
     <label class="flex flex-col text-xs">
         <span class="text-gray-400">Backend URL</span>
-        <input class="bg-gray-700 text-white px-2 py-1 rounded w-64 text-xs" id="cfg-backend" placeholder="http://localhost:8000"
-               type="text"/>
+        <input class="bg-gray-700 text-white px-2 py-1 rounded w-64 text-xs" id="cfg-backend"
+               placeholder="http://localhost:8000" type="text"/>
     </label>
 
     <label class="flex flex-col text-xs">
         <span class="text-gray-400">Resolver URL</span>
-        <input class="bg-gray-700 text-white px-2 py-1 rounded w-64 text-xs" id="cfg-resolver" placeholder="http://localhost:8080"
-               type="text"/>
+        <input class="bg-gray-700 text-white px-2 py-1 rounded w-64 text-xs" id="cfg-resolver"
+               placeholder="http://localhost:8080" type="text"/>
     </label>
 
     <div class="text-xs text-green-400 hidden" id="cfg-user-info">
@@ -37,8 +37,8 @@
     <button class="ml-auto bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-xs" onclick="logout()">Logout</button>
 
     <div class="text-xs text-orange-300 w-full">
-        ⚠️ CORS note: if you see CORS errors, make sure the backend has <code>FRONT_URL</code> configured to include this origin (<span
-            id="cfg-origin"></span>).
+        ⚠️ CORS: if you see CORS errors, make sure the backend has <code>CORS_ORIGINS</code> set to include this
+        origin (<span id="cfg-origin"></span>).
     </div>
 </div>
 
@@ -69,7 +69,7 @@
                     <input class="input w-full" id="reg-email" placeholder="Email" type="email"/>
                     <input class="input w-full" id="reg-password" placeholder="Password" type="password"/>
                     <button class="btn btn-green w-full" onclick="doRegister()">Register &amp; Login</button>
-                    <p class="text-xs text-gray-500">Only works when <code>USE_RESOLVER=false</code> on backend.</p>
+                    <p class="text-xs text-gray-500">Works on any backend (hits <code>/api/public/users</code>).</p>
                 </div>
             </div>
 
@@ -82,7 +82,7 @@
                     <input class="input w-full" id="rres-email" placeholder="Email" type="email"/>
                     <input class="input w-full" id="rres-password" placeholder="Password" type="password"/>
                     <button class="btn btn-purple w-full" onclick="doRegisterViaResolver()">Register via Resolver</button>
-                    <p class="text-xs text-orange-500">⚠️ Not yet implemented on the resolver side.</p>
+                    <p class="text-xs text-gray-500">Hits resolver's <code>/api/register</code>; resolver picks the least-loaded backend.</p>
                 </div>
             </div>
         </div>
@@ -91,6 +91,7 @@
         <div class="mt-4">
             <div class="flex gap-2 mb-2">
                 <button class="btn btn-gray" onclick="doGetMe()">GET /api/auth/me</button>
+                <button class="btn btn-gray" onclick="doRefreshManual()">Refresh token</button>
             </div>
             <pre class="output" id="auth-output"></pre>
         </div>
@@ -161,8 +162,8 @@
             <div class="grid grid-cols-2 gap-2">
                 <input class="input" id="share-tag-path" placeholder="tag_path" type="text"/>
                 <input class="input" id="share-recipient-username" placeholder="recipient_username" type="text"/>
-                <input class="input" id="share-recipient-instance" id="share-recipient-instance" placeholder="recipient_instance (other backend host)"
-                       type="text"/>
+                <input class="input" id="share-recipient-instance"
+                       placeholder="recipient_instance (other backend's global domain)" type="text"/>
                 <div class="flex gap-4 items-center">
                     <label class="flex gap-1 items-center text-xs">
                         <input id="share-allow-back" type="checkbox"/> allow_share_back
@@ -189,9 +190,9 @@
         <h2 class="text-lg font-bold mb-3 border-b pb-2">🌐 Federation</h2>
 
         <div class="mb-3 text-xs text-gray-600 bg-gray-50 p-3 rounded border">
-            <strong>How to test federation:</strong> Open a second browser tab pointing to this same file. Set a different Backend URL in the config
-            bar of the second tab. Log in as a different user on the second instance. Then use the Sharing section to send pictures from one instance
-            to the other using <code>@username:domain</code> addressing.
+            <strong>How to test federation:</strong> Open a second browser tab pointing to this same file. Set a
+            different Backend URL in each tab. Log in as different users. Then use the Sharing section to send pictures
+            between instances using <code>@username:global_domain</code> addressing.
         </div>
 
         <div class="mb-3">
@@ -206,7 +207,7 @@
         <div>
             <h3 class="font-semibold mb-2 text-blue-700">WebFinger Lookup (via Resolver)</h3>
             <p class="text-xs text-gray-500 mb-2">
-                Format: <code>@username:domain</code> — queries resolver's
+                Format: <code>@username:domain</code> — queries
                 <code>/.well-known/webfinger?resource=archypix:@{"{"}username{"}"}{":"}domain</code>
             </p>
             <div class="flex gap-2 mb-2">
@@ -237,13 +238,13 @@
         @apply px-3 py-1 rounded text-sm font-medium cursor-pointer;
     }
     .btn-blue {
-        @apply bg-blue-600 hover:bg-blue-700 text-white;
+        @apply bg-blue-600   hover:bg-blue-700   text-white;
     }
     .btn-green {
-        @apply bg-green-600 hover:bg-green-700 text-white;
+        @apply bg-green-600  hover:bg-green-700  text-white;
     }
     .btn-gray {
-        @apply bg-gray-200 hover:bg-gray-300 text-gray-800;
+        @apply bg-gray-200   hover:bg-gray-300   text-gray-800;
     }
     .btn-purple {
         @apply bg-purple-600 hover:bg-purple-700 text-white;
@@ -286,18 +287,17 @@
         });
 
         document.getElementById('cfg-origin').textContent = window.location.origin;
-
         updateUserInfo();
         updateFedInfo();
         prefillRecipientInstance();
     }
 
     function getBackend(){
-        return (document.getElementById('cfg-backend').value || 'http://localhost:8000').replace(/\/$/, '');
+        return (LS.get(KEYS.backend) || 'http://localhost:8000').replace(/\/$/, '');
     }
 
     function getResolver(){
-        return (document.getElementById('cfg-resolver').value || 'http://localhost:8080').replace(/\/$/, '');
+        return (LS.get(KEYS.resolver) || 'http://localhost:8080').replace(/\/$/, '');
     }
 
     function getToken(){
@@ -321,42 +321,81 @@
     }
 
     function prefillRecipientInstance(){
-        // Pre-fill recipient instance with the OTHER backend's hostname (strip protocol)
         const url = getBackend();
         try{
-            const parsed = new URL(url);
-            document.getElementById('share-recipient-instance').value = parsed.host;
+            document.getElementById('share-recipient-instance').value = new URL(url).host;
+        }catch(e){ /* ignore */
+        }
+    }
+
+    // ===== TOKEN REFRESH =====
+    let _refreshing = false; // guard against concurrent refresh attempts
+
+    async function tryRefresh(){
+        const refresh = LS.get(KEYS.refresh);
+        if(!refresh || _refreshing) return false;
+        _refreshing = true;
+        try{
+            const res = await fetch(getBackend() + '/api/auth/refresh', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({refresh_token: refresh}),
+            });
+            if(!res.ok) return false;
+            const data = await res.json();
+            LS.set(KEYS.access, data.access_token);
+            LS.set(KEYS.refresh, data.refresh_token);
+            updateUserInfo();
+            return true;
         }catch(e){
-            // ignore
+            return false;
+        }finally{
+            _refreshing = false;
         }
     }
 
     // ===== FETCH HELPERS =====
     async function apiFetch(path, options = {}, useAuth = true, baseUrl = null){
-        const url = (baseUrl || getBackend()) + path;
+        const base = baseUrl || getBackend();
+
+        async function doFetch(){
         const headers = {'Content-Type': 'application/json', ...(options.headers || {})};
-        if(useAuth){
+            if(useAuth){
             const token = getToken();
-            if(token) headers['Authorization'] = `Bearer ${token}`;
+                if(token) headers['Authorization'] = `Bearer ${token}`;
         }
-        const res = await fetch(url, {...options, headers});
-        let data;
+            return fetch(base + path, {...options, headers});
+        }
+
+        let res = await doFetch();
+
+        // On 401, attempt one silent token refresh and retry.
+        if(res.status === 401 && useAuth){
+            const refreshed = await tryRefresh();
+            if(refreshed){
+                res = await doFetch();
+            }else{
+                // Refresh failed — clear session so the user knows they must log in again.
+                LS.set(KEYS.access, '');
+                LS.set(KEYS.refresh, '');
+                LS.set(KEYS.username, '');
+                updateUserInfo();
+                updateFedInfo();
+        }
+        }
+
         const ct = res.headers.get('content-type') || '';
-        if(ct.includes('application/json')){
-            data = await res.json();
-        }else{
-            data = await res.text();
-        }
+        const data = ct.includes('json') ? await res.json() : await res.text();
         return {ok: res.ok, status: res.status, data};
     }
 
     function showOutput(elId, result, error = null){
         const el = document.getElementById(elId);
         if(error){
-            el.textContent = '❌ ERROR: ' + error;
-            el.className = el.className.replace('text-red-600', '') + ' text-red-600';
+            el.textContent = '❌ ' + error;
+            el.classList.add('text-red-600');
         }else{
-            el.className = el.className.replace(' text-red-600', '');
+            el.classList.remove('text-red-600');
             el.textContent = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
         }
     }
@@ -397,7 +436,6 @@
             }, false);
             showOutput('auth-output', r.data, r.ok ? null : `HTTP ${r.status}: ${JSON.stringify(r.data)}`);
             if(r.ok){
-                // Auto-login
                 document.getElementById('login-username').value = document.getElementById('reg-username').value;
                 document.getElementById('login-password').value = document.getElementById('reg-password').value;
                 await doLogin();
@@ -418,9 +456,15 @@
                     password: document.getElementById('rres-password').value,
                 }),
             }, false, getResolver());
-            showOutput('auth-output', r.data, r.ok ? null : `HTTP ${r.status} (resolver may not implement this yet)`);
+            showOutput('auth-output', r.data, r.ok ? null : `HTTP ${r.status}`);
+            if(r.ok){
+                // Auto-login against the backend the resolver chose
+                document.getElementById('login-username').value = document.getElementById('rres-username').value;
+                document.getElementById('login-password').value = document.getElementById('rres-password').value;
+                await doLogin();
+            }
         }catch(e){
-            showOutput('auth-output', null, e.message + ' (resolver endpoint likely not implemented yet)');
+            showOutput('auth-output', null, e.message);
         }
     }
 
@@ -436,6 +480,11 @@
         }catch(e){
             showOutput('auth-output', null, e.message);
         }
+    }
+
+    async function doRefreshManual(){
+        const ok = await tryRefresh();
+        showOutput('auth-output', ok ? '✅ Token refreshed.' : '❌ Refresh failed — please log in again.');
     }
 
     async function logout(){
@@ -467,7 +516,6 @@
         }
 
         const progress = document.getElementById('upload-progress');
-
         try{
             progress.textContent = '1/3 Requesting upload URL...';
             const r1 = await apiFetch('/api/authenticated/pictures/uploads', {
@@ -482,25 +530,19 @@
             const {picture_id, presigned_url} = r1.data;
             showOutput('upload-output', {step1: r1.data});
 
-            progress.textContent = `2/3 Uploading to MinIO (presigned URL)... picture_id=${picture_id}`;
-            // PUT directly to MinIO — no Authorization header
+            progress.textContent = `2/3 Uploading to S3... picture_id=${picture_id}`;
             const putRes = await fetch(presigned_url, {
                 method: 'PUT',
                 body: file,
                 headers: {'Content-Type': file.type || 'application/octet-stream'},
             });
             if(!putRes.ok){
-                const txt = await putRes.text();
-                showOutput('upload-output', txt, `MinIO PUT failed: HTTP ${putRes.status}`);
+                showOutput('upload-output', await putRes.text(), `S3 PUT failed: HTTP ${putRes.status}`);
                 return;
             }
-            progress.textContent = `3/3 Completing upload...`;
 
-            const completeBody = {
-                mime_type: file.type || null,
-                file_size: file.size || null,
-            };
-            // Try to get image dimensions if it's an image
+            progress.textContent = '3/3 Completing upload...';
+            const completeBody = {mime_type: file.type || null, file_size: file.size || null};
             if(file.type.startsWith('image/')){
                 try{
                     const dims = await getImageDimensions(file);
@@ -552,13 +594,13 @@
                         document.getElementById('pic-id').value = pic.id;
                         doGetPicture();
                     };
-                    const imgSrc = pic.thumbnail_url || '';
                     div.innerHTML = `
-          <img src="${imgSrc}" alt="${pic.filename}" class="w-full h-24 object-cover bg-gray-200"
-               onerror="this.style.display='none'" />
-          <div class="p-1 text-xs truncate text-gray-700" title="${pic.filename}">${pic.filename}</div>
-          <div class="px-1 pb-1 text-xs text-gray-400">${pic.ingested_at ? new Date(pic.ingested_at).toLocaleDateString() : ''}</div>
-        `;
+                    <img src="${pic.thumbnail_url || ''}" alt="${pic.filename}"
+                         class="w-full h-24 object-cover bg-gray-200" onerror="this.style.display='none'"/>
+                    <div class="p-1 text-xs truncate text-gray-700" title="${pic.filename}">${pic.filename}</div>
+                    <div class="px-1 pb-1 text-xs text-gray-400">
+                        ${pic.ingested_at ? new Date(pic.ingested_at).toLocaleDateString() : ''}
+                    </div>`;
                     grid.appendChild(div);
                 });
             }
@@ -585,9 +627,8 @@
     async function doGetSettings(){
         try{
             const r = await apiFetch('/api/authenticated/settings');
-            if(r.ok && r.data.versioning_mode){
+            if(r.ok && r.data.versioning_mode)
                 document.getElementById('settings-versioning').value = r.data.versioning_mode;
-            }
             showOutput('settings-output', r.data, r.ok ? null : `HTTP ${r.status}`);
         }catch(e){
             showOutput('settings-output', null, e.message);
@@ -598,9 +639,7 @@
         try{
             const r = await apiFetch('/api/authenticated/settings', {
                 method: 'PATCH',
-                body: JSON.stringify({
-                    versioning_mode: document.getElementById('settings-versioning').value,
-                }),
+                body: JSON.stringify({versioning_mode: document.getElementById('settings-versioning').value}),
             });
             showOutput('settings-output', r.data, r.ok ? null : `HTTP ${r.status}`);
         }catch(e){
@@ -611,16 +650,15 @@
     // ===== SHARING =====
     async function doCreateShare(){
         try{
-            const body = {
-                tag_path: document.getElementById('share-tag-path').value,
-                recipient_username: document.getElementById('share-recipient-username').value,
-                recipient_instance: document.getElementById('share-recipient-instance').value || null,
-                allow_share_back: document.getElementById('share-allow-back').checked,
-                future: document.getElementById('share-future').checked,
-            };
             const r = await apiFetch('/api/authenticated/shares/outgoing', {
                 method: 'POST',
-                body: JSON.stringify(body),
+                body: JSON.stringify({
+                    tag_path: document.getElementById('share-tag-path').value,
+                    recipient_username: document.getElementById('share-recipient-username').value,
+                    recipient_instance: document.getElementById('share-recipient-instance').value || null,
+                    allow_share_back: document.getElementById('share-allow-back').checked,
+                    future: document.getElementById('share-future').checked,
+                }),
             });
             showOutput('share-create-output', r.data, r.ok ? null : `HTTP ${r.status}`);
         }catch(e){
@@ -649,7 +687,6 @@
     // ===== FEDERATION / WEBFINGER =====
     async function doWebFinger(){
         const address = document.getElementById('wf-address').value.trim();
-        // Expect @username:domain
         const match = address.match(/^@?([^:]+):(.+)$/);
         if(!match){
             showOutput('wf-output', null, 'Format must be @username:domain or username:domain');
@@ -657,17 +694,12 @@
         }
         const [, username, domain] = match;
         const resource = `archypix:@${username}:${domain}`;
-        const resolverUrl = getResolver();
-        const url = `${resolverUrl}/.well-known/webfinger?resource=${encodeURIComponent(resource)}`;
+        const url = `${getResolver()}/.well-known/webfinger?resource=${encodeURIComponent(resource)}`;
         try{
             showOutput('wf-output', `Querying: ${url}`);
             const res = await fetch(url);
-            let data;
-            try{
-                data = await res.json();
-            }catch{
-                data = await res.text();
-            }
+            const ct = res.headers.get('content-type') || '';
+            const data = ct.includes('json') ? await res.json() : await res.text();
             showOutput('wf-output', data, res.ok ? null : `HTTP ${res.status}`);
         }catch(e){
             showOutput('wf-output', null, e.message);

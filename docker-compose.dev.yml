@@ -30,7 +30,7 @@ services:
       DB_USER: archypix
       DB_PASSWORD: archypix
       DB_NAME: archypix_resolver
-      GLOBAL_DOMAIN: archypix.local
+      GLOBAL_DOMAIN: localhost:8080
       RESOLVER_JWT_SECRET: devsecret
       CORS_ORIGINS: "*"
       RUST_LOG: info,archypix_resolver=trace
@@ -53,7 +53,7 @@ services:
     environment:
       BACK_DOMAIN: localhost:8001
       BACK_INTERNAL_URL: http://backend1:8000
-      GLOBAL_DOMAIN: archypix.local
+      GLOBAL_DOMAIN: localhost:8080
       USE_RESOLVER: "true"
       RESOLVER_INTERNAL_URL: http://resolver:8080
       RESOLVER_JWT_SECRET: devsecret
@@ -95,7 +95,7 @@ services:
     environment:
       BACK_DOMAIN: localhost:8002
       BACK_INTERNAL_URL: http://backend2:8000
-      GLOBAL_DOMAIN: archypix.local
+      GLOBAL_DOMAIN: localhost:8080
       USE_RESOLVER: "true"
       RESOLVER_INTERNAL_URL: http://resolver:8080
       RESOLVER_JWT_SECRET: devsecret

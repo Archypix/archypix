@@ -53,6 +53,10 @@ pub struct Config {
 
     // ── S3 / Object storage ───────────────────────────────────────────────────
     pub s3_endpoint: String,
+    /// Public-facing S3 endpoint used in presigned URLs returned to clients.
+    /// Defaults to `s3_endpoint` when not set — override when the internal and
+    /// external addresses differ (e.g. `http://minio:9000` vs `http://localhost:9000`).
+    pub s3_public_endpoint: String,
     pub s3_access_key: String,
     pub s3_secret_key: String,
     pub s3_region: String,
@@ -76,6 +80,7 @@ impl Config {
         let back_use_https = env_bool("BACK_USE_HTTPS", true)?;
         let global_domain = require_env("GLOBAL_DOMAIN")?;
         let back_scheme = if back_use_https { "https" } else { "http" };
+        let s3_endpoint = require_env("S3_ENDPOINT")?;
 
         let config = Config {
             listen_addr: env("LISTEN_ADDR", "0.0.0.0:8000".to_string()),
@@ -121,7 +126,8 @@ impl Config {
             federation_backend_cache_ttl_secs: env_u64("FEDERATION_BACKEND_CACHE_TTL_SECS", 3600)?,
             federation_request_timeout_ms: env_u64("FEDERATION_REQUEST_TIMEOUT_MS", 1000)?,
 
-            s3_endpoint: require_env("S3_ENDPOINT")?,
+            s3_public_endpoint: env("S3_PUBLIC_ENDPOINT", s3_endpoint.clone()),
+            s3_endpoint,
             s3_access_key: require_env("S3_ACCESS_KEY")?,
             s3_secret_key: require_env("S3_SECRET_KEY")?,
             s3_region: env("S3_REGION", "us-east-1".to_string()),
