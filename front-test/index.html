@@ -3,726 +3,553 @@
 <head>
     <meta charset="UTF-8"/>
     <meta content="width=device-width, initial-scale=1.0" name="viewport"/>
-    <title>Archypix API Test Tool</title>
+    <title>Archypix Dev Tool</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
     <style>
         pre {
             white-space: pre-wrap;
             word-break: break-all;
         }
+        .input {
+            @apply border border-gray-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400;
+        }
+        .btn {
+            @apply px-3 py-1 rounded text-sm font-medium cursor-pointer;
+        }
+        .out {
+            @apply bg-gray-50 border border-gray-200 rounded p-2 text-xs max-h-64 overflow-auto min-h-8 font-mono;
+        }
+        .card {
+            @apply bg-white rounded shadow p-4;
+        }
     </style>
 </head>
-<body class="bg-gray-100 text-gray-900 font-mono text-sm">
+<body class="bg-gray-100 text-gray-900 text-sm" id="app">
 
-<!-- ===== CONFIG BAR ===== -->
-<div class="sticky top-0 z-50 bg-gray-900 text-white p-3 flex flex-wrap gap-3 items-center shadow-lg">
-    <span class="font-bold text-yellow-400">Archypix Dev Tool</span>
+<!-- CONFIG BAR -->
+<div class="sticky top-0 z-50 bg-gray-900 text-white p-3 flex flex-wrap gap-3 items-center shadow-lg text-xs">
+    <span class="font-bold text-yellow-400 mr-2">Archypix Dev Tool</span>
 
-    <label class="flex flex-col text-xs">
-        <span class="text-gray-400">Backend URL</span>
-        <input class="bg-gray-700 text-white px-2 py-1 rounded w-64 text-xs" id="cfg-backend"
-               placeholder="http://localhost:8000" type="text"/>
+    <label class="flex flex-col">
+        <span class="text-gray-400">Backend</span>
+        <input class="bg-gray-700 px-2 py-1 rounded w-56" placeholder="http://localhost:8000" v-model="backend"/>
+    </label>
+    <label class="flex flex-col">
+        <span class="text-gray-400">Resolver</span>
+        <input class="bg-gray-700 px-2 py-1 rounded w-56" placeholder="http://localhost:8080" v-model="resolver"/>
     </label>
 
-    <label class="flex flex-col text-xs">
-        <span class="text-gray-400">Resolver URL</span>
-        <input class="bg-gray-700 text-white px-2 py-1 rounded w-64 text-xs" id="cfg-resolver"
-               placeholder="http://localhost:8080" type="text"/>
-    </label>
+    <span class="text-green-400" v-if="username">Logged in as <b>{{ username }}</b></span>
+    <button @click="logout" class="ml-auto bg-red-600 hover:bg-red-700 px-3 py-1 rounded">Logout</button>
 
-    <div class="text-xs text-green-400 hidden" id="cfg-user-info">
-        Logged in as: <span class="font-bold" id="cfg-username"></span>
-    </div>
-
-    <button class="ml-auto bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-xs" onclick="logout()">Logout</button>
-
-    <div class="text-xs text-orange-300 w-full">
-        ⚠️ CORS: if you see CORS errors, make sure the backend has <code>CORS_ORIGINS</code> set to include this
-        origin (<span id="cfg-origin"></span>).
+    <div class="text-orange-300 w-full">
+        ⚠️ CORS: set <code>CORS_ORIGINS={{ origin }}</code> on the backend.
     </div>
 </div>
 
-<div class="max-w-5xl mx-auto p-4 space-y-6">
+<div class="max-w-5xl mx-auto p-4 space-y-5">
 
-    <!-- ===== AUTH SECTION ===== -->
-    <section class="bg-white rounded shadow p-4">
-        <h2 class="text-lg font-bold mb-3 border-b pb-2">📋 Auth</h2>
+    <!-- AUTH -->
+    <div class="card">
+        <h2 class="font-bold text-base mb-3 border-b pb-2">📋 Auth</h2>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
 
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-
-            <!-- Login -->
-            <div>
-                <h3 class="font-semibold mb-2 text-blue-700">Login</h3>
-                <div class="space-y-2">
-                    <input class="input w-full" id="login-username" placeholder="Username" type="text"/>
-                    <input class="input w-full" id="login-password" placeholder="Password" type="password"/>
-                    <button class="btn btn-blue w-full" onclick="doLogin()">Login</button>
-                </div>
+            <div class="space-y-2">
+                <h3 class="font-semibold text-blue-700">Login</h3>
+                <input class="input w-full" placeholder="Username" v-model="login.username"/>
+                <input class="input w-full" placeholder="Password" type="password" v-model="login.password"/>
+                <button @click="doLogin" class="btn bg-blue-600 hover:bg-blue-700 text-white w-full">Login</button>
             </div>
 
-            <!-- Register (direct) -->
-            <div>
-                <h3 class="font-semibold mb-2 text-green-700">Register (direct, no resolver)</h3>
-                <div class="space-y-2">
-                    <input class="input w-full" id="reg-username" placeholder="Username" type="text"/>
-                    <input class="input w-full" id="reg-display" placeholder="Display name" type="text"/>
-                    <input class="input w-full" id="reg-email" placeholder="Email" type="email"/>
-                    <input class="input w-full" id="reg-password" placeholder="Password" type="password"/>
-                    <button class="btn btn-green w-full" onclick="doRegister()">Register &amp; Login</button>
-                    <p class="text-xs text-gray-500">Works on any backend (hits <code>/api/public/users</code>).</p>
-                </div>
+            <div class="space-y-2">
+                <h3 class="font-semibold text-green-700">Register (direct)</h3>
+                <input class="input w-full" placeholder="Username" v-model="reg.username"/>
+                <input class="input w-full" placeholder="Display name" v-model="reg.display"/>
+                <input class="input w-full" placeholder="Email" v-model="reg.email"/>
+                <input class="input w-full" placeholder="Password" type="password" v-model="reg.password"/>
+                <button @click="doRegister" class="btn bg-green-600 hover:bg-green-700 text-white w-full">Register &amp; Login</button>
+                <p class="text-xs text-gray-500">Hits <code>/api/public/users</code> directly.</p>
             </div>
 
-            <!-- Register via resolver -->
-            <div>
-                <h3 class="font-semibold mb-2 text-purple-700">Register via Resolver</h3>
-                <div class="space-y-2">
-                    <input class="input w-full" id="rres-username" placeholder="Username" type="text"/>
-                    <input class="input w-full" id="rres-display" placeholder="Display name" type="text"/>
-                    <input class="input w-full" id="rres-email" placeholder="Email" type="email"/>
-                    <input class="input w-full" id="rres-password" placeholder="Password" type="password"/>
-                    <button class="btn btn-purple w-full" onclick="doRegisterViaResolver()">Register via Resolver</button>
-                    <p class="text-xs text-gray-500">Hits resolver's <code>/api/register</code>; resolver picks the least-loaded backend.</p>
-                </div>
+            <div class="space-y-2">
+                <h3 class="font-semibold text-purple-700">Register via Resolver</h3>
+                <input class="input w-full" placeholder="Username" v-model="rres.username"/>
+                <input class="input w-full" placeholder="Display name" v-model="rres.display"/>
+                <input class="input w-full" placeholder="Email" v-model="rres.email"/>
+                <input class="input w-full" placeholder="Password" type="password" v-model="rres.password"/>
+                <button @click="doRegisterViaResolver" class="btn bg-purple-600 hover:bg-purple-700 text-white w-full">Register via Resolver</button>
+                <p class="text-xs text-gray-500">Resolver picks the least-loaded backend.</p>
             </div>
         </div>
 
-        <!-- Current user -->
-        <div class="mt-4">
-            <div class="flex gap-2 mb-2">
-                <button class="btn btn-gray" onclick="doGetMe()">GET /api/auth/me</button>
-                <button class="btn btn-gray" onclick="doRefreshManual()">Refresh token</button>
-            </div>
-            <pre class="output" id="auth-output"></pre>
+        <div class="flex gap-2 mb-2">
+            <button @click="doGetMe" class="btn bg-gray-200 hover:bg-gray-300">GET /api/auth/me</button>
+            <button @click="doRefresh" class="btn bg-gray-200 hover:bg-gray-300">Refresh token</button>
         </div>
-    </section>
+        <pre :class="{'text-red-600': out.auth.err}" class="out">{{ out.auth.text }}</pre>
+    </div>
 
-    <!-- ===== PICTURES SECTION ===== -->
-    <section class="bg-white rounded shadow p-4">
-        <h2 class="text-lg font-bold mb-3 border-b pb-2">🖼 Pictures</h2>
+    <!-- PICTURES -->
+    <div class="card">
+        <h2 class="font-bold text-base mb-3 border-b pb-2">🖼 Pictures</h2>
 
-        <!-- Upload -->
-        <div class="mb-4">
-            <h3 class="font-semibold mb-2 text-blue-700">Upload Picture</h3>
-            <div class="flex gap-2 items-center flex-wrap">
-                <input class="text-xs" id="pic-file" type="file"/>
-                <button class="btn btn-blue" onclick="doUpload()">Upload</button>
+        <h3 class="font-semibold text-blue-700 mb-2">Upload</h3>
+        <div class="flex gap-2 items-center mb-1">
+            <input class="text-xs" ref="fileInput" type="file"/>
+            <button @click="doUpload" class="btn bg-blue-600 hover:bg-blue-700 text-white">Upload</button>
+        </div>
+        <div class="text-xs text-gray-500 mb-1">{{ uploadProgress }}</div>
+        <pre :class="{'text-red-600': out.upload.err}" class="out mb-4">{{ out.upload.text }}</pre>
+
+        <h3 class="font-semibold text-blue-700 mb-2">List</h3>
+        <div class="flex gap-2 mb-2 flex-wrap">
+            <input class="input w-16" min="1" placeholder="page" type="number" v-model.number="listPage"/>
+            <input class="input w-20" min="1" placeholder="page_size" type="number" v-model.number="listSize"/>
+            <select class="input" v-model="listThumbnail">
+                <option value="">no thumbnail</option>
+                <option value="small">small</option>
+                <option value="medium">medium</option>
+                <option value="large">large</option>
+            </select>
+            <button @click="doListPictures" class="btn bg-blue-600 hover:bg-blue-700 text-white">List</button>
+        </div>
+        <pre :class="{'text-red-600': out.list.err}" class="out mb-2">{{ out.list.text }}</pre>
+        <div class="grid grid-cols-3 md:grid-cols-6 gap-2">
+            <div :key="pic.id" @click="selectPicture(pic.id)"
+                 class="border rounded overflow-hidden cursor-pointer hover:shadow-md"
+                 v-for="pic in picGrid">
+                <img :src="pic.thumbnail_url" class="w-full h-20 object-cover bg-gray-200" v-if="pic.thumbnail_url"/>
+                <div class="w-full h-20 bg-gray-200 flex items-center justify-center text-xs text-gray-400" v-else>no thumb</div>
+                <div class="p-1 text-xs truncate text-gray-700">{{ pic.filename }}</div>
             </div>
-            <div class="text-xs mt-1 text-gray-500" id="upload-progress"></div>
-            <pre class="output mt-2" id="upload-output"></pre>
         </div>
 
-        <!-- List -->
-        <div class="mb-4">
-            <h3 class="font-semibold mb-2 text-blue-700">List Pictures</h3>
-            <div class="flex gap-2 mb-2 flex-wrap">
-                <input class="input w-16" id="pic-page" min="1" placeholder="page" type="number" value="1"/>
-                <input class="input w-20" id="pic-page-size" min="1" placeholder="page_size" type="number" value="20"/>
-                <button class="btn btn-blue" onclick="doListPictures()">List</button>
-            </div>
-            <pre class="output" id="list-output"></pre>
-            <div class="grid grid-cols-3 md:grid-cols-5 gap-2 mt-3" id="pic-grid"></div>
+        <h3 class="font-semibold text-blue-700 mt-4 mb-2">Details</h3>
+        <div class="flex gap-2 mb-2">
+            <input class="input flex-1" placeholder="Picture ID (UUID)" v-model="picId"/>
+            <button @click="doGetPicture" class="btn bg-blue-600 hover:bg-blue-700 text-white">Details</button>
         </div>
+        <pre :class="{'text-red-600': out.detail.err}" class="out">{{ out.detail.text }}</pre>
+    </div>
 
-        <!-- Details -->
-        <div>
-            <h3 class="font-semibold mb-2 text-blue-700">Picture Details</h3>
-            <div class="flex gap-2 mb-2">
-                <input class="input flex-1" id="pic-id" placeholder="Picture ID (UUID)" type="text"/>
-                <button class="btn btn-blue" onclick="doGetPicture()">Get Details</button>
-            </div>
-            <pre class="output" id="pic-detail-output"></pre>
+    <!-- PICTURE URL -->
+    <div class="card">
+        <h2 class="font-bold text-base mb-3 border-b pb-2">🔗 Picture URL</h2>
+        <p class="text-xs text-gray-500 mb-3">Get a presigned URL for a specific variant of a picture.
+            <code>GET /api/authenticated/pictures/:id/url?variant=…</code></p>
+        <div class="flex gap-2 flex-wrap mb-3">
+            <input class="input flex-1" placeholder="Picture ID (UUID)" v-model="picUrl.id"/>
+            <select class="input" v-model="picUrl.variant">
+                <option value="original">original</option>
+                <option value="small">small</option>
+                <option value="medium">medium</option>
+                <option value="large">large</option>
+            </select>
+            <button @click="doGetPictureUrl" class="btn bg-blue-600 hover:bg-blue-700 text-white">Get URL</button>
         </div>
-    </section>
+        <pre :class="{'text-red-600': out.picUrl.err}" class="out mb-3">{{ out.picUrl.text }}</pre>
+        <img :src="picUrl.imgSrc" @error="picUrl.imgSrc = null"
+             alt="preview"
+             class="max-h-96 rounded border shadow mx-auto block" v-if="picUrl.imgSrc"/>
+    </div>
 
-    <!-- ===== SETTINGS SECTION ===== -->
-    <section class="bg-white rounded shadow p-4">
-        <h2 class="text-lg font-bold mb-3 border-b pb-2">⚙️ Settings</h2>
+    <!-- SETTINGS -->
+    <div class="card">
+        <h2 class="font-bold text-base mb-3 border-b pb-2">⚙️ Settings</h2>
         <div class="flex gap-2 mb-3 flex-wrap items-center">
-            <button class="btn btn-gray" onclick="doGetSettings()">Load Settings</button>
+            <button @click="doGetSettings" class="btn bg-gray-200 hover:bg-gray-300">Load</button>
             <label class="text-sm">versioning_mode:
-                <select class="input ml-1" id="settings-versioning">
+                <select class="input ml-1" v-model="versioningMode">
                     <option value="none">none</option>
                     <option value="original_copy">original_copy</option>
                     <option value="full_versioning">full_versioning</option>
                 </select>
             </label>
-            <button class="btn btn-green" onclick="doSaveSettings()">Save</button>
+            <button @click="doSaveSettings" class="btn bg-green-600 hover:bg-green-700 text-white">Save</button>
         </div>
-        <pre class="output" id="settings-output"></pre>
-    </section>
+        <pre :class="{'text-red-600': out.settings.err}" class="out">{{ out.settings.text }}</pre>
+    </div>
 
-    <!-- ===== SHARING SECTION ===== -->
-    <section class="bg-white rounded shadow p-4">
-        <h2 class="text-lg font-bold mb-3 border-b pb-2">🔗 Sharing</h2>
-
-        <!-- Create share -->
-        <div class="mb-4">
-            <h3 class="font-semibold mb-2 text-blue-700">Create Outgoing Share</h3>
-            <div class="grid grid-cols-2 gap-2">
-                <input class="input" id="share-tag-path" placeholder="tag_path" type="text"/>
-                <input class="input" id="share-recipient-username" placeholder="recipient_username" type="text"/>
-                <input class="input" id="share-recipient-instance"
-                       placeholder="recipient_instance (other backend's global domain)" type="text"/>
-                <div class="flex gap-4 items-center">
-                    <label class="flex gap-1 items-center text-xs">
-                        <input id="share-allow-back" type="checkbox"/> allow_share_back
-                    </label>
-                    <label class="flex gap-1 items-center text-xs">
-                        <input id="share-future" type="checkbox"/> future
-                    </label>
-                </div>
-            </div>
-            <button class="btn btn-blue mt-2" onclick="doCreateShare()">Create Share</button>
-            <pre class="output mt-2" id="share-create-output"></pre>
-        </div>
-
-        <!-- List shares -->
-        <div class="flex gap-2 mb-2 flex-wrap">
-            <button class="btn btn-gray" onclick="doListOutgoing()">List Outgoing Shares</button>
-            <button class="btn btn-gray" onclick="doListIncoming()">List Incoming Shares</button>
-        </div>
-        <pre class="output" id="shares-list-output"></pre>
-    </section>
-
-    <!-- ===== FEDERATION SECTION ===== -->
-    <section class="bg-white rounded shadow p-4">
-        <h2 class="text-lg font-bold mb-3 border-b pb-2">🌐 Federation</h2>
-
-        <div class="mb-3 text-xs text-gray-600 bg-gray-50 p-3 rounded border">
-            <strong>How to test federation:</strong> Open a second browser tab pointing to this same file. Set a
-            different Backend URL in each tab. Log in as different users. Then use the Sharing section to send pictures
-            between instances using <code>@username:global_domain</code> addressing.
-        </div>
-
-        <div class="mb-3">
-            <strong>Current instance info:</strong>
-            <div class="text-xs mt-1 space-y-1">
-                <div>Backend: <span class="text-blue-600 font-bold" id="fed-backend"></span></div>
-                <div>Logged in as: <span class="text-green-600 font-bold" id="fed-user"></span></div>
+    <!-- SHARING -->
+    <div class="card">
+        <h2 class="font-bold text-base mb-3 border-b pb-2">📤 Sharing</h2>
+        <h3 class="font-semibold text-blue-700 mb-2">Create Outgoing Share</h3>
+        <div class="grid grid-cols-2 gap-2 mb-2">
+            <input class="input" placeholder="tag_path" v-model="share.tagPath"/>
+            <input class="input" placeholder="recipient_username" v-model="share.recipientUsername"/>
+            <input class="input" placeholder="recipient_instance (global domain)" v-model="share.recipientInstance"/>
+            <div class="flex gap-4 items-center text-xs">
+                <label><input type="checkbox" v-model="share.allowBack"/> allow_share_back</label>
+                <label><input type="checkbox" v-model="share.future"/> future</label>
             </div>
         </div>
+        <button @click="doCreateShare" class="btn bg-blue-600 hover:bg-blue-700 text-white mb-2">Create Share</button>
+        <pre :class="{'text-red-600': out.shareCreate.err}" class="out mb-3">{{ out.shareCreate.text }}</pre>
 
-        <!-- WebFinger lookup -->
-        <div>
-            <h3 class="font-semibold mb-2 text-blue-700">WebFinger Lookup (via Resolver)</h3>
-            <p class="text-xs text-gray-500 mb-2">
-                Format: <code>@username:domain</code> — queries
-                <code>/.well-known/webfinger?resource=archypix:@{"{"}username{"}"}{":"}domain</code>
-            </p>
-            <div class="flex gap-2 mb-2">
-                <input class="input flex-1" id="wf-address" placeholder="@username:domain" type="text"/>
-                <button class="btn btn-blue" onclick="doWebFinger()">Lookup</button>
-            </div>
-            <pre class="output" id="wf-output"></pre>
-        </div>
-    </section>
-
-    <!-- ===== PUBLIC PROFILE SECTION ===== -->
-    <section class="bg-white rounded shadow p-4">
-        <h2 class="text-lg font-bold mb-3 border-b pb-2">👤 Public Profile Lookup</h2>
         <div class="flex gap-2 mb-2">
-            <input class="input flex-1" id="profile-username" placeholder="username" type="text"/>
-            <button class="btn btn-gray" onclick="doGetProfile()">GET /api/public/users/{username}</button>
+            <button @click="doListOutgoing" class="btn bg-gray-200 hover:bg-gray-300">List Outgoing</button>
+            <button @click="doListIncoming" class="btn bg-gray-200 hover:bg-gray-300">List Incoming</button>
         </div>
-        <pre class="output" id="profile-output"></pre>
-    </section>
+        <pre :class="{'text-red-600': out.sharesList.err}" class="out">{{ out.sharesList.text }}</pre>
+    </div>
 
-</div><!-- end max-w -->
+    <!-- FEDERATION -->
+    <div class="card">
+        <h2 class="font-bold text-base mb-3 border-b pb-2">🌐 Federation</h2>
+        <div class="text-xs text-gray-600 bg-gray-50 p-3 rounded border mb-3">
+            Open a second tab pointing to this file. Set a different Backend URL. Log in as another user.
+            Use Sharing above to send pictures between instances using <code>@username:global_domain</code>.
+        </div>
+        <div class="text-xs mb-3">
+            Backend: <b class="text-blue-600">{{ backend }}</b> &nbsp;·&nbsp;
+            User: <b class="text-green-600">{{ username || '(not logged in)' }}</b>
+        </div>
 
-<style>
-    .input {
-        @apply border border-gray-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-blue-400;
-    }
-    .btn {
-        @apply px-3 py-1 rounded text-sm font-medium cursor-pointer;
-    }
-    .btn-blue {
-        @apply bg-blue-600   hover:bg-blue-700   text-white;
-    }
-    .btn-green {
-        @apply bg-green-600  hover:bg-green-700  text-white;
-    }
-    .btn-gray {
-        @apply bg-gray-200   hover:bg-gray-300   text-gray-800;
-    }
-    .btn-purple {
-        @apply bg-purple-600 hover:bg-purple-700 text-white;
-    }
-    .output {
-        @apply bg-gray-50 border border-gray-200 rounded p-2 text-xs max-h-64 overflow-auto min-h-8;
-    }
-</style>
+        <h3 class="font-semibold text-blue-700 mb-2">WebFinger Lookup</h3>
+        <p class="text-xs text-gray-500 mb-2">Format: <code>@username:domain</code></p>
+        <div class="flex gap-2 mb-2">
+            <input class="input flex-1" placeholder="@username:domain" v-model="wfAddress"/>
+            <button @click="doWebFinger" class="btn bg-blue-600 hover:bg-blue-700 text-white">Lookup</button>
+        </div>
+        <pre :class="{'text-red-600': out.wf.err}" class="out">{{ out.wf.text }}</pre>
+    </div>
+
+    <!-- PUBLIC PROFILE -->
+    <div class="card">
+        <h2 class="font-bold text-base mb-3 border-b pb-2">👤 Public Profile</h2>
+        <div class="flex gap-2 mb-2">
+            <input class="input flex-1" placeholder="username" v-model="profileUsername"/>
+            <button @click="doGetProfile" class="btn bg-gray-200 hover:bg-gray-300">Lookup</button>
+        </div>
+        <pre :class="{'text-red-600': out.profile.err}" class="out">{{ out.profile.text }}</pre>
+    </div>
+
+</div>
 
 <script>
-    // ===== STORAGE HELPERS =====
-    const LS = {
-        get: k => localStorage.getItem(k) || '',
-        set: (k, v) => localStorage.setItem(k, v),
-    };
+    const {createApp, ref, computed, watch} = Vue;
 
-    const KEYS = {
-        backend: 'archypix_backend_url',
-        resolver: 'archypix_resolver_url',
-        access: 'archypix_access_token',
-        refresh: 'archypix_refresh_token',
-        username: 'archypix_username',
-    };
-
-    // ===== INIT =====
-    function init(){
-        const beInput = document.getElementById('cfg-backend');
-        const resInput = document.getElementById('cfg-resolver');
-
-        beInput.value = LS.get(KEYS.backend) || 'http://localhost:8000';
-        resInput.value = LS.get(KEYS.resolver) || 'http://localhost:8080';
-
-        beInput.addEventListener('input', () => {
-            LS.set(KEYS.backend, beInput.value.trim());
-            updateFedInfo();
-            prefillRecipientInstance();
-        });
-        resInput.addEventListener('input', () => {
-            LS.set(KEYS.resolver, resInput.value.trim());
-        });
-
-        document.getElementById('cfg-origin').textContent = window.location.origin;
-        updateUserInfo();
-        updateFedInfo();
-        prefillRecipientInstance();
-    }
-
-    function getBackend(){
-        return (LS.get(KEYS.backend) || 'http://localhost:8000').replace(/\/$/, '');
-    }
-
-    function getResolver(){
-        return (LS.get(KEYS.resolver) || 'http://localhost:8080').replace(/\/$/, '');
-    }
-
-    function getToken(){
-        return LS.get(KEYS.access);
-    }
-
-    function updateUserInfo(){
-        const username = LS.get(KEYS.username);
-        const el = document.getElementById('cfg-user-info');
-        if(username && getToken()){
-            el.classList.remove('hidden');
-            document.getElementById('cfg-username').textContent = username;
-        }else{
-            el.classList.add('hidden');
-        }
-    }
-
-    function updateFedInfo(){
-        document.getElementById('fed-backend').textContent = getBackend();
-        document.getElementById('fed-user').textContent = LS.get(KEYS.username) || '(not logged in)';
-    }
-
-    function prefillRecipientInstance(){
-        const url = getBackend();
-        try{
-            document.getElementById('share-recipient-instance').value = new URL(url).host;
-        }catch(e){ /* ignore */
-        }
-    }
-
-    // ===== TOKEN REFRESH =====
-    let _refreshing = false; // guard against concurrent refresh attempts
-
-    async function tryRefresh(){
-        const refresh = LS.get(KEYS.refresh);
-        if(!refresh || _refreshing) return false;
-        _refreshing = true;
-        try{
-            const res = await fetch(getBackend() + '/api/auth/refresh', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({refresh_token: refresh}),
-            });
-            if(!res.ok) return false;
-            const data = await res.json();
-            LS.set(KEYS.access, data.access_token);
-            LS.set(KEYS.refresh, data.refresh_token);
-            updateUserInfo();
-            return true;
-        }catch(e){
-            return false;
-        }finally{
-            _refreshing = false;
-        }
-    }
-
-    // ===== FETCH HELPERS =====
-    async function apiFetch(path, options = {}, useAuth = true, baseUrl = null){
-        const base = baseUrl || getBackend();
-
-        async function doFetch(){
-        const headers = {'Content-Type': 'application/json', ...(options.headers || {})};
-            if(useAuth){
-            const token = getToken();
-                if(token) headers['Authorization'] = `Bearer ${token}`;
-        }
-            return fetch(base + path, {...options, headers});
-        }
-
-        let res = await doFetch();
-
-        // On 401, attempt one silent token refresh and retry.
-        if(res.status === 401 && useAuth){
-            const refreshed = await tryRefresh();
-            if(refreshed){
-                res = await doFetch();
-            }else{
-                // Refresh failed — clear session so the user knows they must log in again.
-                LS.set(KEYS.access, '');
-                LS.set(KEYS.refresh, '');
-                LS.set(KEYS.username, '');
-                updateUserInfo();
-                updateFedInfo();
-        }
-        }
-
-        const ct = res.headers.get('content-type') || '';
-        const data = ct.includes('json') ? await res.json() : await res.text();
-        return {ok: res.ok, status: res.status, data};
-    }
-
-    function showOutput(elId, result, error = null){
-        const el = document.getElementById(elId);
-        if(error){
-            el.textContent = '❌ ' + error;
-            el.classList.add('text-red-600');
-        }else{
-            el.classList.remove('text-red-600');
-            el.textContent = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
-        }
-    }
-
-    // ===== AUTH =====
-    async function doLogin(){
-        try{
-            const r = await apiFetch('/api/auth/login', {
-                method: 'POST',
-                body: JSON.stringify({
-                    username: document.getElementById('login-username').value,
-                    password: document.getElementById('login-password').value,
-                }),
-            }, false);
-            if(r.ok){
-                LS.set(KEYS.access, r.data.access_token);
-                LS.set(KEYS.refresh, r.data.refresh_token);
-                LS.set(KEYS.username, document.getElementById('login-username').value);
-                updateUserInfo();
-                updateFedInfo();
-            }
-            showOutput('auth-output', r.data, r.ok ? null : `HTTP ${r.status}`);
-        }catch(e){
-            showOutput('auth-output', null, e.message);
-        }
-    }
-
-    async function doRegister(){
-        try{
-            const r = await apiFetch('/api/public/users', {
-                method: 'POST',
-                body: JSON.stringify({
-                    username: document.getElementById('reg-username').value,
-                    display_name: document.getElementById('reg-display').value,
-                    email: document.getElementById('reg-email').value,
-                    password: document.getElementById('reg-password').value,
-                }),
-            }, false);
-            showOutput('auth-output', r.data, r.ok ? null : `HTTP ${r.status}: ${JSON.stringify(r.data)}`);
-            if(r.ok){
-                document.getElementById('login-username').value = document.getElementById('reg-username').value;
-                document.getElementById('login-password').value = document.getElementById('reg-password').value;
-                await doLogin();
-            }
-        }catch(e){
-            showOutput('auth-output', null, e.message);
-        }
-    }
-
-    async function doRegisterViaResolver(){
-        try{
-            const r = await apiFetch('/api/register', {
-                method: 'POST',
-                body: JSON.stringify({
-                    username: document.getElementById('rres-username').value,
-                    display_name: document.getElementById('rres-display').value,
-                    email: document.getElementById('rres-email').value,
-                    password: document.getElementById('rres-password').value,
-                }),
-            }, false, getResolver());
-            showOutput('auth-output', r.data, r.ok ? null : `HTTP ${r.status}`);
-            if(r.ok){
-                // Auto-login against the backend the resolver chose
-                document.getElementById('login-username').value = document.getElementById('rres-username').value;
-                document.getElementById('login-password').value = document.getElementById('rres-password').value;
-                await doLogin();
-            }
-        }catch(e){
-            showOutput('auth-output', null, e.message);
-        }
-    }
-
-    async function doGetMe(){
-        try{
-            const r = await apiFetch('/api/auth/me');
-            if(r.ok && r.data.username){
-                LS.set(KEYS.username, r.data.username);
-                updateUserInfo();
-                updateFedInfo();
-            }
-            showOutput('auth-output', r.data, r.ok ? null : `HTTP ${r.status}`);
-        }catch(e){
-            showOutput('auth-output', null, e.message);
-        }
-    }
-
-    async function doRefreshManual(){
-        const ok = await tryRefresh();
-        showOutput('auth-output', ok ? '✅ Token refreshed.' : '❌ Refresh failed — please log in again.');
-    }
-
-    async function logout(){
-        try{
-            const refresh = LS.get(KEYS.refresh);
-            if(refresh){
-                await apiFetch('/api/auth/logout', {
-                    method: 'POST',
-                    body: JSON.stringify({refresh_token: refresh}),
-                });
-            }
-        }catch(e){ /* ignore */
-        }
-        LS.set(KEYS.access, '');
-        LS.set(KEYS.refresh, '');
-        LS.set(KEYS.username, '');
-        updateUserInfo();
-        updateFedInfo();
-        showOutput('auth-output', 'Logged out.');
-    }
-
-    // ===== PICTURES =====
-    async function doUpload(){
-        const fileInput = document.getElementById('pic-file');
-        const file = fileInput.files[0];
-        if(!file){
-            showOutput('upload-output', null, 'No file selected.');
-            return;
-        }
-
-        const progress = document.getElementById('upload-progress');
-        try{
-            progress.textContent = '1/3 Requesting upload URL...';
-            const r1 = await apiFetch('/api/authenticated/pictures/uploads', {
-                method: 'POST',
-                body: JSON.stringify({filename: file.name}),
-            });
-            if(!r1.ok){
-                showOutput('upload-output', r1.data, `HTTP ${r1.status}`);
-                return;
-            }
-
-            const {picture_id, presigned_url} = r1.data;
-            showOutput('upload-output', {step1: r1.data});
-
-            progress.textContent = `2/3 Uploading to S3... picture_id=${picture_id}`;
-            const putRes = await fetch(presigned_url, {
-                method: 'PUT',
-                body: file,
-                headers: {'Content-Type': file.type || 'application/octet-stream'},
-            });
-            if(!putRes.ok){
-                showOutput('upload-output', await putRes.text(), `S3 PUT failed: HTTP ${putRes.status}`);
-                return;
-            }
-
-            progress.textContent = '3/3 Completing upload...';
-            const completeBody = {mime_type: file.type || null, file_size: file.size || null};
-            if(file.type.startsWith('image/')){
-                try{
-                    const dims = await getImageDimensions(file);
-                    completeBody.width = dims.width;
-                    completeBody.height = dims.height;
-                }catch(e){ /* skip */
-                }
-            }
-
-            const r3 = await apiFetch(`/api/authenticated/pictures/uploads/${picture_id}/complete`, {
-                method: 'POST',
-                body: JSON.stringify(completeBody),
-            });
-            progress.textContent = r3.ok ? '✅ Upload complete!' : '❌ Complete step failed.';
-            showOutput('upload-output', r3.data, r3.ok ? null : `HTTP ${r3.status}`);
-        }catch(e){
-            progress.textContent = '';
-            showOutput('upload-output', null, e.message);
-        }
-    }
-
-    function getImageDimensions(file){
-        return new Promise((resolve, reject) => {
-            const url = URL.createObjectURL(file);
-            const img = new Image();
-            img.onload = () => {
-                resolve({width: img.naturalWidth, height: img.naturalHeight});
-                URL.revokeObjectURL(url);
+    createApp({
+        data(){
+            const ls = k => localStorage.getItem(k) || '';
+            return {
+                // config (persisted)
+                backend: ls('archypix_backend') || 'http://localhost:8000',
+                resolver: ls('archypix_resolver') || 'http://localhost:8080',
+                // session (persisted)
+                accessToken: ls('archypix_access'),
+                refreshToken: ls('archypix_refresh'),
+                username: ls('archypix_username'),
+                // forms
+                login: {username: '', password: ''},
+                reg: {username: '', display: '', email: '', password: ''},
+                rres: {username: '', display: '', email: '', password: ''},
+                // pictures
+                uploadProgress: '',
+                listPage: 1, listSize: 20, listThumbnail: 'small',
+                picGrid: [],
+                picId: '',
+                picUrl: {id: '', variant: 'original', imgSrc: null},
+                // settings
+                versioningMode: 'none',
+                // sharing
+                share: {tagPath: '', recipientUsername: '', recipientInstance: '', allowBack: false, future: false},
+                // federation / misc
+                wfAddress: '',
+                profileUsername: '',
+                // outputs — { text, err }
+                out: Object.fromEntries(
+                    ['auth', 'upload', 'list', 'detail', 'picUrl', 'settings', 'shareCreate', 'sharesList', 'wf', 'profile']
+                        .map(k => [k, {text: '', err: false}])
+                ),
             };
-            img.onerror = reject;
-            img.src = url;
-        });
-    }
+        },
 
-    async function doListPictures(){
-        try{
-            const page = document.getElementById('pic-page').value || 1;
-            const pageSize = document.getElementById('pic-page-size').value || 20;
-            const r = await apiFetch(`/api/authenticated/pictures?thumbnail=small&page=${page}&page_size=${pageSize}`);
-            showOutput('list-output', r.data, r.ok ? null : `HTTP ${r.status}`);
+        computed: {
+            origin(){
+                return window.location.origin;
+            },
+        },
 
-            const grid = document.getElementById('pic-grid');
-            grid.innerHTML = '';
-            if(r.ok && r.data.items){
-                r.data.items.forEach(pic => {
-                    const div = document.createElement('div');
-                    div.className = 'border rounded overflow-hidden cursor-pointer hover:shadow-md transition-shadow';
-                    div.onclick = () => {
-                        document.getElementById('pic-id').value = pic.id;
-                        doGetPicture();
+        watch: {
+            backend(v){
+                localStorage.setItem('archypix_backend', v);
+            },
+            resolver(v){
+                localStorage.setItem('archypix_resolver', v);
+            },
+            accessToken(v){
+                localStorage.setItem('archypix_access', v);
+            },
+            refreshToken(v){
+                localStorage.setItem('archypix_refresh', v);
+            },
+            username(v){
+                localStorage.setItem('archypix_username', v);
+            },
+            'picId'(v){
+                this.picUrl.id = v;
+            },  // keep picture URL section in sync
+        },
+
+        methods: {
+            // ── output helper ───────────────────────────────────────────────────
+            show(key, data, err = false){
+                this.out[key] = {
+                    text: err ? `❌ ${data}` : (typeof data === 'string' ? data : JSON.stringify(data, null, 2)),
+                    err,
+                };
+            },
+
+            // ── token refresh ───────────────────────────────────────────────────
+            _refreshing: false,
+            async tryRefresh(){
+                if(!this.refreshToken || this._refreshing) return false;
+                this._refreshing = true;
+                try{
+                    const res = await fetch(`${this.backend}/api/auth/refresh`, {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({refresh_token: this.refreshToken}),
+                    });
+                    if(!res.ok) return false;
+                    const d = await res.json();
+                    this.accessToken = d.access_token;
+                    this.refreshToken = d.refresh_token;
+                    return true;
+                }finally{
+                    this._refreshing = false;
+                }
+            },
+
+            // ── fetch helper ────────────────────────────────────────────────────
+            async api(path, opts = {}, auth = true, base = null){
+                const doFetch = () => {
+                    const h = {'Content-Type': 'application/json', ...(opts.headers || {})};
+                    if(auth && this.accessToken) h['Authorization'] = `Bearer ${this.accessToken}`;
+                    return fetch((base || this.backend) + path, {...opts, headers: h});
+                };
+                let res = await doFetch();
+                if(res.status === 401 && auth){
+                    const ok = await this.tryRefresh();
+                    if(ok) res = await doFetch();
+                    else{
+                        this.accessToken = this.refreshToken = this.username = '';
+                    }
+                }
+                const ct = res.headers.get('content-type') || '';
+                const data = ct.includes('json') ? await res.json() : await res.text();
+                return {ok: res.ok, status: res.status, data};
+            },
+
+            // ── auth ────────────────────────────────────────────────────────────
+            async doLogin(){
+                const r = await this.api('/api/auth/login', {
+                method: 'POST',
+                    body: JSON.stringify({username: this.login.username, password: this.login.password}),
+            }, false);
+                if(r.ok){
+                    this.accessToken = r.data.access_token;
+                    this.refreshToken = r.data.refresh_token;
+                    this.username = this.login.username;
+                    this.share.recipientInstance = new URL(this.backend).host;
+                }
+                this.show('auth', r.data, !r.ok);
+            },
+
+            async doRegister(){
+                const r = await this.api('/api/public/users', {
+                method: 'POST',
+                    body: JSON.stringify({
+                        username: this.reg.username, display_name: this.reg.display,
+                        email: this.reg.email, password: this.reg.password
+                    }),
+            }, false);
+                this.show('auth', r.data, !r.ok);
+                if(r.ok){
+                    this.login.username = this.reg.username;
+                    this.login.password = this.reg.password;
+                    await this.doLogin();
+                }
+            },
+
+            async doRegisterViaResolver(){
+                const r = await this.api('/api/register', {
+                method: 'POST',
+                    body: JSON.stringify({
+                        username: this.rres.username, display_name: this.rres.display,
+                        email: this.rres.email, password: this.rres.password
+                    }),
+                }, false, this.resolver);
+                this.show('auth', r.data, !r.ok);
+                if(r.ok){
+                    this.login.username = this.rres.username;
+                    this.login.password = this.rres.password;
+                    await this.doLogin();
+                }
+            },
+
+            async doGetMe(){
+                const r = await this.api('/api/auth/me');
+                if(r.ok && r.data.username) this.username = r.data.username;
+                this.show('auth', r.data, !r.ok);
+            },
+
+            async doRefresh(){
+                const ok = await this.tryRefresh();
+                this.show('auth', ok ? '✅ Token refreshed.' : '❌ Refresh failed — please log in again.', !ok);
+            },
+
+            async logout(){
+                if(this.refreshToken)
+                    await this.api('/api/auth/logout', {method: 'POST', body: JSON.stringify({refresh_token: this.refreshToken})}).catch(() => {
+                    });
+                this.accessToken = this.refreshToken = this.username = '';
+                this.show('auth', 'Logged out.');
+            },
+
+            // ── pictures ────────────────────────────────────────────────────────
+            async doUpload(){
+                const file = this.$refs.fileInput.files[0];
+                if(!file) return this.show('upload', 'No file selected.', true);
+                try{
+                    this.uploadProgress = '1/3 Requesting upload URL…';
+                    const r1 = await this.api('/api/authenticated/pictures/uploads', {
+                        method: 'POST', body: JSON.stringify({filename: file.name}),
+                    });
+                    if(!r1.ok) return this.show('upload', `HTTP ${r1.status}: ${JSON.stringify(r1.data)}`, true);
+
+                    const {picture_id, presigned_url} = r1.data;
+                    this.uploadProgress = `2/3 Uploading to S3… id=${picture_id}`;
+                    const put = await fetch(presigned_url, {
+                        method: 'PUT', body: file,
+                        headers: {'Content-Type': file.type || 'application/octet-stream'},
+                    });
+                    if(!put.ok) return this.show('upload', `S3 PUT failed: HTTP ${put.status}`, true);
+
+                    this.uploadProgress = '3/3 Completing…';
+                    const body = {mime_type: file.type || null, file_size: file.size || null};
+                    if(file.type.startsWith('image/')){
+                        try{
+                            Object.assign(body, await this.getImageDimensions(file));
+                        }catch(e){
+                        }
+                }
+                    const r3 = await this.api(`/api/authenticated/pictures/uploads/${picture_id}/complete`, {
+                        method: 'POST', body: JSON.stringify(body),
+                    });
+                    this.uploadProgress = r3.ok ? '✅ Done!' : '❌ Complete step failed.';
+                    this.show('upload', r3.data, !r3.ok);
+                }catch(e){
+                    this.uploadProgress = '';
+                    this.show('upload', e.message, true);
+                }
+            },
+
+            getImageDimensions(file){
+                return new Promise((res, rej) => {
+                    const url = URL.createObjectURL(file);
+                    const img = new Image();
+                    img.onload = () => {
+                        res({width: img.naturalWidth, height: img.naturalHeight});
+                        URL.revokeObjectURL(url);
                     };
-                    div.innerHTML = `
-                    <img src="${pic.thumbnail_url || ''}" alt="${pic.filename}"
-                         class="w-full h-24 object-cover bg-gray-200" onerror="this.style.display='none'"/>
-                    <div class="p-1 text-xs truncate text-gray-700" title="${pic.filename}">${pic.filename}</div>
-                    <div class="px-1 pb-1 text-xs text-gray-400">
-                        ${pic.ingested_at ? new Date(pic.ingested_at).toLocaleDateString() : ''}
-                    </div>`;
-                    grid.appendChild(div);
+                    img.onerror = rej;
+                    img.src = url;
                 });
-            }
-        }catch(e){
-            showOutput('list-output', null, e.message);
-        }
-    }
+            },
 
-    async function doGetPicture(){
-        const id = document.getElementById('pic-id').value.trim();
-        if(!id){
-            showOutput('pic-detail-output', null, 'Enter a picture ID.');
-            return;
-        }
-        try{
-            const r = await apiFetch(`/api/authenticated/pictures/${id}`);
-            showOutput('pic-detail-output', r.data, r.ok ? null : `HTTP ${r.status}`);
-        }catch(e){
-            showOutput('pic-detail-output', null, e.message);
-        }
-    }
+            async doListPictures(){
+                const qs = `?page=${this.listPage}&page_size=${this.listSize}${this.listThumbnail ? '&thumbnail=' + this.listThumbnail : ''}`;
+                const r = await this.api('/api/authenticated/pictures' + qs);
+                this.show('list', r.data, !r.ok);
+                this.picGrid = (r.ok && r.data.items) ? r.data.items : [];
+            },
 
-    // ===== SETTINGS =====
-    async function doGetSettings(){
-        try{
-            const r = await apiFetch('/api/authenticated/settings');
-            if(r.ok && r.data.versioning_mode)
-                document.getElementById('settings-versioning').value = r.data.versioning_mode;
-            showOutput('settings-output', r.data, r.ok ? null : `HTTP ${r.status}`);
-        }catch(e){
-            showOutput('settings-output', null, e.message);
-        }
-    }
+            selectPicture(id){
+                this.picId = id;
+                this.picUrl.id = id;
+                this.doGetPicture();
+            },
 
-    async function doSaveSettings(){
-        try{
-            const r = await apiFetch('/api/authenticated/settings', {
-                method: 'PATCH',
-                body: JSON.stringify({versioning_mode: document.getElementById('settings-versioning').value}),
+            async doGetPicture(){
+                if(!this.picId) return this.show('detail', 'Enter a picture ID.', true);
+                const r = await this.api(`/api/authenticated/pictures/${this.picId}`);
+                this.show('detail', r.data, !r.ok);
+            },
+
+            async doGetPictureUrl(){
+                if(!this.picUrl.id) return this.show('picUrl', 'Enter a picture ID.', true);
+                this.picUrl.imgSrc = null;
+                const r = await this.api(`/api/authenticated/pictures/${this.picUrl.id}/url?variant=${this.picUrl.variant}`);
+                this.show('picUrl', r.data, !r.ok);
+                if(r.ok && r.data.url) this.picUrl.imgSrc = r.data.url;
+            },
+
+            // ── settings ────────────────────────────────────────────────────────
+            async doGetSettings(){
+                const r = await this.api('/api/authenticated/settings');
+                if(r.ok && r.data.versioning_mode) this.versioningMode = r.data.versioning_mode;
+                this.show('settings', r.data, !r.ok);
+            },
+
+            async doSaveSettings(){
+                const r = await this.api('/api/authenticated/settings', {
+                    method: 'PATCH', body: JSON.stringify({versioning_mode: this.versioningMode}),
             });
-            showOutput('settings-output', r.data, r.ok ? null : `HTTP ${r.status}`);
-        }catch(e){
-            showOutput('settings-output', null, e.message);
-        }
-    }
+                this.show('settings', r.data, !r.ok);
+            },
 
-    // ===== SHARING =====
-    async function doCreateShare(){
-        try{
-            const r = await apiFetch('/api/authenticated/shares/outgoing', {
+            // ── sharing ─────────────────────────────────────────────────────────
+            async doCreateShare(){
+                const r = await this.api('/api/authenticated/shares/outgoing', {
                 method: 'POST',
                 body: JSON.stringify({
-                    tag_path: document.getElementById('share-tag-path').value,
-                    recipient_username: document.getElementById('share-recipient-username').value,
-                    recipient_instance: document.getElementById('share-recipient-instance').value || null,
-                    allow_share_back: document.getElementById('share-allow-back').checked,
-                    future: document.getElementById('share-future').checked,
+                    tag_path: this.share.tagPath,
+                    recipient_username: this.share.recipientUsername,
+                    recipient_instance: this.share.recipientInstance || null,
+                    allow_share_back: this.share.allowBack,
+                    future: this.share.future,
                 }),
             });
-            showOutput('share-create-output', r.data, r.ok ? null : `HTTP ${r.status}`);
-        }catch(e){
-            showOutput('share-create-output', null, e.message);
-        }
-    }
+                this.show('shareCreate', r.data, !r.ok);
+            },
 
-    async function doListOutgoing(){
-        try{
-            const r = await apiFetch('/api/authenticated/shares/outgoing');
-            showOutput('shares-list-output', r.data, r.ok ? null : `HTTP ${r.status}`);
-        }catch(e){
-            showOutput('shares-list-output', null, e.message);
-        }
-    }
+            async doListOutgoing(){
+                const r = await this.api('/api/authenticated/shares/outgoing');
+                this.show('sharesList', r.data, !r.ok);
+            },
 
-    async function doListIncoming(){
-        try{
-            const r = await apiFetch('/api/authenticated/shares/incoming');
-            showOutput('shares-list-output', r.data, r.ok ? null : `HTTP ${r.status}`);
-        }catch(e){
-            showOutput('shares-list-output', null, e.message);
-        }
-    }
+            async doListIncoming(){
+                const r = await this.api('/api/authenticated/shares/incoming');
+                this.show('sharesList', r.data, !r.ok);
+            },
 
-    // ===== FEDERATION / WEBFINGER =====
-    async function doWebFinger(){
-        const address = document.getElementById('wf-address').value.trim();
-        const match = address.match(/^@?([^:]+):(.+)$/);
-        if(!match){
-            showOutput('wf-output', null, 'Format must be @username:domain or username:domain');
-            return;
-        }
-        const [, username, domain] = match;
-        const resource = `archypix:@${username}:${domain}`;
-        const url = `${getResolver()}/.well-known/webfinger?resource=${encodeURIComponent(resource)}`;
-        try{
-            showOutput('wf-output', `Querying: ${url}`);
-            const res = await fetch(url);
-            const ct = res.headers.get('content-type') || '';
-            const data = ct.includes('json') ? await res.json() : await res.text();
-            showOutput('wf-output', data, res.ok ? null : `HTTP ${res.status}`);
-        }catch(e){
-            showOutput('wf-output', null, e.message);
-        }
-    }
+            // ── federation ──────────────────────────────────────────────────────
+            async doWebFinger(){
+                const m = this.wfAddress.match(/^@?([^:]+):(.+)$/);
+                if(!m) return this.show('wf', 'Format: @username:domain', true);
+                const url = `${this.resolver}/.well-known/webfinger?resource=${encodeURIComponent(`archypix:@${m[1]}:${m[2]}`)}`;
+                try{
+                    this.show('wf', `Querying: ${url}`);
+                    const res = await fetch(url);
+                    const ct = res.headers.get('content-type') || '';
+                    const data = ct.includes('json') ? await res.json() : await res.text();
+                    this.show('wf', data, !res.ok);
+                }catch(e){
+                    this.show('wf', e.message, true);
+                }
+            },
 
-    // ===== PUBLIC PROFILE =====
-    async function doGetProfile(){
-        const username = document.getElementById('profile-username').value.trim();
-        if(!username){
-            showOutput('profile-output', null, 'Enter a username.');
-            return;
-        }
-        try{
-            const r = await apiFetch(`/api/public/users/${username}`, {}, false);
-            showOutput('profile-output', r.data, r.ok ? null : `HTTP ${r.status}`);
-        }catch(e){
-            showOutput('profile-output', null, e.message);
-        }
-    }
-
-    // ===== BOOT =====
-    init();
+            // ── public profile ──────────────────────────────────────────────────
+            async doGetProfile(){
+                if(!this.profileUsername) return this.show('profile', 'Enter a username.', true);
+                const r = await this.api(`/api/public/users/${this.profileUsername}`, {}, false);
+                this.show('profile', r.data, !r.ok);
+            },
+        },
+    }).mount('#app');
 </script>
 </body>
 </html>

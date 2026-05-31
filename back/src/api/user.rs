@@ -33,6 +33,7 @@ pub fn authenticated_routes() -> Router<AppState> {
         )
         .route("/pictures", get(pictures::list))
         .route("/pictures/{id}", get(pictures::details))
+        .route("/pictures/{id}/url", get(pictures::picture_url))
         .route("/settings", get(settings::get_settings))
         .route("/settings", patch(settings::update_settings))
         .route(

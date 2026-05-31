@@ -3,7 +3,9 @@ use crate::domain::picture::Picture;
 use crate::infra::error::AppError;
 use crate::repository::picture_version::PictureVersionRepository;
 use crate::services;
-use crate::services::pictures::{PictureListParams, PictureListResult, UploadMetadata};
+use crate::services::pictures::{
+    PictureListParams, PictureListResult, PictureVariant, UploadMetadata,
+};
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -74,6 +76,32 @@ pub async fn list(
     )
     .await?;
     Ok(Json(result))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PictureUrlQuery {
+    pub variant: PictureVariant,
+}
+
+pub async fn picture_url(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(picture_id): Path<Uuid>,
+    Query(query): Query<PictureUrlQuery>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let url = services::pictures::presign_picture_variant(
+        &state.db,
+        &state.redis,
+        &state.storage,
+        &state.config,
+        auth.user_id()?,
+        picture_id,
+        query.variant,
+    )
+    .await?;
+    Ok(Json(
+        serde_json::json!({ "url": url, "variant": query.variant }),
+    ))
 }
 
 pub async fn details(

@@ -14,23 +14,29 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+/// Selectable picture variant for presigning. Used both in list thumbnails and the per-picture URL endpoint.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ThumbnailSize {
+pub enum PictureVariant {
+    Original,
     Small,
     Medium,
     Large,
 }
 
-impl ThumbnailSize {
+impl PictureVariant {
     pub fn bucket<'a>(&self, config: &'a Config) -> &'a str {
         match self {
-            ThumbnailSize::Small => &config.s3_bucket_small,
-            ThumbnailSize::Medium => &config.s3_bucket_medium,
-            ThumbnailSize::Large => &config.s3_bucket_large,
+            PictureVariant::Original => &config.s3_bucket_pictures,
+            PictureVariant::Small => &config.s3_bucket_small,
+            PictureVariant::Medium => &config.s3_bucket_medium,
+            PictureVariant::Large => &config.s3_bucket_large,
         }
     }
 }
+
+// Keep the old name as an alias so list_pictures still compiles.
+pub type ThumbnailSize = PictureVariant;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct UploadMetadata {
@@ -276,6 +282,27 @@ async fn cached_presign_get(
         redis.set_string_ex(&cache_key, &url, ttl).await?;
     }
     Ok(url)
+}
+
+pub async fn presign_picture_variant(
+    db: &PgPool,
+    redis: &RedisClient,
+    storage: &StorageClient,
+    config: &Config,
+    user_id: Uuid,
+    picture_id: Uuid,
+    variant: PictureVariant,
+) -> Result<String, AppError> {
+    let picture = PictureRepository::find_by_id(db, picture_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    if picture.local_user_id != user_id {
+        return Err(AppError::NotFound);
+    }
+
+    let key = s3::picture_key(user_id, picture_id);
+    cached_presign_get(redis, storage, config, variant.bucket(config), &key).await
 }
 
 fn upload_session_key(picture_id: Uuid) -> String {
