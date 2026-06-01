@@ -1,0 +1,94 @@
+use crate::error::{Result, WorkerError};
+use magick_rust::{MagickWand, magick_wand_genesis};
+use std::path::Path;
+use std::sync::Once;
+use tracing::debug;
+
+static MAGICK_INIT: Once = Once::new();
+
+/// Initialize ImageMagick once per process. Safe to call multiple times.
+fn init_magick() {
+    MAGICK_INIT.call_once(|| {
+        magick_wand_genesis();
+    });
+}
+
+/// Thumbnail height targets per variant name.
+pub fn thumbnail_height(variant: &str) -> Option<usize> {
+    match variant {
+        "small" => Some(100),
+        "medium" => Some(500),
+        "large" => Some(1000),
+        _ => None,
+    }
+}
+
+/// Generate a WebP thumbnail at the specified height (maintaining aspect ratio).
+///
+/// Writes the result to `dest_path`. Must run inside `tokio::task::spawn_blocking`.
+pub fn generate_thumbnail(src: &Path, dest: &Path, target_height: usize) -> Result<()> {
+    init_magick();
+
+    let mut wand = MagickWand::new();
+    wand.read_image(src.to_str().unwrap())
+        .map_err(|e| WorkerError::Imaging(format!("read image: {e}")))?;
+
+    let orig_w = wand.get_image_width();
+    let orig_h = wand.get_image_height();
+    if orig_h == 0 {
+        return Err(WorkerError::Imaging("image has zero height".to_string()));
+    }
+
+    let target_width = (target_height * orig_w) / orig_h;
+    wand.thumbnail_image(target_width, target_height)
+        .map_err(|e| WorkerError::Imaging(format!("resize: {e}")))?;
+
+    wand.set_image_format("webp")
+        .map_err(|e| WorkerError::Imaging(format!("set format: {e}")))?;
+
+    wand.write_image(dest.to_str().unwrap())
+        .map_err(|e| WorkerError::Imaging(format!("write: {e}")))?;
+
+    debug!(
+        src = %src.display(),
+        dest = %dest.display(),
+        target_height,
+        "thumbnail generated"
+    );
+    Ok(())
+}
+
+/// Generate a BlurHash string for an image.
+///
+/// Must run inside `tokio::task::spawn_blocking`.
+pub fn generate_blurhash(src: &Path) -> Result<String> {
+    init_magick();
+
+    let mut wand = MagickWand::new();
+    wand.read_image(src.to_str().unwrap())
+        .map_err(|e| WorkerError::Imaging(format!("read image for blurhash: {e}")))?;
+
+    let w = wand.get_image_width();
+    let h = wand.get_image_height();
+    if w == 0 || h == 0 {
+        return Err(WorkerError::Imaging(
+            "image has zero dimensions".to_string(),
+        ));
+    }
+
+    // Choose component counts based on orientation.
+    let (cx, cy) = if w >= h {
+        (4, 3)
+    } else if w == h {
+        (3, 3)
+    } else {
+        (3, 4)
+    };
+
+    let raw = wand
+        .export_image_pixels(0, 0, w, h, "RGBA")
+        .ok_or_else(|| WorkerError::Imaging("failed to export pixels".to_string()))?;
+
+    blurhash::encode(cx as u32, cy as u32, w as u32, h as u32, &raw)
+        .map_err(|e| WorkerError::Imaging(format!("blurhash encode: {e:?}")))
+}

@@ -56,6 +56,7 @@ api/
   admin/handlers.rs + models.rs
   federation/handlers.rs + models.rs
   resolver/handlers.rs + models.rs
+  worker/handlers.rs + models.rs
 
 infra/
   config.rs / error.rs / redis.rs / crypto.rs / db.rs / s3.rs
@@ -86,6 +87,7 @@ pub struct AppState {
 | Public/auth endpoints        | `/api/auth/*`, `/api/public/*` | Mixed                     |
 | Authenticated user endpoints | `/api/authenticated/*`         | User JWT                  |
 | Federation endpoints         | `/api/federation/*`            | Federation JWT (pairwise) |
+| Worker endpoints             | `/api/worker/*`                | Worker JWT                |
 
 ## 2) Domain terminology
 
@@ -98,14 +100,14 @@ All persistent storage uses the **global domain**. Backend domains are derived o
 
 ## 3) JWT tokens
 
-| Claim        | Description                                                               |
-|--------------|---------------------------------------------------------------------------|
-| `sub`        | Username (user tokens) or global domain (federation tokens).              |
-| `uid`        | User UUID (user tokens only).                                             |
-| `is_admin`   | Boolean. Admin endpoints check this, not a separate token type.           |
-| `instance`   | Global domain of the issuing instance.                                    |
-| `token_type` | `user` \| `resolver` \| `federation`. There is no `admin` token type.     |
-| `aud`        | Backend domain of the verifying instance (checked against `BACK_DOMAIN`). |
+| Claim        | Description                                                                       |
+|--------------|-----------------------------------------------------------------------------------|
+| `sub`        | Username (user tokens) or global domain (federation tokens).                      |
+| `uid`        | User UUID (user tokens only).                                                     |
+| `is_admin`   | Boolean. Admin endpoints check this, not a separate token type.                   |
+| `instance`   | Global domain of the issuing instance.                                            |
+| `token_type` | `user` \| `resolver` \| `federation` \| `worker`. There is no `admin` token type. |
+| `aud`        | Backend domain of the verifying instance (checked against `BACK_DOMAIN`).         |
 
 ## 4) Federation authentication (pairwise JWT)
 
@@ -169,10 +171,10 @@ via WebFinger and cached.
 
 **Pictures — upload**
 
-| Method | Path                                                        | Description                                                                   |
-|--------|-------------------------------------------------------------|-------------------------------------------------------------------------------|
-| `POST` | `/api/authenticated/pictures/uploads`                       | Begin upload. Returns `{ picture_id, presigned_url }` (staging bucket).       |
-| `POST` | `/api/authenticated/pictures/uploads/{picture_id}/complete` | Confirm upload. Optional body: `{ mime_type, file_size, width, height, ... }` |
+| Method | Path                                                        | Description                                                                                                                                   |
+|--------|-------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
+| `POST` | `/api/authenticated/pictures/uploads`                       | Begin upload. Returns `{ picture_id, presigned_url }` (staging bucket).                                                                       |
+| `POST` | `/api/authenticated/pictures/uploads/{picture_id}/complete` | Confirm upload. Optional body: `{ mime_type, file_size, width, height, ... }`. Automatically enqueues a `gen_thumbnail` job after completion. |
 
 **Pictures — list & details**
 
@@ -181,6 +183,19 @@ via WebFinger and cached.
 | `GET`  | `/api/authenticated/pictures`          | Paginated list. Query params: `page`, `page_size`, `sort`, `order`, `tag`, `owned_only`, `shared_with_me`, `include_deleted`, `captured_after`, `captured_before`, `thumbnail`. |
 | `GET`  | `/api/authenticated/pictures/{id}`     | Full picture details + version history.                                                                                                                                         |
 | `GET`  | `/api/authenticated/pictures/{id}/url` | Presigned URL for a variant. Query: `variant=original\|small\|medium\|large`.                                                                                                   |
+
+**Pictures — editing**
+
+| Method | Path                                    | Description                                                                                                 |
+|--------|-----------------------------------------|-------------------------------------------------------------------------------------------------------------|
+| `POST` | `/api/authenticated/pictures/{id}/edit` | Enqueue an `edit_picture` job. Body: `{ exif_overrides?, regenerate_thumbnails }`. Only for owned pictures. |
+| `GET`  | `/api/authenticated/pictures/{id}/jobs` | List all processing jobs for a picture.                                                                     |
+
+**Jobs**
+
+| Method | Path                           | Description                                           |
+|--------|--------------------------------|-------------------------------------------------------|
+| `GET`  | `/api/authenticated/jobs/{id}` | Get the status and result of a job (owned by caller). |
 
 **Tags**
 
@@ -210,16 +225,55 @@ via WebFinger and cached.
 | `POST` | `/api/federation/pictures/announce` | Announce pictures for an active share. Requires federation JWT.    |
 | `POST` | `/api/federation/pictures/presign`  | Request presigned URL. Auth: `share_token` only — no JWT required. |
 
+### Worker endpoints (`/api/worker/*`)
+
+Auth: `Authorization: Bearer <worker_jwt>` — a short-lived JWT signed with the shared `WORKER_JWT_SECRET` (`token_type: worker`). Workers generate a
+fresh token per request (300 s TTL).
+
+| Method | Path                             | Description                                                                                                                                                     |
+|--------|----------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `GET`  | `/api/worker/jobs/next`          | Atomically claim next pending job (`SELECT FOR UPDATE SKIP LOCKED`). Returns the job + presigned S3 URLs, or `null`. Query: `types=gen_thumbnail,edit_picture`. |
+| `POST` | `/api/worker/jobs/{id}/complete` | Report job success. Body: `{ exif?, blurhash? }`. Backend updates the picture row and marks the job `completed`.                                                |
+| `POST` | `/api/worker/jobs/{id}/fail`     | Report job failure. Body: `{ error }`. Backend auto-retries up to `max_retries` (default 3).                                                                    |
+
+**Presigned URL shape returned by `GET /api/worker/jobs/next`**
+
+```json
+{
+   "job_id": "uuid",
+   "job_type": "gen_thumbnail",
+   "picture_id": "uuid",
+   "config": {
+      "picture_id": "uuid",
+      "is_initial": true
+   },
+   "presigned_read": "https://minio/…",
+   "presigned_writes": {
+      "small": "https://minio/…",
+      "medium": "https://minio/…",
+      "large": "https://minio/…"
+   }
+}
+```
+
+`presigned_writes` keys: `small/medium/large` for `gen_thumbnail`; `output` for `edit_picture`.
+
 ## 6) Key flows
 
 ### Picture upload
 
 1. Client → `POST /uploads` → gets `{ picture_id, presigned_url }` (staging bucket).
 2. Client → MinIO: `PUT` binary to presigned URL.
-3. Client → `POST /uploads/{id}/complete` → backend server-copies staging → pictures bucket, optionally versions, inserts DB row.
-4. (Async) Backend enqueues job → Worker generates thumbnails + ML metadata → results persisted.
+3. Client → `POST /uploads/{id}/complete` → backend server-copies staging → pictures bucket, optionally versions, inserts DB row, **enqueues
+   a `gen_thumbnail` job automatically**.
+4. Worker polls `GET /api/worker/jobs/next`, claims the job, downloads the original via presigned GET URL.
+5. Worker extracts EXIF (rexiv2), generates small/medium/large WebP thumbnails (ImageMagick), computes BlurHash.
+6. Worker uploads thumbnails via presigned PUT URLs provided in the claim response.
+7. Worker → `POST /api/worker/jobs/{id}/complete` with `{ exif, blurhash }` → backend populates
+   `pictures.width/height/captured_at/gps_*/blurhash/exif_data/thumbnails_generated_at`.
 
-S3 keys are derived as `{user_id}/{picture_id}` and never stored in the database.
+S3 keys are derived as `{user_id}/{picture_id}` and never stored in the database. Workers never hold S3 credentials — all access is via presigned
+URLs.
 
 ### Federation share announce
 
@@ -237,10 +291,13 @@ S3 keys are derived as `{user_id}/{picture_id}` and never stored in the database
 
 ## 7) Not-yet-developed items
 
-1. Full tagging pipeline execution (`services/tagging.rs`).
-2. Federation token rotation schedule and retry logic.
-3. Redis-backed rate limiting and session invalidation.
-4. NATS JetStream job publishing and result consumption.
-5. WebDAV implementation (presigned redirect for reads, staging pattern for writes).
-6. Worker-driven metadata backfill after thumbnail/ML processing.
-7. Admin job status and instance metrics endpoints.
+1. Full tagging pipeline execution (`services/tagging.rs`) — `InternalTask::RunTaggingPipeline` is enqueued but the evaluator is not yet wired.
+2. Tag rename cascade — `InternalTask::TagRename` updates the `tags` table; cascading to `outgoing_shares`, segmentation configs, and hierarchies is
+   still TODO.
+3. Visual edits for `edit_picture` jobs (crop, brightness/contrast) — EXIF-only MVP is implemented.
+4. ML worker job handlers (`ml_style`, `ml_people`, `ml_group_location`) — infrastructure and stubs exist; processing logic not yet implemented.
+5. Worker job timeout/recovery — stale `processing` jobs (worker crash) are not yet auto-reset to `pending`.
+6. Federation token rotation schedule and retry logic.
+7. Redis-backed rate limiting and session invalidation.
+8. WebDAV implementation (presigned redirect for reads, staging pattern for writes).
+9. Admin job status and instance metrics endpoints.

@@ -231,6 +231,19 @@ pub async fn complete_upload(
     }
 
     redis.del(RedisKey::UploadSession(picture_id)).await?;
+
+    // Enqueue initial thumbnail generation + EXIF extraction.
+    // This is best-effort: if job creation fails we log and continue rather than
+    // failing the upload — the user can trigger a re-run from the UI later.
+    if let Err(e) = crate::services::jobs::enqueue_thumbnail_job(db, user_id, picture_id).await {
+        tracing::error!(
+            user_id = %user_id,
+            picture_id = %picture_id,
+            error = ?e,
+            "failed to enqueue thumbnail job after upload"
+        );
+    }
+
     Ok(picture)
 }
 

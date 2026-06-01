@@ -13,7 +13,7 @@ CREATE EXTENSION IF NOT EXISTS "ltree";
 CREATE TYPE share_status AS ENUM ('active', 'revoked', 'tombstoned');
 CREATE TYPE tag_source AS ENUM ('manual', 'rule', 'segment', 'share_mapping', 'incoming_share');
 CREATE TYPE job_status AS ENUM ('pending', 'processing', 'completed', 'failed');
-CREATE TYPE job_type AS ENUM ('gen_thumbnail', 'ml_style', 'ml_people', 'ml_group_location');
+CREATE TYPE job_type AS ENUM ('gen_thumbnail', 'ml_style', 'ml_people', 'ml_group_location', 'edit_picture');
 CREATE TYPE federation_message_type AS ENUM ('share_announcement', 'share_revocation', 'picture_update');
 CREATE TYPE federation_direction AS ENUM ('inbound', 'outbound');
 CREATE TYPE federation_status AS ENUM ('pending', 'sent', 'delivered', 'failed');
@@ -120,7 +120,20 @@ CREATE TABLE pictures
     -- Timestamps
     captured_at           TIMESTAMP,              -- From EXIF
     ingested_at           TIMESTAMP     NOT NULL DEFAULT (now() at time zone 'utc'),
-    updated_at        TIMESTAMP     NOT NULL DEFAULT (now() at time zone 'utc')
+    updated_at              TIMESTAMP NOT NULL DEFAULT (now() at time zone 'utc'),
+
+    -- Worker-populated fields (NULL until processing completes)
+    -- BlurHash for progressive loading in the UI
+    blurhash                TEXT,
+    -- GPS coordinates extracted from EXIF (DOUBLE PRECISION for direct f64 mapping)
+    gps_lat                 DOUBLE PRECISION,
+    gps_lng                 DOUBLE PRECISION,
+    gps_alt                 INTEGER,
+    -- EXIF orientation tag (1=normal, 3=180°, 6=90°CW, 8=90°CCW, etc.)
+    orientation             SMALLINT,
+    -- Set to NOW() when a worker first generates thumbnails for this picture.
+    -- NULL means thumbnails have never been generated.
+    thumbnails_generated_at TIMESTAMP
 );
 
 CREATE INDEX idx_pictures_local_user ON pictures (local_user_id);
@@ -415,6 +428,11 @@ CREATE TABLE jobs
     -- Idempotency
     idempotency_key VARCHAR(255) UNIQUE,
 
+    -- Primary picture for single-picture jobs (NULL for batch jobs)
+    picture_id UUID REFERENCES pictures (id) ON DELETE CASCADE,
+    -- Worker instance ID while status = 'processing'
+    claimed_by TEXT,
+
     -- Timestamps
     created_at      TIMESTAMP  NOT NULL DEFAULT (now() at time zone 'utc'),
     started_at      TIMESTAMP,
@@ -428,6 +446,12 @@ CREATE INDEX idx_jobs_owner ON jobs (owner_id);
 CREATE INDEX idx_jobs_status ON jobs (status);
 CREATE INDEX idx_jobs_type ON jobs (job_type);
 CREATE INDEX idx_jobs_created ON jobs (created_at);
+-- Partial index for fast job claiming: only pending jobs, ordered by created_at
+CREATE INDEX idx_jobs_pending_claim ON jobs (job_type, created_at) WHERE status = 'pending';
+-- Index for looking up jobs by picture
+CREATE INDEX idx_jobs_picture ON jobs (picture_id) WHERE picture_id IS NOT NULL;
+-- Index for GPS bbox queries (used by rule-based tagging)
+CREATE INDEX idx_pictures_gps ON pictures (gps_lat, gps_lng) WHERE gps_lat IS NOT NULL;
 
 -- Config JSONB structure examples:
 -- gen_thumbnail: {"picture_ids": ["uuid1", "uuid2"], "sizes": ["thumb", "medium"]}

@@ -1,4 +1,5 @@
 mod auth;
+mod jobs;
 mod pictures;
 mod settings;
 mod shares;
@@ -50,4 +51,7 @@ pub fn authenticated_routes() -> Router<AppState> {
             "/shares/incoming/{id}/reject",
             post(shares::reject_incoming),
         )
+        .route("/jobs/{id}", get(jobs::get_job))
+        .route("/pictures/{id}/jobs", get(jobs::list_picture_jobs))
+        .route("/pictures/{id}/edit", post(jobs::enqueue_edit))
 }

@@ -4,6 +4,7 @@ mod middleware;
 mod resolver;
 mod user;
 mod webfinger;
+mod worker;
 
 use crate::infra::config::Config;
 use crate::state::AppState;
@@ -47,6 +48,7 @@ fn api_routes(config: &Config) -> Router<AppState> {
         .nest("/public", user::public_routes())
         .nest("/authenticated", user::authenticated_routes())
         .nest("/federation", federation::routes())
+        .nest("/worker", worker::routes())
         .layer(cors)
 }
 

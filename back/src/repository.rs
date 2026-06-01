@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod job;
 pub mod picture;
 pub mod picture_version;
 pub mod share;

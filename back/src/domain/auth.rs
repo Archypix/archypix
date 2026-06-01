@@ -7,6 +7,7 @@ pub enum TokenType {
     User,
     Resolver,
     Federation,
+    Worker,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

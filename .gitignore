@@ -10,6 +10,10 @@ fed-test/Cargo.lock
 fed-test/target
 fed-test/.env
 
+worker/Cargo.lock
+worker/target
+worker/.env
+
 # Macos
 .DS_Store
 

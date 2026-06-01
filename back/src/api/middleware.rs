@@ -2,6 +2,7 @@ pub mod auth_admin;
 pub mod auth_federation;
 pub mod auth_resolver;
 pub mod auth_user;
+pub mod auth_worker;
 
 use crate::infra::error::AppError;
 use axum::http::HeaderMap;

@@ -22,6 +22,12 @@ pub struct Picture {
     pub captured_at: Option<NaiveDateTime>,
     pub ingested_at: NaiveDateTime,
     pub updated_at: NaiveDateTime,
+    pub blurhash: Option<String>,
+    pub gps_lat: Option<f64>,
+    pub gps_lng: Option<f64>,
+    pub gps_alt: Option<i32>,
+    pub orientation: Option<i16>,
+    pub thumbnails_generated_at: Option<NaiveDateTime>,
 }
 
 impl Picture {

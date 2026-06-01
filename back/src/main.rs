@@ -10,6 +10,7 @@ use crate::clients::federation::FederationClient;
 use crate::clients::resolver::ResolverClient;
 use crate::infra::config::Config;
 use crate::infra::crypto::JwtService;
+use crate::infra::tasks;
 use crate::state::AppState;
 use reqwest::Client as HttpClient;
 use tracing::info;
@@ -19,7 +20,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,archypix_backend=debug".into()),
+                .unwrap_or_else(|_| "info,archypix_back=debug".into()),
         )
         .init();
 
@@ -41,6 +42,7 @@ async fn main() -> anyhow::Result<()> {
 
     let jwt = JwtService::new(&config.jwt_secret, &config.back_domain);
     let resolver_jwt = JwtService::new(&config.resolver_jwt_secret, &config.back_domain);
+    let worker_jwt = JwtService::new(&config.worker_jwt_secret, &config.back_domain);
 
     let federation =
         FederationClient::new(http.clone(), config.clone(), jwt.clone(), redis.clone());
@@ -49,14 +51,20 @@ async fn main() -> anyhow::Result<()> {
     // Register with the resolver so it can route user registrations to this backend.
     resolver.self_register().await?;
 
+    // Start the in-process background task queue.
+    let (task_queue, task_runner) = tasks::create(db.clone(), config.task_queue_concurrency);
+    tokio::spawn(task_runner);
+
     let state = AppState::new(
         config.clone(),
         db,
         redis,
         jwt,
+        worker_jwt,
         storage,
         federation,
         resolver,
+        task_queue,
     );
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;

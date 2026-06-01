@@ -15,13 +15,25 @@
       - WebFinger client: consult resolver/WebFinger when needed for cross-instance discovery; caches backend domains in Redis.
       - Postgres: authoritative metadata (users, pictures, tags, shares, jobs).
       - Federation endpoints: handle inbound/outbound federation messages (share announce/revoke, presign requests).
-      - Job producer/consumer: publish job messages to NATS JetStream; consume and persist results from workers.
+      - Job queue owner: writes `pending` jobs to the `jobs` table; exposes `/api/worker/*` endpoints for workers to claim and complete them.
+      - In-process task queue: lightweight Tokio-based queue for DB-only tasks (tag-rename cascade, tagging pipeline evaluation) that do not require
+        external compute.
       - Local caches: Redis for sessions, presigned URLs, federation tokens, and backend domain mappings.
 
-- Workers (central pool: Rust worker processes)
-    - Purpose: perform CPU/GPU work and publish compact results back to owning backends; never write to backend databases directly.
-    - Task types: thumbnail generation, ML style/object tagging, face detection and embedding, geo/time clustering.
-    - Results are published to the backend via NATS JetStream; large artifacts (thumbnails, crops, snapshots) go to MinIO.
+- Workers (`archypix-worker`, one or more Rust processes)
+    - Purpose: perform CPU/GPU-intensive work; never access the database or S3 directly.
+    - Job transport: **Postgres-backed queue** using `SELECT FOR UPDATE SKIP LOCKED`. Workers poll `GET /api/worker/jobs/next` on the backend; the
+      backend atomically claims and returns a job with all presigned S3 URLs needed.
+    - S3 access: workers download originals and upload results exclusively via presigned URLs issued by the backend — no S3 credentials required.
+    - Auth: workers authenticate to the backend with a short-lived JWT signed with `WORKER_JWT_SECRET` (`token_type: worker`), identical pattern to
+      the resolver JWT.
+    - Implemented job types:
+        - `gen_thumbnail` — download original from MinIO, extract EXIF (rexiv2), generate small/medium/large WebP thumbnails (ImageMagick), compute
+          BlurHash, upload via presigned PUT URLs, report extracted metadata to backend.
+        - `edit_picture` — download original, apply EXIF overrides, optionally regenerate thumbnails, report updated metadata.
+    - Stub job types (infrastructure ready, processing not yet implemented): `ml_style`, `ml_people`, `ml_group_location`.
+    - Results are POSTed to `/api/worker/jobs/{id}/complete`; the backend updates the `pictures` row and marks the job completed. Failed jobs
+      auto-retry up to `max_retries` (default 3).
 
 - MinIO (S3-compatible object storage)
     - Purpose: durable blob store for original images, derivatives, ML snapshots, and exports.
@@ -38,7 +50,9 @@
 **Invariants**
 
 - Each backend is authoritative for its users (Postgres is the single source of truth per instance).
-- Workers publish results; backends persist — workers never write backend databases directly.
+- Workers publish results; backends persist — workers never write to backend databases or S3 directly.
 - All persistent storage (DB fields, JWT claims, federation messages) uses the **global domain**. Backend domains are resolved on demand via WebFinger
   and cached in Redis.
-- NATS JetStream for jobs + results; messages are compact (IDs and pointers), large data lives in MinIO.
+- Job queue transport is Postgres (`SELECT FOR UPDATE SKIP LOCKED`). Workers are stateless HTTP clients that need only a backend URL and
+  `WORKER_JWT_SECRET` to operate.
+- S3 keys are derived deterministically (`{user_id}/{picture_id}`) and never stored in the database; presigned URLs are issued on demand.

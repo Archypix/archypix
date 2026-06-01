@@ -51,6 +51,13 @@ pub struct Config {
     pub federation_backend_cache_ttl_secs: u64,
     pub federation_request_timeout_ms: u64,
 
+    // ── Workers ───────────────────────────────────────────────────────────────
+    /// Shared JWT secret between this backend and all worker instances.
+    pub worker_jwt_secret: String,
+    /// Maximum number of in-process background tasks running concurrently
+    /// (tag-rename, tagging-pipeline, etc.). Does not affect external workers.
+    pub task_queue_concurrency: usize,
+
     // ── S3 / Object storage ───────────────────────────────────────────────────
     pub s3_endpoint: String,
     /// Public-facing S3 endpoint used in presigned URLs returned to clients.
@@ -125,6 +132,15 @@ impl Config {
             federation_jwt_ttl_secs: env_i64("FEDERATION_JWT_TTL_SECS", 86_400)?,
             federation_backend_cache_ttl_secs: env_u64("FEDERATION_BACKEND_CACHE_TTL_SECS", 3600)?,
             federation_request_timeout_ms: env_u64("FEDERATION_REQUEST_TIMEOUT_MS", 1000)?,
+
+            worker_jwt_secret: require_env("WORKER_JWT_SECRET")?,
+            task_queue_concurrency: {
+                let val =
+                    std::env::var("TASK_QUEUE_CONCURRENCY").unwrap_or_else(|_| "4".to_string());
+                val.trim().parse().map_err(|_| {
+                    anyhow::anyhow!("TASK_QUEUE_CONCURRENCY must be a positive integer")
+                })?
+            },
 
             s3_public_endpoint: env("S3_PUBLIC_ENDPOINT", s3_endpoint.clone()),
             s3_endpoint,

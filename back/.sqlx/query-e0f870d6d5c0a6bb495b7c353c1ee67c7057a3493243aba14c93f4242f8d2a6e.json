@@ -1,0 +1,234 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE jobs\n               SET status       = 'completed',\n                   completed_at = (now() AT TIME ZONE 'utc'),\n                   result       = $2\n               WHERE id = $1\n               RETURNING\n                   id, owner_id,\n                   job_type    AS \"job_type: JobType\",\n                   status      AS \"status: JobStatus\",\n                   config      AS \"config: _\",\n                   result      AS \"result: _\",\n                   result_s3_keys,\n                   error_message,\n                   retry_count, max_retries,\n                   idempotency_key,\n                   picture_id, claimed_by,\n                   created_at, started_at, completed_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "owner_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "owner_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "job_type: JobType",
+        "type_info": {
+          "Custom": {
+            "name": "job_type",
+            "kind": {
+              "Enum": [
+                "gen_thumbnail",
+                "ml_style",
+                "ml_people",
+                "ml_group_location",
+                "edit_picture"
+              ]
+            }
+          }
+        },
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "job_type"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "status: JobStatus",
+        "type_info": {
+          "Custom": {
+            "name": "job_status",
+            "kind": {
+              "Enum": [
+                "pending",
+                "processing",
+                "completed",
+                "failed"
+              ]
+            }
+          }
+        },
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "config: _",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "config"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "result: _",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "result"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "result_s3_keys",
+        "type_info": "TextArray",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "result_s3_keys"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "error_message",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "error_message"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "retry_count",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "retry_count"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "max_retries",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "max_retries"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "idempotency_key",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "idempotency_key"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "picture_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "picture_id"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "claimed_by",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "claimed_by"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "created_at",
+        "type_info": "Timestamp",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "started_at",
+        "type_info": "Timestamp",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "started_at"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "completed_at",
+        "type_info": "Timestamp",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "completed_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Jsonb"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "e0f870d6d5c0a6bb495b7c353c1ee67c7057a3493243aba14c93f4242f8d2a6e"
+}

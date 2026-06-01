@@ -99,7 +99,11 @@ Dependency rule: `api → services → repository → domain`. No layer may reac
 | Admin              | `/api/admin/*`                 | Admin User JWT  |
 | Resolver callbacks | `/api/resolver/*`              | Resolver JWT    |
 | Federation         | `/api/federation/*`            | Federation JWT  |
+| Workers            | `/api/worker/*`                | Worker JWT      |
 | WebDAV *(planned)* | `/dav/*`                       | User JWT        |
+
+Worker JWT authentication uses the same shared-secret pattern as the Resolver: `WORKER_JWT_SECRET` must be set identically on the backend and all
+worker instances. Workers generate short-lived tokens (300 s) signed with HS256.
 
 ## License
 
