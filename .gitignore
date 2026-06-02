@@ -1,18 +1,17 @@
 resolver/target
 resolver/.env
-resolver/Cargo.lock
 
 back/target
 back/.env
-back/Cargo.lock
 
-fed-test/Cargo.lock
 fed-test/target
 fed-test/.env
 
-worker/Cargo.lock
 worker/target
 worker/.env
+
+common/target
+common/.env
 
 # Macos
 .DS_Store

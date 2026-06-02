@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE pictures\n               SET captured_at = COALESCE($2, captured_at),\n                   gps_lat     = COALESCE($3, gps_lat),\n                   gps_lng     = COALESCE($4, gps_lng),\n                   gps_alt     = COALESCE($5, gps_alt),\n                   orientation = COALESCE($6, orientation),\n                   exif_data   = CASE WHEN $7::jsonb IS NOT NULL\n                                      THEN exif_data || $7::jsonb\n                                      ELSE exif_data\n                                 END\n               WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamp",
+        "Float8",
+        "Float8",
+        "Int4",
+        "Int2",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c003dd9c45b91a60facea39ef0cf23c90199f3630ed67b66f36ce080f304b311"
+}

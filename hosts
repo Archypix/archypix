@@ -1,0 +1,9 @@
+# Archypix dev — append these lines to /etc/hosts
+# (or use /etc/resolver/archypix.test + dnsmasq for a wildcard approach)
+#
+#   sudo tee -a /etc/hosts < hosts
+#
+127.0.0.1  archypix.test
+127.0.0.1  b1.archypix.test
+127.0.0.1  b2.archypix.test
+127.0.0.1  solo.archypix.test

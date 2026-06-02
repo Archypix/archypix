@@ -45,13 +45,9 @@ RUN useradd -m -u 1000 archypix && \
 USER archypix
 
 # Expose port
-EXPOSE 8080
-
-# Health check
+EXPOSE 80
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
-
-# Run the binary
+    CMD addr="${LISTEN_ADDR:-0.0.0.0:80}"; curl -f http://localhost:${addr##*:}/health || exit 1
 CMD ["archypix-resolver"]
 
 # ---- dev (source mounted at runtime, cargo run on start) ----
@@ -60,5 +56,7 @@ CMD ["archypix-resolver"]
 FROM rust:1.96-slim AS dev
 WORKDIR /app
 RUN apt-get update && apt-get install -y pkg-config libssl-dev curl && rm -rf /var/lib/apt/lists/*
-EXPOSE 8080
+EXPOSE 80
+HEALTHCHECK --interval=10s --timeout=3s --start-period=120s --retries=3 \
+    CMD addr="${LISTEN_ADDR:-0.0.0.0:80}"; curl -f http://localhost:${addr##*:}/health || exit 1
 CMD ["cargo", "run"]

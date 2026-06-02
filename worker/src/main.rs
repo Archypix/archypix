@@ -60,7 +60,7 @@ async fn run_health_server(addr: &str) {
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
-            tracing::warn!(addr, error = ?e, "health server failed to start");
+            tracing::warn!(addr, error = ?e, "health server failed to bind");
             return;
         }
     };

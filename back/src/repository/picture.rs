@@ -1,3 +1,4 @@
+use crate::domain::job::ExifOverrides;
 use crate::domain::picture::Picture;
 use crate::infra::error::{AppError, map_sqlx_error};
 use chrono::NaiveDateTime;
@@ -287,6 +288,71 @@ impl PictureRepository {
             .execute(ex)
             .await
             .map_err(map_sqlx_error)?;
+        Ok(())
+    }
+
+    /// Apply user-requested EXIF overrides to the picture row.
+    ///
+    /// Only non-`None` fields in `overrides` are written; existing values are kept for
+    /// fields left as `None`. Camera/lens metadata (brand, model, focal length, etc.) are
+    /// merged into the `exif_data` JSONB column.
+    pub async fn apply_exif_overrides(
+        db: &PgPool,
+        id: Uuid,
+        overrides: &ExifOverrides,
+    ) -> Result<(), AppError> {
+        // Build the JSONB patch for camera/lens fields stored inside exif_data.
+        let mut patch = serde_json::Map::new();
+        if let Some(ref v) = overrides.camera_brand {
+            patch.insert("camera_brand".to_string(), serde_json::json!(v));
+        }
+        if let Some(ref v) = overrides.camera_model {
+            patch.insert("camera_model".to_string(), serde_json::json!(v));
+        }
+        if let Some(v) = overrides.focal_length_mm {
+            patch.insert("focal_length_mm".to_string(), serde_json::json!(v));
+        }
+        if let Some(v) = overrides.f_number {
+            patch.insert("f_number".to_string(), serde_json::json!(v));
+        }
+        if let Some(v) = overrides.iso_speed {
+            patch.insert("iso_speed".to_string(), serde_json::json!(v));
+        }
+        if let Some(v) = overrides.exposure_time_num {
+            patch.insert("exposure_time_num".to_string(), serde_json::json!(v));
+        }
+        if let Some(v) = overrides.exposure_time_den {
+            patch.insert("exposure_time_den".to_string(), serde_json::json!(v));
+        }
+        let exif_patch = if patch.is_empty() {
+            None
+        } else {
+            Some(serde_json::Value::Object(patch))
+        };
+
+        sqlx::query!(
+            r#"UPDATE pictures
+               SET captured_at = COALESCE($2, captured_at),
+                   gps_lat     = COALESCE($3, gps_lat),
+                   gps_lng     = COALESCE($4, gps_lng),
+                   gps_alt     = COALESCE($5, gps_alt),
+                   orientation = COALESCE($6, orientation),
+                   exif_data   = CASE WHEN $7::jsonb IS NOT NULL
+                                      THEN exif_data || $7::jsonb
+                                      ELSE exif_data
+                                 END
+               WHERE id = $1"#,
+            id,
+            overrides.captured_at,
+            overrides.gps_lat,
+            overrides.gps_lng,
+            overrides.gps_alt,
+            overrides.orientation,
+            exif_patch as Option<serde_json::Value>,
+        )
+        .execute(db)
+        .await
+        .map_err(map_sqlx_error)?;
         Ok(())
     }
 }

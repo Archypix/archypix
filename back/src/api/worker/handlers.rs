@@ -1,109 +1,168 @@
 use crate::api::middleware::auth_worker::AuthWorker;
 use crate::api::worker::models::{ClaimJobResponse, CompleteJobRequest, FailJobRequest};
-use crate::domain::job::JobType;
+use crate::domain::job::{JobConfig, JobType};
+use crate::domain::user_settings::VersioningMode;
 use crate::infra::error::AppError;
 use crate::infra::s3;
 use crate::repository::job::JobRepository;
 use crate::repository::picture::PictureRepository;
+use crate::repository::picture_version::PictureVersionRepository;
+use crate::repository::user_settings::UserSettingsRepository;
 use crate::state::AppState;
+use archypix_common::transfer::ClaimQuery;
+use archypix_common::transfer::PresignedWrites;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use chrono::NaiveDateTime;
 use serde::Deserialize;
-use std::collections::HashMap;
-use tracing::{debug, warn};
+use tracing::debug;
 use uuid::Uuid;
-
-#[derive(Debug, Deserialize)]
-pub struct ClaimQuery {
-    /// Comma-separated list of job types this worker handles.
-    /// When omitted, the worker accepts any job type.
-    pub types: Option<String>,
-}
 
 pub async fn claim_next_job(
     auth: AuthWorker,
     State(state): State<AppState>,
     Query(query): Query<ClaimQuery>,
 ) -> Result<Json<Option<ClaimJobResponse>>, AppError> {
-    debug!(worker = auth.worker_id(), "worker: claim_next_job");
+    //debug!(worker = auth.worker_id(), "worker: claim_next_job");
 
-    let job_types: Vec<JobType> = query
-        .types
-        .as_deref()
-        .unwrap_or("")
-        .split(',')
-        .filter(|s| !s.trim().is_empty())
-        .filter_map(|s| match s.trim() {
-            "gen_thumbnail" => Some(JobType::GenThumbnail),
-            "ml_style" => Some(JobType::MlStyle),
-            "ml_people" => Some(JobType::MlPeople),
-            "ml_group_location" => Some(JobType::MlGroupLocation),
-            "edit_picture" => Some(JobType::EditPicture),
-            other => {
-                warn!(
-                    worker = auth.worker_id(),
-                    job_type = other,
-                    "unknown job type in filter"
-                );
-                None
-            }
-        })
-        .collect();
-
-    let Some(job) = JobRepository::claim_next(&state.db, auth.worker_id(), &job_types).await?
+    let Some(job) = JobRepository::claim_next(&state.db, auth.worker_id(), &query.types).await?
     else {
         return Ok(Json(None));
     };
 
-    // Build presigned URLs based on job type.
-    let picture_id = job
-        .picture_id
-        .ok_or_else(|| AppError::InternalServerError("Job has no picture_id".to_string()))?;
+    debug!(
+        worker = auth.worker_id(),
+        job_type = job.job_type.to_string(),
+        "worker: claim_next_job"
+    );
+
+    // ML jobs have no picture and no S3 I/O for now — return early with empty presigned fields.
+    if matches!(
+        job.job_type,
+        JobType::MlStyle | JobType::MlPeople | JobType::MlGroupLocation
+    ) {
+        let config = job.typed_config().map_err(|e| {
+            AppError::InternalServerError(format!("failed to parse job config: {e}"))
+        })?;
+        return Ok(Json(Some(ClaimJobResponse {
+            job_id: job.id,
+            job_type: job.job_type,
+            picture_id: job.picture_id,
+            mime_type: None,
+            config,
+            presigned_read: None,
+            presigned_writes: PresignedWrites::default(),
+        })));
+    }
+
+    let picture_id = job.picture_id.ok_or_else(|| {
+        AppError::InternalServerError("claimed job has no picture_id".to_string())
+    })?;
 
     let picture = PictureRepository::find_by_id(&state.db, picture_id)
         .await?
         .ok_or(AppError::NotFound)?;
 
-    // Presigned GET for the original picture.
     let original_key = s3::picture_key(picture.local_user_id, picture_id);
     let presigned_read = state
         .storage
-        .presign_get(&state.config.s3_bucket_pictures, &original_key)
+        .presign_get_worker(&state.config.s3_bucket_pictures, &original_key)
         .await?;
 
-    // Presigned PUTs for outputs.
-    let mut presigned_writes: HashMap<String, String> = HashMap::new();
-    match job.job_type {
-        JobType::GenThumbnail => {
-            for size in ["small", "medium", "large"] {
-                let bucket = match size {
-                    "small" => &state.config.s3_bucket_small,
-                    "medium" => &state.config.s3_bucket_medium,
-                    _ => &state.config.s3_bucket_large,
-                };
-                let thumb_key = s3::picture_key(picture.local_user_id, picture_id);
-                let url = state.storage.presign_put(bucket, &thumb_key).await?;
-                presigned_writes.insert(size.to_string(), url);
+    // Parse the job config once — used both to build presigned writes and to populate
+    // the response.  Doing this early also catches corrupt JSONB before any S3 calls.
+    let config = job
+        .typed_config()
+        .map_err(|e| AppError::InternalServerError(format!("failed to parse job config: {e}")))?;
+
+    // For edit_picture jobs: create a version snapshot of the current file BEFORE
+    // handing out the presigned write URL that would overwrite it.
+    if job.job_type == JobType::EditPicture {
+        let settings =
+            UserSettingsRepository::get_or_default(&state.db, picture.local_user_id).await?;
+        if settings.versioning_mode != VersioningMode::None {
+            let version_id = Uuid::new_v4();
+            state
+                .storage
+                .copy_object(
+                    &state.config.s3_bucket_pictures,
+                    &original_key,
+                    &state.config.s3_bucket_versions,
+                    &s3::version_key(picture.local_user_id, picture_id, version_id),
+                )
+                .await?;
+            let version_num =
+                PictureVersionRepository::next_version_number(&state.db, picture_id).await?;
+            PictureVersionRepository::create(
+                &state.db,
+                picture_id,
+                version_num,
+                picture.file_size,
+                picture.mime_type.as_deref(),
+            )
+            .await?;
+        }
+    }
+
+    // Build presigned writes based on job type / config.
+    // All worker-facing presigns use presign_*_worker so the embedded host
+    // matches S3_WORKERS_ENDPOINT (may differ from S3_PUBLIC_ENDPOINT).
+    let thumb_key = s3::picture_key(picture.local_user_id, picture_id);
+    let presigned_writes = match &config {
+        JobConfig::GenThumbnail(_) => PresignedWrites::thumbnails(
+            state
+                .storage
+                .presign_put_worker(&state.config.s3_bucket_small, &thumb_key)
+                .await?,
+            state
+                .storage
+                .presign_put_worker(&state.config.s3_bucket_medium, &thumb_key)
+                .await?,
+            state
+                .storage
+                .presign_put_worker(&state.config.s3_bucket_large, &thumb_key)
+                .await?,
+        ),
+        JobConfig::EditPicture(edit_cfg) => {
+            // output URL is always provided so the worker can re-upload the
+            // (possibly EXIF-modified or transformed) original.
+            let output = state
+                .storage
+                .presign_put_worker(&state.config.s3_bucket_pictures, &original_key)
+                .await?;
+            if edit_cfg.visual.is_some() {
+                // Visual transforms → also regenerate thumbnails.
+                PresignedWrites::edit_with_visual(
+                    output,
+                    state
+                        .storage
+                        .presign_put_worker(&state.config.s3_bucket_small, &thumb_key)
+                        .await?,
+                    state
+                        .storage
+                        .presign_put_worker(&state.config.s3_bucket_medium, &thumb_key)
+                        .await?,
+                    state
+                        .storage
+                        .presign_put_worker(&state.config.s3_bucket_large, &thumb_key)
+                        .await?,
+                )
+            } else {
+                // EXIF-only edit: worker re-uploads the file with updated embedded
+                // EXIF, but pixel content is unchanged so thumbnails are not needed.
+                PresignedWrites::exif_only(output)
             }
         }
-        JobType::EditPicture => {
-            // The edited picture replaces the original in the pictures bucket.
-            let url = state
-                .storage
-                .presign_put(&state.config.s3_bucket_pictures, &original_key)
-                .await?;
-            presigned_writes.insert("output".to_string(), url);
-        }
-        _ => {} // ML jobs don't need presigned writes for now
-    }
+        _ => PresignedWrites::default(), // ML jobs have no presigned writes yet
+    };
 
     Ok(Json(Some(ClaimJobResponse {
         job_id: job.id,
         job_type: job.job_type,
         picture_id: job.picture_id,
-        config: job.config.0,
+        mime_type: picture.mime_type.clone(),
+        config,
         presigned_read: Some(presigned_read),
         presigned_writes,
     })))
@@ -121,73 +180,61 @@ pub async fn complete_job(
         .await?
         .ok_or(AppError::NotFound)?;
 
-    // Apply EXIF data to the picture if this is an initial thumbnail run.
-    if let (JobType::GenThumbnail, Some(picture_id)) = (&job.job_type, job.picture_id) {
-        // Parse is_initial from config.
-        let is_initial = job
-            .config
-            .0
-            .get("is_initial")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+    let picture_id = job.picture_id;
 
-        if is_initial {
-            if let Some(ref exif) = body.exif {
-                let captured_at = parse_exif_datetime(exif.captured_at.as_deref());
-                PictureRepository::update_from_worker(
-                    &state.db,
-                    picture_id,
-                    exif.width,
-                    exif.height,
-                    captured_at,
-                    exif.gps_lat,
-                    exif.gps_lng,
-                    exif.gps_alt,
-                    exif.orientation,
-                    body.blurhash.as_deref(),
-                    exif.exif_data.clone(),
-                )
-                .await?;
-            } else {
-                // No EXIF provided — at least mark thumbnails as generated.
-                PictureRepository::set_thumbnails_generated(&state.db, picture_id).await?;
+    // Update picture metadata when worker-extracted EXIF is present (gen_thumbnail initial jobs).
+    // update_from_worker also sets thumbnails_generated_at via COALESCE.
+    if let (Some(exif), Some(pid)) = (&body.exif, picture_id) {
+        let captured_at = exif.captured_at.as_deref().and_then(parse_exif_datetime);
+        PictureRepository::update_from_worker(
+            &state.db,
+            pid,
+            exif.width,
+            exif.height,
+            captured_at,
+            exif.gps_lat,
+            exif.gps_lng,
+            exif.gps_alt,
+            exif.orientation,
+            body.blurhash.as_deref(),
+            exif.exif_data.clone(),
+        )
+        .await?;
+    } else if body.thumbnails_generated {
+        // No EXIF was extracted (edit_picture or non-initial gen_thumbnail), but thumbnails
+        // were generated — mark the timestamp explicitly.
+        if let Some(pid) = picture_id {
+            PictureRepository::set_thumbnails_generated(&state.db, pid).await?;
+        }
+    }
+
+    // For edit_picture jobs: apply the user-requested EXIF overrides from the job config.
+    // Done after the worker-EXIF path so overrides always take precedence.
+    if job.job_type == JobType::EditPicture {
+        if let Some(pid) = picture_id {
+            let cfg = job.typed_config().map_err(|e| {
+                AppError::InternalServerError(format!("failed to parse job config: {e}"))
+            })?;
+            if let JobConfig::EditPicture(edit_cfg) = cfg {
+                if let Some(overrides) = edit_cfg.exif_overrides {
+                    crate::repository::picture::PictureRepository::apply_exif_overrides(
+                        &state.db, pid, &overrides,
+                    )
+                    .await?;
+                }
             }
-        } else {
-            PictureRepository::set_thumbnails_generated(&state.db, picture_id).await?;
         }
     }
 
-    // For edit_picture: the worker already uploaded the new file via presigned PUT.
-    // Update picture metadata if EXIF overrides were provided.
-    if let (JobType::EditPicture, Some(picture_id)) = (&job.job_type, job.picture_id) {
-        if let Some(ref exif) = body.exif {
-            let captured_at = parse_exif_datetime(exif.captured_at.as_deref());
-            PictureRepository::update_from_worker(
-                &state.db,
-                picture_id,
-                exif.width,
-                exif.height,
-                captured_at,
-                exif.gps_lat,
-                exif.gps_lng,
-                exif.gps_alt,
-                exif.orientation,
-                body.blurhash.as_deref(),
-                exif.exif_data.clone(),
-            )
-            .await?;
-        }
-    }
-
-    // Store result and mark complete.
     let result = serde_json::json!({
         "worker_id": auth.worker_id(),
         "has_exif": body.exif.is_some(),
         "has_blurhash": body.blurhash.is_some(),
+        "thumbnails_generated": body.thumbnails_generated,
     });
     JobRepository::complete(&state.db, job_id, result).await?;
 
-    // TODO: trigger in-process tagging pipeline (metadata event) if EXIF was updated.
+    // TODO: trigger in-process tagging pipeline if EXIF was updated.
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -198,20 +245,13 @@ pub async fn fail_job(
     Path(job_id): Path<Uuid>,
     Json(body): Json<FailJobRequest>,
 ) -> Result<StatusCode, AppError> {
-    debug!(
-        worker = auth.worker_id(),
-        job_id = %job_id,
-        error = %body.error,
-        "worker: fail_job"
-    );
-    JobRepository::fail(&state.db, job_id, &body.error).await?;
+    debug!(worker = auth.worker_id(), job_id = %job_id, permanent = body.permanent, error = %body.error, "worker: fail_job");
+    JobRepository::fail(&state.db, job_id, &body.error, body.permanent).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Parse EXIF datetime string ("YYYY:MM:DD HH:MM:SS") or ISO-like into a NaiveDateTime.
-fn parse_exif_datetime(s: Option<&str>) -> Option<NaiveDateTime> {
-    let s = s?;
-    // Try EXIF format first
+/// Parse an EXIF datetime string (`"YYYY:MM:DD HH:MM:SS"`) or ISO-8601 into `NaiveDateTime`.
+fn parse_exif_datetime(s: &str) -> Option<NaiveDateTime> {
     NaiveDateTime::parse_from_str(s, "%Y:%m:%d %H:%M:%S")
         .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S"))
         .ok()

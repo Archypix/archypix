@@ -41,7 +41,7 @@ pub fn generate_thumbnail(src: &Path, dest: &Path, target_height: usize) -> Resu
 
     let target_width = (target_height * orig_w) / orig_h;
     wand.thumbnail_image(target_width, target_height)
-        .map_err(|e| WorkerError::Imaging(format!("resize: {e}")))?;
+        .map_err(|e| WorkerError::Imaging(format!("thumbnail: {e}")))?;
 
     wand.set_image_format("webp")
         .map_err(|e| WorkerError::Imaging(format!("set format: {e}")))?;

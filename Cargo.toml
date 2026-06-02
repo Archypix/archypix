@@ -1,0 +1,9 @@
+[workspace]
+members = [
+    "back",
+    "worker",
+    "common",
+    "resolver",
+    "fed-test",
+]
+resolver = "2"

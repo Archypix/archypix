@@ -55,6 +55,13 @@ async fn main() -> anyhow::Result<()> {
     let (task_queue, task_runner) = tasks::create(db.clone(), config.task_queue_concurrency);
     tokio::spawn(task_runner);
 
+    // Start the job watchdog — resets stuck `processing` jobs to `pending`.
+    tokio::spawn(infra::job_watchdog::run(
+        db.clone(),
+        config.job_processing_timeout_secs,
+        config.job_watchdog_interval_secs,
+    ));
+
     let state = AppState::new(
         config.clone(),
         db,

@@ -1,115 +1,104 @@
+//! Handler for `gen_thumbnail` jobs.
+//!
+//! Sequence: MIME pre-flight → download → EXIF extraction (initial only)
+//! → thumbnail generation → upload.
+//!
+//! Error policy:
+//! - Unsupported MIME for thumbnailing  → `WorkerError::UnsupportedFormat` (permanent)
+//! - Image codec failure                → `WorkerError::Imaging` (permanent)
+//! - EXIF extraction failure            → log and continue (EXIF is optional)
+//! - BlurHash failure                   → log and continue (nice-to-have)
+//! - Network / upload failure           → propagated `WorkerError::Http` (retriable)
+
 use crate::backend::BackendClient;
-use crate::backend::models::{ClaimedJob, CompleteJobRequest};
 use crate::error::{Result, WorkerError};
-use crate::imaging::{exif as exif_mod, resize};
+use crate::imaging::{exif as exif_mod, thumbnailer};
+use archypix_common::job::{ExtractedExif, GenThumbnailConfig};
+use archypix_common::transfer::{CompleteJobRequest, PresignedWrites};
 use tempfile::TempDir;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 /// Handle a `gen_thumbnail` job.
-///
-/// Flow:
-/// 1. Download original from presigned URL to a temp file.
-/// 2. Extract EXIF (if is_initial).
-/// 3. Generate small/medium/large WebP thumbnails.
-/// 4. Generate blurhash.
-/// 5. Upload each thumbnail via its presigned PUT URL.
-/// 6. Report completion to backend.
-pub async fn handle(client: &BackendClient, job: ClaimedJob) -> Result<()> {
-    let job_id = job.job_id;
-    let is_initial = job
-        .config
-        .get("is_initial")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+pub async fn handle(
+    client: &BackendClient,
+    job_id: Uuid,
+    config: GenThumbnailConfig,
+    presigned_read: Option<String>,
+    presigned_writes: PresignedWrites,
+    mime_type: Option<String>,
+) -> Result<()> {
+    let presigned_read = presigned_read.ok_or_else(|| WorkerError::MissingPresignedUrl {
+        key: "original".to_string(),
+    })?;
 
-    let presigned_read = job
-        .presigned_read
-        .ok_or_else(|| WorkerError::MissingPresignedUrl {
-            key: "original".to_string(),
-        })?;
+    // ── MIME pre-flight (before downloading) ─────────────────────────────────
+    if let Some(ref mime) = mime_type {
+        if presigned_writes.has_thumbnails() && !archypix_common::mime::supports_thumbnail(mime) {
+            return Err(WorkerError::UnsupportedFormat(format!(
+                "MIME type '{mime}' is not supported for thumbnail generation"
+            )));
+        }
+        if config.is_initial && !archypix_common::mime::supports_exif(mime) {
+            warn!(mime_type = %mime, "MIME type not supported for EXIF extraction; skipping");
+        }
+    }
 
-    // Create a temporary directory for all intermediate files.
+    let should_extract_exif = config.is_initial
+        && mime_type
+            .as_deref()
+            .map(archypix_common::mime::supports_exif)
+            .unwrap_or(true);
+
+    // ── Download ──────────────────────────────────────────────────────────────
     let tmp = TempDir::new()?;
     let original_path = tmp.path().join("original");
 
-    info!(job_id = %job_id, "downloading original picture");
+    info!(job_id = %job_id, "gen_thumbnail: downloading original");
     client
         .download_presigned(&presigned_read, &original_path)
         .await?;
     debug!(
-        job_id = %job_id,
-        size_bytes = original_path.metadata()?.len(),
-        "original downloaded"
+        size_bytes = std::fs::metadata(&original_path)
+            .map(|m| m.len())
+            .unwrap_or(0),
+        "gen_thumbnail: original downloaded"
     );
 
-    // Run blocking image processing in a spawn_blocking thread.
-    let original_path_clone = original_path.clone();
-    let tmp_dir = tmp.path().to_path_buf();
-
-    let (exif_result, thumbnails, blurhash) = tokio::task::spawn_blocking(move || {
-        // EXIF extraction
-        let exif = if is_initial {
-            match exif_mod::extract_exif(&original_path_clone) {
-                Ok(e) => {
-                    debug!("EXIF extracted successfully");
-                    Some(e)
-                }
-                Err(e) => {
-                    tracing::warn!(error = ?e, "EXIF extraction failed; continuing without EXIF");
-                    None
-                }
+    // ── EXIF extraction (initial jobs only, blocking) ─────────────────────────
+    let exif: Option<ExtractedExif> = if should_extract_exif {
+        let path = original_path.clone();
+        match tokio::task::spawn_blocking(move || exif_mod::extract_exif(&path))
+            .await
+            .map_err(|e| WorkerError::Imaging(format!("spawn_blocking panicked: {e}")))?
+        {
+            Ok(e) => {
+                debug!("gen_thumbnail: EXIF extracted");
+                Some(e)
             }
-        } else {
-            None
-        };
-
-        // Thumbnail generation
-        let variants = ["small", "medium", "large"];
-        let mut paths = std::collections::HashMap::new();
-        for variant in &variants {
-            let height = resize::thumbnail_height(variant).unwrap();
-            let dest = tmp_dir.join(format!("{}.webp", variant));
-            match resize::generate_thumbnail(&original_path_clone, &dest, height) {
-                Ok(()) => {
-                    paths.insert(variant.to_string(), dest);
-                }
-                Err(e) => {
-                    tracing::warn!(variant, error = ?e, "thumbnail generation failed");
-                }
-            }
-        }
-
-        // Blurhash from the original
-        let bh = match resize::generate_blurhash(&original_path_clone) {
-            Ok(s) => Some(s),
             Err(e) => {
-                tracing::warn!(error = ?e, "blurhash generation failed");
+                warn!(error = ?e, "gen_thumbnail: EXIF extraction failed; continuing without EXIF");
                 None
             }
-        };
-
-        Ok::<_, WorkerError>((exif, paths, bh))
-    })
-    .await
-    .map_err(|e| WorkerError::Imaging(format!("spawn_blocking panicked: {e}")))??;
-
-    // Upload thumbnails via presigned PUT URLs.
-    for (variant, path) in &thumbnails {
-        let put_url = job.presigned_writes.get(variant.as_str()).ok_or_else(|| {
-            WorkerError::MissingPresignedUrl {
-                key: variant.clone(),
-            }
-        })?;
-        debug!(job_id = %job_id, variant, "uploading thumbnail");
-        client.upload_presigned(put_url, path).await?;
-    }
-
-    // Report completion.
-    let request = CompleteJobRequest {
-        exif: exif_result,
-        blurhash,
+        }
+    } else {
+        None
     };
-    client.complete_job(job_id, request).await?;
-    info!(job_id = %job_id, "gen_thumbnail job completed");
+
+    // ── Thumbnails + BlurHash + upload ────────────────────────────────────────
+    let thumb = thumbnailer::run(client, &original_path, &presigned_writes, tmp.path()).await?;
+
+    client
+        .complete_job(
+            job_id,
+            CompleteJobRequest {
+                exif,
+                blurhash: thumb.blurhash,
+                thumbnails_generated: thumb.generated,
+            },
+        )
+        .await?;
+
+    info!(job_id = %job_id, thumbnails_generated = thumb.generated, "gen_thumbnail completed");
     Ok(())
 }

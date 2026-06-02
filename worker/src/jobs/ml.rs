@@ -1,23 +1,18 @@
 use crate::backend::BackendClient;
-use crate::backend::models::ClaimedJob;
 use crate::error::Result;
+use archypix_common::job::JobType;
+use archypix_common::transfer::CompleteJobRequest;
 use tracing::info;
+use uuid::Uuid;
 
-/// Placeholder handler for ML-based jobs (ml_style, ml_people, ml_group_location).
-/// Not yet implemented — logs and reports success with empty result.
-pub async fn handle_stub(client: &BackendClient, job: ClaimedJob) -> Result<()> {
+/// Placeholder for ML-based jobs. Logs and reports success with empty result.
+pub async fn handle_stub(client: &BackendClient, job_id: Uuid, job_type: JobType) -> Result<()> {
     info!(
-        job_id = %job.job_id,
-        job_type = %job.job_type,
-        "ML job received (not yet implemented); marking as complete with empty result"
+        job_id = %job_id,
+        %job_type,
+        "ML job received (not yet implemented); marking complete"
     );
     client
-        .complete_job(
-            job.job_id,
-            crate::backend::models::CompleteJobRequest {
-                exif: None,
-                blurhash: None,
-            },
-        )
+        .complete_job(job_id, CompleteJobRequest::default())
         .await
 }

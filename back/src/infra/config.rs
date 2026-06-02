@@ -57,13 +57,22 @@ pub struct Config {
     /// Maximum number of in-process background tasks running concurrently
     /// (tag-rename, tagging-pipeline, etc.). Does not affect external workers.
     pub task_queue_concurrency: usize,
+    /// How long (seconds) a job may stay in `processing` state before the
+    /// watchdog considers the worker dead and resets it to `pending`.
+    pub job_processing_timeout_secs: i64,
+    /// How often (seconds) the watchdog runs its stale-job scan.
+    pub job_watchdog_interval_secs: u64,
 
     // ── S3 / Object storage ───────────────────────────────────────────────────
     pub s3_endpoint: String,
-    /// Public-facing S3 endpoint used in presigned URLs returned to clients.
+    /// Public-facing S3 endpoint used in presigned URLs returned to browsers.
     /// Defaults to `s3_endpoint` when not set — override when the internal and
     /// external addresses differ (e.g. `http://minio:9000` vs `http://localhost:9000`).
     pub s3_public_endpoint: String,
+    /// S3 endpoint used in presigned URLs returned to worker processes.
+    /// Defaults to `s3_endpoint`.  Override when workers reach MinIO via a
+    /// different address than the public internet (e.g. a private Docker network).
+    pub s3_workers_endpoint: String,
     pub s3_access_key: String,
     pub s3_secret_key: String,
     pub s3_region: String,
@@ -90,7 +99,7 @@ impl Config {
         let s3_endpoint = require_env("S3_ENDPOINT")?;
 
         let config = Config {
-            listen_addr: env("LISTEN_ADDR", "0.0.0.0:8000".to_string()),
+            listen_addr: env("LISTEN_ADDR", "0.0.0.0:80".to_string()),
 
             db_host: require_env("DB_HOST")?,
             db_port: env_u16("DB_PORT", 5432)?,
@@ -134,15 +143,12 @@ impl Config {
             federation_request_timeout_ms: env_u64("FEDERATION_REQUEST_TIMEOUT_MS", 1000)?,
 
             worker_jwt_secret: require_env("WORKER_JWT_SECRET")?,
-            task_queue_concurrency: {
-                let val =
-                    std::env::var("TASK_QUEUE_CONCURRENCY").unwrap_or_else(|_| "4".to_string());
-                val.trim().parse().map_err(|_| {
-                    anyhow::anyhow!("TASK_QUEUE_CONCURRENCY must be a positive integer")
-                })?
-            },
+            task_queue_concurrency: env_usize("TASK_QUEUE_CONCURRENCY", 4)?,
+            job_processing_timeout_secs: env_i64("JOB_PROCESSING_TIMEOUT_SECS", 600)?,
+            job_watchdog_interval_secs: env_u64("JOB_WATCHDOG_INTERVAL_SECS", 60)?,
 
             s3_public_endpoint: env("S3_PUBLIC_ENDPOINT", s3_endpoint.clone()),
+            s3_workers_endpoint: env("S3_WORKERS_ENDPOINT", s3_endpoint.clone()),
             s3_endpoint,
             s3_access_key: require_env("S3_ACCESS_KEY")?,
             s3_secret_key: require_env("S3_SECRET_KEY")?,
@@ -338,4 +344,11 @@ fn env_u64(name: &str, default: u64) -> anyhow::Result<u64> {
     val.trim()
         .parse()
         .map_err(|_| anyhow::anyhow!("{} must be a non-negative integer.", name))
+}
+
+fn env_usize(name: &str, default: usize) -> anyhow::Result<usize> {
+    let val = std::env::var(name).unwrap_or_else(|_| default.to_string());
+    val.trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("{} must be a positive integer.", name))
 }

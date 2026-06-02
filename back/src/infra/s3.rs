@@ -27,44 +27,48 @@ pub fn version_key(user_id: Uuid, picture_id: Uuid, version_id: Uuid) -> String 
 pub struct StorageClient {
     /// Used for internal operations: uploads, copies, deletes, bucket management.
     client: Client,
-    /// Configured with `s3_public_endpoint` so presigned URLs are reachable by browsers.
+    /// Configured with `s3_public_endpoint` — presigned URLs reachable by browsers.
     presign_client: Client,
+    /// Configured with `s3_workers_endpoint` — presigned URLs reachable by worker processes.
+    worker_presign_client: Client,
     presign_ttl: Duration,
 }
 
 impl StorageClient {
-    pub fn new(client: Client, presign_client: Client, presign_ttl: Duration) -> Self {
+    pub fn new(
+        client: Client,
+        presign_client: Client,
+        worker_presign_client: Client,
+        presign_ttl: Duration,
+    ) -> Self {
         Self {
             client,
             presign_client,
+            worker_presign_client,
             presign_ttl,
         }
     }
 
+    // ── Browser-facing presigns ───────────────────────────────────────────────
+
     pub async fn presign_get(&self, bucket: &str, key: &str) -> Result<String, AppError> {
-        let config = PresigningConfig::expires_in(self.presign_ttl)
-            .map_err(|e| AppError::InternalServerError(format!("presign config: {e}")))?;
-        self.presign_client
-            .get_object()
-            .bucket(bucket)
-            .key(key)
-            .presigned(config)
-            .await
-            .map(|p| p.uri().to_string())
-            .map_err(|e| AppError::InternalServerError(e.to_string()))
+        presign_get_with(&self.presign_client, bucket, key, self.presign_ttl).await
     }
 
     pub async fn presign_put(&self, bucket: &str, key: &str) -> Result<String, AppError> {
-        let config = PresigningConfig::expires_in(self.presign_ttl)
-            .map_err(|e| AppError::InternalServerError(format!("presign config: {e}")))?;
-        self.presign_client
-            .put_object()
-            .bucket(bucket)
-            .key(key)
-            .presigned(config)
-            .await
-            .map(|p| p.uri().to_string())
-            .map_err(|e| AppError::InternalServerError(e.to_string()))
+        presign_put_with(&self.presign_client, bucket, key, self.presign_ttl).await
+    }
+
+    // ── Worker-facing presigns ────────────────────────────────────────────────
+
+    /// Presign a GET URL for worker download — uses `S3_WORKERS_ENDPOINT`.
+    pub async fn presign_get_worker(&self, bucket: &str, key: &str) -> Result<String, AppError> {
+        presign_get_with(&self.worker_presign_client, bucket, key, self.presign_ttl).await
+    }
+
+    /// Presign a PUT URL for worker upload — uses `S3_WORKERS_ENDPOINT`.
+    pub async fn presign_put_worker(&self, bucket: &str, key: &str) -> Result<String, AppError> {
+        presign_put_with(&self.worker_presign_client, bucket, key, self.presign_ttl).await
     }
 
     pub async fn copy_object(
@@ -114,22 +118,22 @@ pub async fn connect(config: &Config) -> anyhow::Result<StorageClient> {
         .load()
         .await;
 
-    let client = Client::from_conf(
-        aws_sdk_s3::config::Builder::from(&shared_config)
-            .endpoint_url(config.s3_endpoint.clone())
-            .force_path_style(true)
-            .build(),
-    );
-    let presign_client = Client::from_conf(
-        aws_sdk_s3::config::Builder::from(&shared_config)
-            .endpoint_url(config.s3_public_endpoint.clone())
-            .force_path_style(true)
-            .build(),
-    );
+    let mk_client = |endpoint: &str| {
+        Client::from_conf(
+            aws_sdk_s3::config::Builder::from(&shared_config)
+                .endpoint_url(endpoint.to_string())
+                .force_path_style(true)
+                .build(),
+        )
+    };
+
+    let client = mk_client(&config.s3_endpoint);
+    let presign_client = mk_client(&config.s3_public_endpoint);
+    let worker_presign_client = mk_client(&config.s3_workers_endpoint);
 
     info!(
-        "Connecting to MinIO/S3: {} (public: {})",
-        config.s3_endpoint, config.s3_public_endpoint
+        "Connecting to MinIO/S3: {} (public: {}, workers: {})",
+        config.s3_endpoint, config.s3_public_endpoint, config.s3_workers_endpoint
     );
     client
         .list_buckets()
@@ -171,8 +175,47 @@ pub async fn connect(config: &Config) -> anyhow::Result<StorageClient> {
     Ok(StorageClient::new(
         client,
         presign_client,
+        worker_presign_client,
         Duration::from_secs(config.s3_presign_ttl_secs),
     ))
+}
+
+// ── Shared presign helpers ────────────────────────────────────────────────────
+
+async fn presign_get_with(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    ttl: Duration,
+) -> Result<String, AppError> {
+    let config = PresigningConfig::expires_in(ttl)
+        .map_err(|e| AppError::InternalServerError(format!("presign config: {e}")))?;
+    client
+        .get_object()
+        .bucket(bucket)
+        .key(key)
+        .presigned(config)
+        .await
+        .map(|p| p.uri().to_string())
+        .map_err(|e| AppError::InternalServerError(e.to_string()))
+}
+
+async fn presign_put_with(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    ttl: Duration,
+) -> Result<String, AppError> {
+    let config = PresigningConfig::expires_in(ttl)
+        .map_err(|e| AppError::InternalServerError(format!("presign config: {e}")))?;
+    client
+        .put_object()
+        .bucket(bucket)
+        .key(key)
+        .presigned(config)
+        .await
+        .map(|p| p.uri().to_string())
+        .map_err(|e| AppError::InternalServerError(e.to_string()))
 }
 
 async fn ensure_staging_lifecycle(client: &Client, bucket: &str) -> anyhow::Result<()> {

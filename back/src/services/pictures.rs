@@ -112,6 +112,8 @@ pub struct PictureListItem {
     pub height: Option<i32>,
     pub captured_at: Option<NaiveDateTime>,
     pub ingested_at: NaiveDateTime,
+    /// BlurHash string for progressive loading. `None` until the thumbnail worker runs.
+    pub blurhash: Option<String>,
     pub thumbnail_url: Option<String>,
 }
 
@@ -295,6 +297,7 @@ pub async fn list_pictures(
             height: pic.height,
             captured_at: pic.captured_at,
             ingested_at: pic.ingested_at,
+            blurhash: pic.blurhash.clone(),
             thumbnail_url,
         });
     }

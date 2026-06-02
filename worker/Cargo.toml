@@ -8,6 +8,7 @@ name = "archypix-worker"
 path = "src/main.rs"
 
 [dependencies]
+archypix-common = { path = "../common" }
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 reqwest = { version = "0.12", features = ["json", "stream"] }
@@ -21,7 +22,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
-magick_rust = "0.19"
+magick_rust = "2"
 rexiv2 = "0.10"
 num-rational = "0.4"
 blurhash = "0.2"

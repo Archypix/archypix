@@ -418,7 +418,6 @@ CREATE TABLE jobs
 
     -- Result (populated when completed)
     result          JSONB               DEFAULT '{}',
-    result_s3_keys  TEXT[], -- S3 keys of generated artifacts
 
     -- Error handling
     error_message   TEXT,

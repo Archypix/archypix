@@ -1,4 +1,5 @@
 use anyhow::Context;
+use archypix_common::job::JobType;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -14,7 +15,8 @@ pub struct Config {
     // Job polling
     pub poll_interval_ms: u64,
     pub max_concurrent_jobs: usize,
-    pub job_types: Vec<String>, // empty = accept all
+    /// Job types this worker handles. Empty = accept all types.
+    pub job_types: Vec<JobType>,
 
     // HTTP server (health check)
     pub listen_addr: String,
@@ -48,10 +50,16 @@ impl Config {
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
+            .filter_map(|s| match s.parse::<JobType>() {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    tracing::warn!("ignoring unknown job type in JOB_TYPES: {e}");
+                    None
+                }
+            })
             .collect();
 
-        let listen_addr =
-            std::env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:9000".to_string());
+        let listen_addr = std::env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:80".to_string());
 
         Ok(Config {
             back_url,
@@ -65,17 +73,12 @@ impl Config {
             listen_addr,
         })
     }
-
-    pub fn job_types_query(&self) -> String {
-        self.job_types.join(",")
-    }
 }
 
 fn require_env(name: &str) -> anyhow::Result<String> {
-    let val = std::env::var(name)
-        .with_context(|| format!("{name} environment variable must be specified"))?;
+    let val = std::env::var(name).with_context(|| format!("{name} must be specified"))?;
     if val.trim().is_empty() {
-        anyhow::bail!("{name} environment variable cannot be empty");
+        anyhow::bail!("{name} cannot be empty");
     }
     Ok(val)
 }

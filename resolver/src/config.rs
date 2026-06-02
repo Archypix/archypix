@@ -29,7 +29,7 @@ impl Config {
         dotenvy::dotenv().ok();
 
         let config = Config {
-            listen_addr: env("LISTEN_ADDR", "0.0.0.0:8080".to_string()),
+            listen_addr: env("LISTEN_ADDR", "0.0.0.0:80".to_string()),
 
             db_host: require_env("DB_HOST")?,
             db_port: env_u16("DB_PORT", 5432)?,

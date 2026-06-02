@@ -145,7 +145,7 @@ an empty result.
 
 ## Health check
 
-A minimal HTTP server runs on `LISTEN_ADDR` (default `0.0.0.0:9000`) and exposes:
+A minimal HTTP server runs on `LISTEN_ADDR` (default `0.0.0.0:80`) and exposes:
 
 ```
 GET /health  →  200  {"status": "healthy", "service": "archypix-worker"}

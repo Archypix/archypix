@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, owner_id,\n                      job_type    AS \"job_type: JobType\",\n                      status      AS \"status: JobStatus\",\n                      config      AS \"config: _\",\n                      result      AS \"result: _\",\n                      result_s3_keys,\n                      error_message,\n                      retry_count, max_retries,\n                      idempotency_key,\n                      picture_id, claimed_by,\n                      created_at, started_at, completed_at\n               FROM   jobs\n               WHERE  picture_id = $1\n                 AND  owner_id   = $2\n               ORDER BY created_at DESC",
+  "query": "UPDATE jobs\n               SET status     = 'processing',\n                   started_at = (now() AT TIME ZONE 'utc'),\n                   claimed_by = $2\n               WHERE id = $1\n               RETURNING\n                   id, owner_id,\n                   job_type    AS \"job_type: JobType\",\n                   status      AS \"status: JobStatus\",\n                   config      AS \"config: _\",\n                   result      AS \"result: _\",\n                   error_message,\n                   retry_count, max_retries,\n                   idempotency_key,\n                   picture_id, claimed_by,\n                   created_at, started_at, completed_at",
   "describe": {
     "columns": [
       {
@@ -96,17 +96,6 @@
       },
       {
         "ordinal": 6,
-        "name": "result_s3_keys",
-        "type_info": "TextArray",
-        "origin": {
-          "Table": {
-            "table": "jobs",
-            "name": "result_s3_keys"
-          }
-        }
-      },
-      {
-        "ordinal": 7,
         "name": "error_message",
         "type_info": "Text",
         "origin": {
@@ -117,7 +106,7 @@
         }
       },
       {
-        "ordinal": 8,
+        "ordinal": 7,
         "name": "retry_count",
         "type_info": "Int4",
         "origin": {
@@ -128,7 +117,7 @@
         }
       },
       {
-        "ordinal": 9,
+        "ordinal": 8,
         "name": "max_retries",
         "type_info": "Int4",
         "origin": {
@@ -139,7 +128,7 @@
         }
       },
       {
-        "ordinal": 10,
+        "ordinal": 9,
         "name": "idempotency_key",
         "type_info": "Varchar",
         "origin": {
@@ -150,7 +139,7 @@
         }
       },
       {
-        "ordinal": 11,
+        "ordinal": 10,
         "name": "picture_id",
         "type_info": "Uuid",
         "origin": {
@@ -161,7 +150,7 @@
         }
       },
       {
-        "ordinal": 12,
+        "ordinal": 11,
         "name": "claimed_by",
         "type_info": "Text",
         "origin": {
@@ -172,7 +161,7 @@
         }
       },
       {
-        "ordinal": 13,
+        "ordinal": 12,
         "name": "created_at",
         "type_info": "Timestamp",
         "origin": {
@@ -183,7 +172,7 @@
         }
       },
       {
-        "ordinal": 14,
+        "ordinal": 13,
         "name": "started_at",
         "type_info": "Timestamp",
         "origin": {
@@ -194,7 +183,7 @@
         }
       },
       {
-        "ordinal": 15,
+        "ordinal": 14,
         "name": "completed_at",
         "type_info": "Timestamp",
         "origin": {
@@ -208,7 +197,7 @@
     "parameters": {
       "Left": [
         "Uuid",
-        "Uuid"
+        "Text"
       ]
     },
     "nullable": [
@@ -217,7 +206,6 @@
       false,
       false,
       false,
-      true,
       true,
       true,
       false,
@@ -230,5 +218,5 @@
       true
     ]
   },
-  "hash": "05df842fc790171779724cfbfe417b8b99f3164bdb39cf8c358869be10159c36"
+  "hash": "4c236d825b084398cf727bee4c101d91a45ef83cb75de59777a716ef0cd3c2c7"
 }

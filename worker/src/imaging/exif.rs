@@ -1,6 +1,6 @@
-use crate::backend::models::ExtractedExif;
 use crate::error::{Result, WorkerError};
-use rexiv2::Metadata;
+use archypix_common::job::{ExifOverrides, ExtractedExif};
+use rexiv2::{GpsInfo, Metadata};
 use std::path::Path;
 use tracing::debug;
 
@@ -23,9 +23,13 @@ pub fn extract_exif(path: &Path) -> Result<ExtractedExif> {
     );
 
     let gps = metadata.get_gps_info();
-    let gps_lat = gps.map(|g| g.latitude);
-    let gps_lng = gps.map(|g| g.longitude);
-    let gps_alt = gps.map(|g| g.altitude as i32);
+    let gps_lat = gps.as_ref().map(|g| g.latitude);
+    let gps_lng = gps.as_ref().map(|g| g.longitude);
+    // Altitude is only present when the tag exists; lat/lng without altitude is common.
+    let gps_alt = gps
+        .as_ref()
+        .filter(|_| metadata.has_tag("Exif.GPSInfo.GPSAltitude"))
+        .map(|g| g.altitude as i32);
 
     let orientation = match metadata.get_tag_numeric("Exif.Image.Orientation") {
         n @ 1..=8 => Some(n as i16),
@@ -95,6 +99,60 @@ pub fn extract_exif(path: &Path) -> Result<ExtractedExif> {
         orientation,
         exif_data,
     })
+}
+
+/// Write EXIF overrides into the file at `path` (in-place via rexiv2).
+///
+/// Only fields that are `Some` in `overrides` are written; existing values are
+/// left untouched for `None` fields.  Must run inside
+/// `tokio::task::spawn_blocking`.
+pub fn write_exif_overrides(path: &Path, overrides: &ExifOverrides) -> Result<()> {
+    let metadata = Metadata::new_from_path(path)
+        .map_err(|e| WorkerError::Exif(format!("failed to open file for EXIF write: {e}")))?;
+
+    if let Some(dt) = overrides.captured_at {
+        let s = dt.format("%Y:%m:%d %H:%M:%S").to_string();
+        // Write to all three common date/time tags; ignore individual failures
+        // (not every format supports every tag).
+        for tag in &[
+            "Exif.Photo.DateTimeOriginal",
+            "Exif.Photo.DateTimeDigitized",
+            "Exif.Image.DateTime",
+        ] {
+            let _ = metadata.set_tag_string(tag, &s);
+        }
+    }
+
+    if let Some(orientation) = overrides.orientation {
+        let _ = metadata.set_tag_numeric("Exif.Image.Orientation", orientation as i32);
+    }
+
+    // GPS: only touch GPS tags when at least one coordinate is supplied.
+    if overrides.gps_lat.is_some() || overrides.gps_lng.is_some() {
+        let gps = GpsInfo {
+            longitude: overrides.gps_lng.unwrap_or(0.0),
+            latitude: overrides.gps_lat.unwrap_or(0.0),
+            altitude: overrides.gps_alt.unwrap_or(0) as f64,
+        };
+        let _ = metadata.set_gps_info(&gps);
+    }
+
+    if let Some(ref brand) = overrides.camera_brand {
+        let _ = metadata.set_tag_string("Exif.Image.Make", brand);
+    }
+    if let Some(ref model) = overrides.camera_model {
+        let _ = metadata.set_tag_string("Exif.Image.Model", model);
+    }
+    if let Some(iso) = overrides.iso_speed {
+        let _ = metadata.set_tag_numeric("Exif.Photo.ISOSpeedRatings", iso);
+    }
+
+    metadata
+        .save_to_file(path)
+        .map_err(|e| WorkerError::Exif(format!("failed to save EXIF overrides: {e}")))?;
+
+    debug!(path = %path.display(), "EXIF overrides written");
+    Ok(())
 }
 
 fn extract_first_tag(metadata: &Metadata, tags: &[&str]) -> Option<String> {

@@ -1,37 +1,100 @@
-# Archypix development federation stack — 3 backends
+# Archypix development federation stack — 3 backends + 3 workers
 #
 # Topology:
-#   resolver:  manages archypix.local          → port 8080
-#   backend1:  uses resolver, archypix.local   → port 8001
-#   backend2:  uses resolver, archypix.local   → port 8002
-#   backend3:  standalone (own resolver)       → port 8003
+#   resolver:   manages archypix.test            → archypix.test
+#   backend1:   uses resolver, archypix.test     → b1.archypix.test
+#   backend2:   uses resolver, archypix.test     → b2.archypix.test
+#   backend3:   standalone (own resolver)        → solo.archypix.test
+#   worker1-3:  one worker per backend
 #
 # All inter-service traffic uses HTTP (BACK_USE_HTTPS=false, FEDERATION_USE_HTTPS=false).
 #
+# Traefik (172.30.0.10) routes fake hostnames to the right containers so that
+# inter-backend federation works from inside the Docker network:
+#   archypix.test      → resolver:80
+#   b1.archypix.test   → backend1:80
+#   b2.archypix.test   → backend2:80
+#   solo.archypix.test → backend3:80
+# Before starting the stack, add ./hosts entries to /etc/hosts on your machine:
+#   sudo tee -a /etc/hosts < hosts
+#
 # Source code is mounted directly — restart a container to recompile:
-#   docker compose -f docker-compose.dev.yml restart backend1
+#   docker compose -f docker-compose.dev.yml restart backend1 worker1
 #
 # If you change Cargo.toml/Cargo.lock, rebuild the image:
-#   docker compose -f docker-compose.dev.yml build backend1
+#   docker compose -f docker-compose.dev.yml build backend1 worker1
 #
 # Usage:
 #   docker compose -f docker-compose.dev.yml up --build
-#   Frontend: open front-test/index.html — set backend to http://localhost:8001, :8002, or :8003
+#   Frontend: open front-test/index.html — set backend to http://b1.archypix.test,
+#             http://b2.archypix.test, or http://solo.archypix.test
 
+# ── Shared volume mounts ──────────────────────────────────────────────────────
+# All workspace services (back + worker) share the same mount list and the same
+# build-cache volume. Cargo uses /workspace/target for all members, so sharing
+# it avoids duplicate compilation of common dependencies.
+x-workspace-volumes: &workspace-volumes
+  # Back source + SQLx metadata
+  - ./back/.sqlx:/workspace/back/.sqlx
+  - ./back/migrations:/workspace/back/migrations
+  - ./back/src:/workspace/back/src
+  - ./back/Cargo.toml:/workspace/back/Cargo.toml
+  # Worker source
+  - ./worker/src:/workspace/worker/src
+  - ./worker/Cargo.toml:/workspace/worker/Cargo.toml
+  # Common source
+  - ./common/src:/workspace/common/src
+  - ./common/Cargo.toml:/workspace/common/Cargo.toml
+  # Resolver source
+  - ./resolver/src:/workspace/resolver/src
+  - ./resolver/Cargo.toml:/workspace/resolver/Cargo.toml
+  # Fed test source
+  - ./fed-test/src:/workspace/fed-test/src
+  - ./fed-test/Cargo.toml:/workspace/fed-test/Cargo.toml
+  # Workspace root
+  - ./Cargo.toml:/workspace/Cargo.toml
+  - ./Cargo.lock:/workspace/Cargo.lock
+  # Shared build cache
+  - workspace_target:/workspace/target
+
+# ── Extra hosts injected into every backend/worker container ─────────────────
+# Maps all fake hostnames to Traefik's static IP so that inter-service requests
+# (federation, WebFinger) resolve correctly from inside any container.
+x-backend-extra-hosts: &backend-extra-hosts
+  - "archypix.test:172.30.0.10"
+  - "b1.archypix.test:172.30.0.10"
+  - "b2.archypix.test:172.30.0.10"
+  - "solo.archypix.test:172.30.0.10"
+
+# ── Services ──────────────────────────────────────────────────────────────────
 services:
+  traefik:
+    image: traefik:v3
+    container_name: archypix-traefik
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=archypix"
+      - "--entrypoints.web.address=:80"
+    ports:
+      - "80:80"
+    networks:
+      archypix:
+        ipv4_address: 172.30.0.10
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
   resolver:
     build:
       context: ./resolver
       target: dev
     container_name: archypix-resolver
-    ports:
-      - "8080:8080"
     environment:
       DB_HOST: postgres
       DB_USER: archypix
       DB_PASSWORD: archypix
       DB_NAME: archypix_resolver
-      GLOBAL_DOMAIN: localhost:8080
+      GLOBAL_DOMAIN: archypix.test
       RESOLVER_JWT_SECRET: devsecret
       CORS_ORIGINS: "*"
       RUST_LOG: info,archypix_resolver=trace
@@ -40,31 +103,32 @@ services:
       - ./resolver/Cargo.lock:/app/Cargo.lock
       - ./resolver/src:/app/src
       - resolver_target:/app/target
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8080/health" ]
-      interval: 10s
-      timeout: 1s
-      retries: 2
-      start_period: 5s
+    networks:
+      - archypix
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.resolver.rule=Host(`archypix.test`)"
+      - "traefik.http.routers.resolver.entrypoints=web"
+      - "traefik.http.services.resolver.loadbalancer.server.port=80"
     depends_on:
       postgres:
         condition: service_healthy
 
   backend1:
     build:
-      context: ./back
+      context: .
+      dockerfile: back/Dockerfile
       target: dev
+    image: archypix-back:dev
     container_name: archypix-back1
-    ports:
-      - "8001:8000"
     env_file:
       - .env.back.common
     environment:
-      BACK_DOMAIN: localhost:8001
-      BACK_INTERNAL_URL: http://backend1:8000
-      GLOBAL_DOMAIN: localhost:8080
+      BACK_DOMAIN: b1.archypix.test
+      BACK_INTERNAL_URL: http://backend1
+      GLOBAL_DOMAIN: archypix.test
       USE_RESOLVER: "true"
-      RESOLVER_INTERNAL_URL: http://resolver:8080
+      RESOLVER_INTERNAL_URL: http://resolver
       RESOLVER_JWT_SECRET: devsecret
       JWT_SECRET: devjwtsecret1
       DB_HOST: postgres
@@ -73,26 +137,22 @@ services:
       DB_NAME: archypix_back1
       REDIS_HOST: redis
       REDIS_PASSWORD: archypix
-      REDIS_DB: "0"
+      REDIS_DB: "1"
       S3_BUCKET_STAGING: b1-archypix-staging
       S3_BUCKET_PICTURES: b1-archypix-pictures
       S3_BUCKET_VERSIONS: b1-archypix-versions
       S3_BUCKET_SMALL: b1-archypix-small
       S3_BUCKET_MEDIUM: b1-archypix-medium
       S3_BUCKET_LARGE: b1-archypix-large
-    volumes:
-      - ./back/.sqlx:/app/.sqlx
-      - ./back/migrations:/app/migrations
-      - ./back/src:/app/src
-      - ./back/Cargo.toml:/app/Cargo.toml
-      - ./back/Cargo.lock:/app/Cargo.lock
-      - back_target:/app/target
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
-      interval: 10s
-      timeout: 1s
-      retries: 2
-      start_period: 5s
+    volumes: *workspace-volumes
+    extra_hosts: *backend-extra-hosts
+    networks:
+      - archypix
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.backend1.rule=Host(`b1.archypix.test`)"
+      - "traefik.http.routers.backend1.entrypoints=web"
+      - "traefik.http.services.backend1.loadbalancer.server.port=80"
     depends_on:
       postgres:
         condition: service_healthy
@@ -104,20 +164,16 @@ services:
         condition: service_healthy
 
   backend2:
-    build:
-      context: ./back
-      target: dev
+    image: archypix-back:dev
     container_name: archypix-back2
-    ports:
-      - "8002:8000"
     env_file:
       - .env.back.common
     environment:
-      BACK_DOMAIN: localhost:8002
-      BACK_INTERNAL_URL: http://backend2:8000
-      GLOBAL_DOMAIN: localhost:8080
+      BACK_DOMAIN: b2.archypix.test
+      BACK_INTERNAL_URL: http://backend2
+      GLOBAL_DOMAIN: archypix.test
       USE_RESOLVER: "true"
-      RESOLVER_INTERNAL_URL: http://resolver:8080
+      RESOLVER_INTERNAL_URL: http://resolver
       RESOLVER_JWT_SECRET: devsecret
       JWT_SECRET: devjwtsecret2
       DB_HOST: postgres
@@ -126,26 +182,22 @@ services:
       DB_NAME: archypix_back2
       REDIS_HOST: redis
       REDIS_PASSWORD: archypix
-      REDIS_DB: "1"
+      REDIS_DB: "2"
       S3_BUCKET_STAGING: b2-archypix-staging
       S3_BUCKET_PICTURES: b2-archypix-pictures
       S3_BUCKET_VERSIONS: b2-archypix-versions
       S3_BUCKET_SMALL: b2-archypix-small
       S3_BUCKET_MEDIUM: b2-archypix-medium
       S3_BUCKET_LARGE: b2-archypix-large
-    volumes:
-      - ./back/.sqlx:/app/.sqlx
-      - ./back/migrations:/app/migrations
-      - ./back/src:/app/src
-      - ./back/Cargo.toml:/app/Cargo.toml
-      - ./back/Cargo.lock:/app/Cargo.lock
-      - back_target:/app/target
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
-      interval: 10s
-      timeout: 1s
-      retries: 2
-      start_period: 5s
+    volumes: *workspace-volumes
+    extra_hosts: *backend-extra-hosts
+    networks:
+      - archypix
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.backend2.rule=Host(`b2.archypix.test`)"
+      - "traefik.http.routers.backend2.entrypoints=web"
+      - "traefik.http.services.backend2.loadbalancer.server.port=80"
     depends_on:
       postgres:
         condition: service_healthy
@@ -157,17 +209,13 @@ services:
         condition: service_healthy
 
   backend3:
-    build:
-      context: ./back
-      target: dev
+    image: archypix-back:dev
     container_name: archypix-back3
-    ports:
-      - "8003:8000"
     env_file:
       - .env.back.common
     environment:
-      BACK_DOMAIN: localhost:8003
-      GLOBAL_DOMAIN: localhost:8003
+      BACK_DOMAIN: solo.archypix.test
+      GLOBAL_DOMAIN: solo.archypix.test
       USE_RESOLVER: "false"
       JWT_SECRET: devjwtsecret3
       DB_HOST: postgres
@@ -176,32 +224,86 @@ services:
       DB_NAME: archypix_back3
       REDIS_HOST: redis
       REDIS_PASSWORD: archypix
-      REDIS_DB: "2"
+      REDIS_DB: "3"
       S3_BUCKET_STAGING: b3-archypix-staging
       S3_BUCKET_PICTURES: b3-archypix-pictures
       S3_BUCKET_VERSIONS: b3-archypix-versions
       S3_BUCKET_SMALL: b3-archypix-small
       S3_BUCKET_MEDIUM: b3-archypix-medium
       S3_BUCKET_LARGE: b3-archypix-large
-    volumes:
-      - ./back/.sqlx:/app/.sqlx
-      - ./back/migrations:/app/migrations
-      - ./back/src:/app/src
-      - ./back/Cargo.toml:/app/Cargo.toml
-      - ./back/Cargo.lock:/app/Cargo.lock
-      - back_target:/app/target
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
-      interval: 10s
-      timeout: 1s
-      retries: 2
-      start_period: 5s
+    volumes: *workspace-volumes
+    extra_hosts: *backend-extra-hosts
+    networks:
+      - archypix
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.backend3.rule=Host(`solo.archypix.test`)"
+      - "traefik.http.routers.backend3.entrypoints=web"
+      - "traefik.http.services.backend3.loadbalancer.server.port=80"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
       minio:
+        condition: service_healthy
+
+  worker1:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+      target: dev
+    image: archypix-worker:dev
+    container_name: archypix-worker1
+    env_file:
+      - .env.worker.common
+    environment:
+      WORKER_ID: worker1
+      BACK_URL: http://backend1
+      BACK_DOMAIN: b1.archypix.test
+      GLOBAL_DOMAIN: archypix.test
+    volumes: *workspace-volumes
+    extra_hosts: *backend-extra-hosts
+    networks:
+      - archypix
+    depends_on:
+      backend1:
+        condition: service_healthy
+
+  worker2:
+    image: archypix-worker:dev
+    container_name: archypix-worker2
+    env_file:
+      - .env.worker.common
+    environment:
+      WORKER_ID: worker2
+      BACK_URL: http://backend2
+      BACK_DOMAIN: b2.archypix.test
+      GLOBAL_DOMAIN: archypix.test
+    volumes: *workspace-volumes
+    extra_hosts: *backend-extra-hosts
+    networks:
+      - archypix
+    depends_on:
+      backend2:
+        condition: service_healthy
+
+  worker3:
+    image: archypix-worker:dev
+    container_name: archypix-worker3
+    env_file:
+      - .env.worker.common
+    environment:
+      WORKER_ID: worker3
+      BACK_URL: http://backend3
+      BACK_DOMAIN: solo.archypix.test
+      GLOBAL_DOMAIN: solo.archypix.test
+    volumes: *workspace-volumes
+    extra_hosts: *backend-extra-hosts
+    networks:
+      - archypix
+    depends_on:
+      backend3:
         condition: service_healthy
 
   postgres:
@@ -216,6 +318,8 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/postgres-init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - archypix
     healthcheck:
       test: [ "CMD", "pg_isready", "-U", "archypix", "-d", "archypix_resolver" ]
       interval: 10s
@@ -228,6 +332,8 @@ services:
     command: redis-server --requirepass archypix --appendonly yes
     volumes:
       - redis_data:/data
+    networks:
+      - archypix
     healthcheck:
       test: [ "CMD", "redis-cli", "ping" ]
       interval: 10s
@@ -246,16 +352,25 @@ services:
       MINIO_ROOT_PASSWORD: archypix
     volumes:
       - minio_data:/data
+    networks:
+      - archypix
     healthcheck:
       test: [ "CMD", "mc", "ready", "local" ]
       interval: 10s
       timeout: 2s
       retries: 2
 
+networks:
+  archypix:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
 volumes:
   # Cargo build caches — pre-seeded from image on first start, persist across restarts.
   resolver_target:
-  back_target:
+  workspace_target:   # shared by all back + worker services
   # Infrastructure data
   postgres_data:
   redis_data:

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, owner_id,\n                      job_type    AS \"job_type: JobType\",\n                      status      AS \"status: JobStatus\",\n                      config      AS \"config: _\",\n                      result      AS \"result: _\",\n                      result_s3_keys,\n                      error_message,\n                      retry_count, max_retries,\n                      idempotency_key,\n                      picture_id, claimed_by,\n                      created_at, started_at, completed_at\n               FROM   jobs\n               WHERE  id = $1",
+  "query": "UPDATE jobs\n               SET status        = CASE\n                                       WHEN $3 OR retry_count + 1 >= max_retries\n                                           THEN 'failed'::job_status\n                                       ELSE 'pending'::job_status\n                                   END,\n                   retry_count   = retry_count + 1,\n                   error_message = $2,\n                   started_at    = CASE\n                                       WHEN $3 OR retry_count + 1 >= max_retries THEN started_at\n                                       ELSE NULL\n                                   END,\n                   claimed_by    = NULL,\n                   completed_at  = CASE\n                                       WHEN $3 OR retry_count + 1 >= max_retries\n                                           THEN (now() AT TIME ZONE 'utc')\n                                       ELSE NULL\n                                   END\n               WHERE id = $1\n               RETURNING\n                   id, owner_id,\n                   job_type    AS \"job_type: JobType\",\n                   status      AS \"status: JobStatus\",\n                   config      AS \"config: _\",\n                   result      AS \"result: _\",\n                   error_message,\n                   retry_count, max_retries,\n                   idempotency_key,\n                   picture_id, claimed_by,\n                   created_at, started_at, completed_at",
   "describe": {
     "columns": [
       {
@@ -96,17 +96,6 @@
       },
       {
         "ordinal": 6,
-        "name": "result_s3_keys",
-        "type_info": "TextArray",
-        "origin": {
-          "Table": {
-            "table": "jobs",
-            "name": "result_s3_keys"
-          }
-        }
-      },
-      {
-        "ordinal": 7,
         "name": "error_message",
         "type_info": "Text",
         "origin": {
@@ -117,7 +106,7 @@
         }
       },
       {
-        "ordinal": 8,
+        "ordinal": 7,
         "name": "retry_count",
         "type_info": "Int4",
         "origin": {
@@ -128,7 +117,7 @@
         }
       },
       {
-        "ordinal": 9,
+        "ordinal": 8,
         "name": "max_retries",
         "type_info": "Int4",
         "origin": {
@@ -139,7 +128,7 @@
         }
       },
       {
-        "ordinal": 10,
+        "ordinal": 9,
         "name": "idempotency_key",
         "type_info": "Varchar",
         "origin": {
@@ -150,7 +139,7 @@
         }
       },
       {
-        "ordinal": 11,
+        "ordinal": 10,
         "name": "picture_id",
         "type_info": "Uuid",
         "origin": {
@@ -161,7 +150,7 @@
         }
       },
       {
-        "ordinal": 12,
+        "ordinal": 11,
         "name": "claimed_by",
         "type_info": "Text",
         "origin": {
@@ -172,7 +161,7 @@
         }
       },
       {
-        "ordinal": 13,
+        "ordinal": 12,
         "name": "created_at",
         "type_info": "Timestamp",
         "origin": {
@@ -183,7 +172,7 @@
         }
       },
       {
-        "ordinal": 14,
+        "ordinal": 13,
         "name": "started_at",
         "type_info": "Timestamp",
         "origin": {
@@ -194,7 +183,7 @@
         }
       },
       {
-        "ordinal": 15,
+        "ordinal": 14,
         "name": "completed_at",
         "type_info": "Timestamp",
         "origin": {
@@ -207,7 +196,9 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid"
+        "Uuid",
+        "Text",
+        "Bool"
       ]
     },
     "nullable": [
@@ -216,7 +207,6 @@
       false,
       false,
       false,
-      true,
       true,
       true,
       false,
@@ -229,5 +219,5 @@
       true
     ]
   },
-  "hash": "d9d1b35904c5d95317af728899840247194c2216018de861f85b4c886629e906"
+  "hash": "11310d55b4870fe7a31f2b9468df6e2dd0ed0bd11779cedd22fbf15d5ac1a85b"
 }
