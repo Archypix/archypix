@@ -1,7 +1,7 @@
 //! Handler for `gen_thumbnail` jobs.
 //!
 //! Sequence: MIME pre-flight → download → EXIF extraction (initial only)
-//! → thumbnail generation → upload.
+//! → file_size + file_hash → thumbnail generation → upload → complete.
 //!
 //! Error policy:
 //! - Unsupported MIME for thumbnailing  → `WorkerError::UnsupportedFormat` (permanent)
@@ -12,17 +12,17 @@
 
 use crate::backend::BackendClient;
 use crate::error::{Result, WorkerError};
-use crate::imaging::{exif as exif_mod, thumbnailer};
+use crate::imaging::{exif as exif_mod, hash as hash_mod, thumbnailer};
 use archypix_common::job::{ExtractedExif, GenThumbnailConfig};
 use archypix_common::transfer::{CompleteJobRequest, PresignedWrites};
 use tempfile::TempDir;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-/// Handle a `gen_thumbnail` job.
 pub async fn handle(
     client: &BackendClient,
     job_id: Uuid,
+    claim_token: Uuid,
     config: GenThumbnailConfig,
     presigned_read: Option<String>,
     presigned_writes: PresignedWrites,
@@ -58,12 +58,11 @@ pub async fn handle(
     client
         .download_presigned(&presigned_read, &original_path)
         .await?;
-    debug!(
-        size_bytes = std::fs::metadata(&original_path)
-            .map(|m| m.len())
-            .unwrap_or(0),
-        "gen_thumbnail: original downloaded"
-    );
+
+    let file_size = std::fs::metadata(&original_path)
+        .map(|m| m.len() as i64)
+        .ok();
+    debug!(size_bytes = ?file_size, "gen_thumbnail: original downloaded");
 
     // ── EXIF extraction (initial jobs only, blocking) ─────────────────────────
     let exif: Option<ExtractedExif> = if should_extract_exif {
@@ -85,6 +84,19 @@ pub async fn handle(
         None
     };
 
+    // ── File hash (blocking) ─────────────────────────────────────────────────
+    let path_for_hash = original_path.clone();
+    let file_hash = match tokio::task::spawn_blocking(move || hash_mod::hash_file(&path_for_hash))
+        .await
+        .map_err(|e| WorkerError::Imaging(format!("spawn_blocking panicked: {e}")))?
+    {
+        Ok(h) => Some(h),
+        Err(e) => {
+            warn!(error = ?e, "gen_thumbnail: file hash failed; skipping");
+            None
+        }
+    };
+
     // ── Thumbnails + BlurHash + upload ────────────────────────────────────────
     let thumb = thumbnailer::run(client, &original_path, &presigned_writes, tmp.path()).await?;
 
@@ -92,9 +104,12 @@ pub async fn handle(
         .complete_job(
             job_id,
             CompleteJobRequest {
+                claim_token,
                 exif,
                 blurhash: thumb.blurhash,
                 thumbnails_generated: thumb.generated,
+                file_size,
+                file_hash,
             },
         )
         .await?;

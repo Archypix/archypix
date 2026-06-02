@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, owner_id,\n                      job_type    AS \"job_type: JobType\",\n                      status      AS \"status: JobStatus\",\n                      config      AS \"config: _\",\n                      result      AS \"result: _\",\n                      error_message,\n                      retry_count, max_retries,\n                      idempotency_key,\n                      picture_id, claimed_by,\n                      created_at, started_at, completed_at\n               FROM   jobs\n               WHERE  picture_id = $1\n                 AND  owner_id   = $2\n               ORDER BY created_at DESC",
+  "query": "SELECT id, owner_id,\n                      job_type    AS \"job_type: JobType\",\n                      status      AS \"status: JobStatus\",\n                      config      AS \"config: _\",\n                      result      AS \"result: _\",\n                      error_message,\n                      retry_count, max_retries,\n                      idempotency_key,\n                      picture_id, claimed_by, claim_token,\n                      created_at, started_at, completed_at\n               FROM   jobs\n               WHERE  picture_id = $1\n                 AND  owner_id   = $2\n               ORDER BY created_at DESC",
   "describe": {
     "columns": [
       {
@@ -162,6 +162,17 @@
       },
       {
         "ordinal": 12,
+        "name": "claim_token",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "claim_token"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
         "name": "created_at",
         "type_info": "Timestamp",
         "origin": {
@@ -172,7 +183,7 @@
         }
       },
       {
-        "ordinal": 13,
+        "ordinal": 14,
         "name": "started_at",
         "type_info": "Timestamp",
         "origin": {
@@ -183,7 +194,7 @@
         }
       },
       {
-        "ordinal": 14,
+        "ordinal": 15,
         "name": "completed_at",
         "type_info": "Timestamp",
         "origin": {
@@ -213,10 +224,11 @@
       true,
       true,
       true,
+      true,
       false,
       true,
       true
     ]
   },
-  "hash": "de67f9a6c09813324e649f0acd9c7b8fa93b0faa32d4ae502b2ed2d92bfd1bc8"
+  "hash": "f321e8d24a7e02d5f121421f340e8042260c17ea1eb56d5a01057a29fadbad6c"
 }

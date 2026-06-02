@@ -1,6 +1,6 @@
 use crate::backend::BackendClient;
 use crate::error::{Result, WorkerError};
-use crate::imaging::{exif as exif_mod, thumbnailer};
+use crate::imaging::{exif as exif_mod, hash as hash_mod, thumbnailer};
 use archypix_common::job::EditPictureConfig;
 use archypix_common::transfer::{CompleteJobRequest, PresignedWrites};
 use tempfile::TempDir;
@@ -12,19 +12,17 @@ use uuid::Uuid;
 /// Processing order:
 /// 1. Download the original file.
 /// 2. If `exif_overrides` is set: write them into the file's embedded EXIF.
-/// 3. If `visual` transforms are set: apply them (crop/resize — **not yet
-///    implemented**; thumbnails are regenerated from the current file as a
-///    best-effort fallback).
-/// 4. Upload the (possibly modified) file to the `output` presigned URL so the
-///    stored original always reflects the latest edits.
+///    A write failure is a permanent error — the file format may not support
+///    embedded metadata (e.g. some raw formats). MIME screening will be added
+///    server-side to prevent creating such jobs in the first place.
+/// 3. Compute file_size and file_hash from the (possibly modified) file.
+/// 4. Upload the file to the `output` presigned URL.
 /// 5. If the backend provided thumbnail presigned URLs (visual edit): regenerate
 ///    and upload all three variants plus a new BlurHash.
-///
-/// Note: the backend independently applies `exif_overrides` to the picture row
-/// columns at completion time, so the DB and the stored file stay in sync.
 pub async fn handle(
     client: &BackendClient,
     job_id: Uuid,
+    claim_token: Uuid,
     config: EditPictureConfig,
     presigned_read: Option<String>,
     presigned_writes: PresignedWrites,
@@ -60,24 +58,29 @@ pub async fn handle(
         let overrides = overrides.clone();
         tokio::task::spawn_blocking(move || exif_mod::write_exif_overrides(&path, &overrides))
             .await
-            .map_err(|e| WorkerError::Imaging(format!("spawn_blocking panicked: {e}")))?
-            .map_err(|e| {
-                // EXIF write failures are permanent — the file format may not
-                // support embedded metadata (e.g. some raw formats).
-                warn!(error = ?e, job_id = %job_id, "EXIF write failed; uploading file as-is");
-                e
-            })
-            // Non-fatal: log and continue so the file is still uploaded.
-            .unwrap_or(());
+            .map_err(|e| WorkerError::Imaging(format!("spawn_blocking panicked: {e}")))??;
     }
 
     // ── Visual transforms ────────────────────────────────────────────────────
     // TODO: implement crop / resize once the imaging primitives are ready.
-    // The output presigned URL is already available; the transformed file just
-    // needs to be written to `file_path` before the upload below.
     if config.visual.is_some() {
         warn!(job_id = %job_id, "visual transforms not yet implemented; uploading original");
     }
+
+    // ── File size + hash (after EXIF write, so values match what is uploaded) ─
+    let file_size = std::fs::metadata(&file_path).map(|m| m.len() as i64).ok();
+
+    let path_for_hash = file_path.clone();
+    let file_hash = match tokio::task::spawn_blocking(move || hash_mod::hash_file(&path_for_hash))
+        .await
+        .map_err(|e| WorkerError::Imaging(format!("spawn_blocking panicked: {e}")))?
+    {
+        Ok(h) => Some(h),
+        Err(e) => {
+            warn!(error = ?e, "edit_picture: file hash failed; skipping");
+            None
+        }
+    };
 
     // ── Upload modified original ─────────────────────────────────────────────
     info!(job_id = %job_id, "edit_picture: uploading modified original");
@@ -90,11 +93,12 @@ pub async fn handle(
         .complete_job(
             job_id,
             CompleteJobRequest {
-                // EXIF overrides are applied server-side from the job config;
-                // we do not re-extract them here.
+                claim_token,
                 exif: None,
                 blurhash: thumb.blurhash,
                 thumbnails_generated: thumb.generated,
+                file_size,
+                file_hash,
             },
         )
         .await?;

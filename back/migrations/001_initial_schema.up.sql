@@ -133,7 +133,10 @@ CREATE TABLE pictures
     orientation             SMALLINT,
     -- Set to NOW() when a worker first generates thumbnails for this picture.
     -- NULL means thumbnails have never been generated.
-    thumbnails_generated_at TIMESTAMP
+    thumbnails_generated_at TIMESTAMP,
+    -- SHA-256 hex digest of the stored file; computed by workers.
+    -- Serves as the WebDAV ETag (future WebDAV implementation).
+    file_hash               TEXT
 );
 
 CREATE INDEX idx_pictures_local_user ON pictures (local_user_id);
@@ -431,6 +434,9 @@ CREATE TABLE jobs
     picture_id UUID REFERENCES pictures (id) ON DELETE CASCADE,
     -- Worker instance ID while status = 'processing'
     claimed_by TEXT,
+    -- One-time UUID issued at claim time; the worker must echo it back in
+    -- complete/fail so stale workers cannot corrupt a re-claimed job.
+    claim_token UUID,
 
     -- Timestamps
     created_at      TIMESTAMP  NOT NULL DEFAULT (now() at time zone 'utc'),
@@ -668,7 +674,9 @@ COMMENT ON TABLE user_settings IS 'Per-user preferences; created on first access
 -- ============================================================================
 CREATE TABLE picture_versions
 (
-    id             UUID PRIMARY KEY   DEFAULT uuid_generate_v4(),
+    -- id is the version UUID used as the S3 key suffix: {user_id}/{picture_id}/{id}
+    -- No DEFAULT — callers must pass the same UUID they used for the S3 copy.
+    id UUID PRIMARY KEY,
     picture_id     UUID      NOT NULL REFERENCES pictures (id) ON DELETE CASCADE,
     version_number INT       NOT NULL,
     file_size      BIGINT,
@@ -680,4 +688,4 @@ CREATE TABLE picture_versions
 
 CREATE INDEX idx_picture_versions_picture ON picture_versions (picture_id);
 
-COMMENT ON TABLE picture_versions IS 'Versioned snapshots of picture files in archypix-versions bucket; keyed by {user_id}/{picture_id}/{version_id}';
+COMMENT ON TABLE picture_versions IS 'Versioned snapshots of picture files in archypix-versions bucket; S3 key = {user_id}/{picture_id}/{id}';

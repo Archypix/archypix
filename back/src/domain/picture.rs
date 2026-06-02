@@ -28,6 +28,8 @@ pub struct Picture {
     pub gps_alt: Option<i32>,
     pub orientation: Option<i16>,
     pub thumbnails_generated_at: Option<NaiveDateTime>,
+    /// SHA-256 hex digest of the stored file. Used as WebDAV ETag.
+    pub file_hash: Option<String>,
 }
 
 impl Picture {

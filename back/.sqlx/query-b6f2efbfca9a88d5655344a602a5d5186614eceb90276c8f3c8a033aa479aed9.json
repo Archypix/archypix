@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "UPDATE pictures\n               SET mime_type = COALESCE($2, mime_type),\n                   file_size = COALESCE($3, file_size),\n                   width = COALESCE($4, width),\n                   height = COALESCE($5, height),\n                   exif_data = COALESCE($6, exif_data),\n                   captured_at = COALESCE($7, captured_at)\n               WHERE id = $1\n               RETURNING id, local_user_id, remote_picture_id, owner_username, owner_instance_domain,\n                         filename, mime_type, file_size, width, height,\n                         exif_data as \"exif_data: _\", metadata as \"metadata: _\",\n                         deleted_at, captured_at, ingested_at, updated_at,\n                         blurhash, gps_lat, gps_lng, gps_alt, orientation, thumbnails_generated_at",
+  "query": "SELECT id, local_user_id, remote_picture_id, owner_username, owner_instance_domain,\n                      filename, mime_type, file_size, width, height,\n                      exif_data as \"exif_data: _\", metadata as \"metadata: _\",\n                      deleted_at, captured_at, ingested_at, updated_at,\n                      blurhash, gps_lat, gps_lng, gps_alt, orientation, thumbnails_generated_at,\n                      file_hash\n               FROM pictures WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -244,17 +244,22 @@
             "name": "thumbnails_generated_at"
           }
         }
+      },
+      {
+        "ordinal": 22,
+        "name": "file_hash",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pictures",
+            "name": "file_hash"
+          }
+        }
       }
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Varchar",
-        "Int8",
-        "Int4",
-        "Int4",
-        "Jsonb",
-        "Timestamp"
+        "Uuid"
       ]
     },
     "nullable": [
@@ -279,8 +284,9 @@
       true,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "0de78a0fe8d51f1e4c64f8fbbc1e8ea65203e4f8b77d92a7ae0abc2cf4572a55"
+  "hash": "b6f2efbfca9a88d5655344a602a5d5186614eceb90276c8f3c8a033aa479aed9"
 }

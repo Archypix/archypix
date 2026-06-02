@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "UPDATE jobs\n               SET status       = 'completed',\n                   completed_at = (now() AT TIME ZONE 'utc'),\n                   result       = $2\n               WHERE id = $1\n               RETURNING\n                   id, owner_id,\n                   job_type    AS \"job_type: JobType\",\n                   status      AS \"status: JobStatus\",\n                   config      AS \"config: _\",\n                   result      AS \"result: _\",\n                   error_message,\n                   retry_count, max_retries,\n                   idempotency_key,\n                   picture_id, claimed_by,\n                   created_at, started_at, completed_at",
+  "query": "SELECT id, owner_id,\n                      job_type    AS \"job_type: JobType\",\n                      status      AS \"status: JobStatus\",\n                      config      AS \"config: _\",\n                      result      AS \"result: _\",\n                      error_message,\n                      retry_count, max_retries,\n                      idempotency_key,\n                      picture_id, claimed_by, claim_token,\n                      created_at, started_at, completed_at\n               FROM   jobs\n               WHERE  id = $1",
   "describe": {
     "columns": [
       {
@@ -162,6 +162,17 @@
       },
       {
         "ordinal": 12,
+        "name": "claim_token",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "claim_token"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
         "name": "created_at",
         "type_info": "Timestamp",
         "origin": {
@@ -172,7 +183,7 @@
         }
       },
       {
-        "ordinal": 13,
+        "ordinal": 14,
         "name": "started_at",
         "type_info": "Timestamp",
         "origin": {
@@ -183,7 +194,7 @@
         }
       },
       {
-        "ordinal": 14,
+        "ordinal": 15,
         "name": "completed_at",
         "type_info": "Timestamp",
         "origin": {
@@ -196,8 +207,7 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Jsonb"
+        "Uuid"
       ]
     },
     "nullable": [
@@ -213,10 +223,11 @@
       true,
       true,
       true,
+      true,
       false,
       true,
       true
     ]
   },
-  "hash": "47994808cd3a1b94abc9e2161557c86445c6bb19341d3fec19c5a008b912ddfa"
+  "hash": "134a7516d9c91b3c6db8938e4fa0be288a90788da927274a6d41b6727fee9cc5"
 }

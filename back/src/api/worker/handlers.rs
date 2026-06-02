@@ -15,7 +15,6 @@ use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use chrono::NaiveDateTime;
-use serde::Deserialize;
 use tracing::debug;
 use uuid::Uuid;
 
@@ -24,8 +23,6 @@ pub async fn claim_next_job(
     State(state): State<AppState>,
     Query(query): Query<ClaimQuery>,
 ) -> Result<Json<Option<ClaimJobResponse>>, AppError> {
-    //debug!(worker = auth.worker_id(), "worker: claim_next_job");
-
     let Some(job) = JobRepository::claim_next(&state.db, auth.worker_id(), &query.types).await?
     else {
         return Ok(Json(None));
@@ -34,8 +31,14 @@ pub async fn claim_next_job(
     debug!(
         worker = auth.worker_id(),
         job_type = job.job_type.to_string(),
+        job_id = %job.id,
         "worker: claim_next_job"
     );
+
+    // claim_token was generated and stored by claim_next; forward it to the worker.
+    let claim_token = job.claim_token.ok_or_else(|| {
+        AppError::InternalServerError("claimed job has no claim_token".to_string())
+    })?;
 
     // ML jobs have no picture and no S3 I/O for now — return early with empty presigned fields.
     if matches!(
@@ -53,6 +56,7 @@ pub async fn claim_next_job(
             config,
             presigned_read: None,
             presigned_writes: PresignedWrites::default(),
+            claim_token,
         })));
     }
 
@@ -70,19 +74,18 @@ pub async fn claim_next_job(
         .presign_get_worker(&state.config.s3_bucket_pictures, &original_key)
         .await?;
 
-    // Parse the job config once — used both to build presigned writes and to populate
-    // the response.  Doing this early also catches corrupt JSONB before any S3 calls.
     let config = job
         .typed_config()
         .map_err(|e| AppError::InternalServerError(format!("failed to parse job config: {e}")))?;
 
-    // For edit_picture jobs: create a version snapshot of the current file BEFORE
-    // handing out the presigned write URL that would overwrite it.
+    // For edit_picture jobs: snapshot the current file as a new version BEFORE
+    // issuing the presigned write URL that would overwrite it.
     if job.job_type == JobType::EditPicture {
         let settings =
             UserSettingsRepository::get_or_default(&state.db, picture.local_user_id).await?;
         if settings.versioning_mode != VersioningMode::None {
             let version_id = Uuid::new_v4();
+            // S3 copy first (outside DB tx) — safe because no DB record exists yet.
             state
                 .storage
                 .copy_object(
@@ -92,22 +95,28 @@ pub async fn claim_next_job(
                     &s3::version_key(picture.local_user_id, picture_id, version_id),
                 )
                 .await?;
+            // DB: insert version record in a transaction so version_number is
+            // computed and stored atomically.
+            let mut vtx = state.db.begin().await.map_err(|e| {
+                AppError::InternalServerError(format!("failed to begin version tx: {e}"))
+            })?;
             let version_num =
-                PictureVersionRepository::next_version_number(&state.db, picture_id).await?;
+                PictureVersionRepository::next_version_number(&mut *vtx, picture_id).await?;
             PictureVersionRepository::create(
-                &state.db,
+                &mut *vtx,
+                version_id,
                 picture_id,
                 version_num,
                 picture.file_size,
                 picture.mime_type.as_deref(),
             )
             .await?;
+            vtx.commit().await.map_err(|e| {
+                AppError::InternalServerError(format!("failed to commit version tx: {e}"))
+            })?;
         }
     }
 
-    // Build presigned writes based on job type / config.
-    // All worker-facing presigns use presign_*_worker so the embedded host
-    // matches S3_WORKERS_ENDPOINT (may differ from S3_PUBLIC_ENDPOINT).
     let thumb_key = s3::picture_key(picture.local_user_id, picture_id);
     let presigned_writes = match &config {
         JobConfig::GenThumbnail(_) => PresignedWrites::thumbnails(
@@ -125,14 +134,11 @@ pub async fn claim_next_job(
                 .await?,
         ),
         JobConfig::EditPicture(edit_cfg) => {
-            // output URL is always provided so the worker can re-upload the
-            // (possibly EXIF-modified or transformed) original.
             let output = state
                 .storage
                 .presign_put_worker(&state.config.s3_bucket_pictures, &original_key)
                 .await?;
             if edit_cfg.visual.is_some() {
-                // Visual transforms → also regenerate thumbnails.
                 PresignedWrites::edit_with_visual(
                     output,
                     state
@@ -149,12 +155,10 @@ pub async fn claim_next_job(
                         .await?,
                 )
             } else {
-                // EXIF-only edit: worker re-uploads the file with updated embedded
-                // EXIF, but pixel content is unchanged so thumbnails are not needed.
                 PresignedWrites::exif_only(output)
             }
         }
-        _ => PresignedWrites::default(), // ML jobs have no presigned writes yet
+        _ => PresignedWrites::default(),
     };
 
     Ok(Json(Some(ClaimJobResponse {
@@ -165,6 +169,7 @@ pub async fn claim_next_job(
         config,
         presigned_read: Some(presigned_read),
         presigned_writes,
+        claim_token,
     })))
 }
 
@@ -176,18 +181,39 @@ pub async fn complete_job(
 ) -> Result<StatusCode, AppError> {
     debug!(worker = auth.worker_id(), job_id = %job_id, "worker: complete_job");
 
+    // Read job outside the transaction to get type/config early (fail fast on
+    // corrupt JSONB). The claim_token guard inside the UPDATE makes this safe.
     let job = JobRepository::find_by_id(&state.db, job_id)
         .await?
         .ok_or(AppError::NotFound)?;
-
     let picture_id = job.picture_id;
 
-    // Update picture metadata when worker-extracted EXIF is present (gen_thumbnail initial jobs).
-    // update_from_worker also sets thumbnails_generated_at via COALESCE.
+    // Pre-parse edit_picture config so we fail before touching the DB if it is corrupt.
+    let edit_cfg = if job.job_type == JobType::EditPicture {
+        match job.typed_config() {
+            Ok(JobConfig::EditPicture(c)) => Some(c),
+            Ok(_) => None,
+            Err(e) => {
+                return Err(AppError::InternalServerError(format!(
+                    "failed to parse job config: {e}"
+                )));
+            }
+        }
+    } else {
+        None
+    };
+
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| AppError::InternalServerError(format!("failed to begin tx: {e}")))?;
+
+    // Update picture columns from worker output.
     if let (Some(exif), Some(pid)) = (&body.exif, picture_id) {
         let captured_at = exif.captured_at.as_deref().and_then(parse_exif_datetime);
         PictureRepository::update_from_worker(
-            &state.db,
+            &mut *tx,
             pid,
             exif.width,
             exif.height,
@@ -198,31 +224,29 @@ pub async fn complete_job(
             exif.orientation,
             body.blurhash.as_deref(),
             exif.exif_data.clone(),
+            body.file_size,
+            body.file_hash.as_deref(),
         )
         .await?;
-    } else if body.thumbnails_generated {
-        // No EXIF was extracted (edit_picture or non-initial gen_thumbnail), but thumbnails
-        // were generated — mark the timestamp explicitly.
-        if let Some(pid) = picture_id {
-            PictureRepository::set_thumbnails_generated(&state.db, pid).await?;
-        }
+    } else if let Some(pid) = picture_id {
+        // No EXIF (edit_picture or non-initial gen_thumbnail): still update
+        // thumbnails_generated_at, blurhash, file_size, file_hash as available.
+        PictureRepository::update_after_processing(
+            &mut *tx,
+            pid,
+            body.thumbnails_generated,
+            body.blurhash.as_deref(),
+            body.file_size,
+            body.file_hash.as_deref(),
+        )
+        .await?;
     }
 
-    // For edit_picture jobs: apply the user-requested EXIF overrides from the job config.
-    // Done after the worker-EXIF path so overrides always take precedence.
-    if job.job_type == JobType::EditPicture {
-        if let Some(pid) = picture_id {
-            let cfg = job.typed_config().map_err(|e| {
-                AppError::InternalServerError(format!("failed to parse job config: {e}"))
-            })?;
-            if let JobConfig::EditPicture(edit_cfg) = cfg {
-                if let Some(overrides) = edit_cfg.exif_overrides {
-                    crate::repository::picture::PictureRepository::apply_exif_overrides(
-                        &state.db, pid, &overrides,
-                    )
-                    .await?;
-                }
-            }
+    // Apply edit_picture EXIF overrides from job config (server-side authoritative values).
+    // Done after worker-EXIF path so user-requested overrides always win.
+    if let (Some(cfg), Some(pid)) = (&edit_cfg, picture_id) {
+        if let Some(ref overrides) = cfg.exif_overrides {
+            PictureRepository::apply_exif_overrides(&mut *tx, pid, overrides).await?;
         }
     }
 
@@ -232,9 +256,19 @@ pub async fn complete_job(
         "has_blurhash": body.blurhash.is_some(),
         "thumbnails_generated": body.thumbnails_generated,
     });
-    JobRepository::complete(&state.db, job_id, result).await?;
 
-    // TODO: trigger in-process tagging pipeline if EXIF was updated.
+    // Mark job complete — returns None if claim_token mismatch or wrong status.
+    let completed = JobRepository::complete(&mut *tx, job_id, body.claim_token, result).await?;
+    if completed.is_none() {
+        tx.rollback().await.ok();
+        return Err(AppError::Conflict(
+            "job is no longer in processing state or claim token does not match".to_string(),
+        ));
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| AppError::InternalServerError(format!("failed to commit tx: {e}")))?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -245,12 +279,29 @@ pub async fn fail_job(
     Path(job_id): Path<Uuid>,
     Json(body): Json<FailJobRequest>,
 ) -> Result<StatusCode, AppError> {
-    debug!(worker = auth.worker_id(), job_id = %job_id, permanent = body.permanent, error = %body.error, "worker: fail_job");
-    JobRepository::fail(&state.db, job_id, &body.error, body.permanent).await?;
+    debug!(
+        worker = auth.worker_id(),
+        job_id = %job_id,
+        permanent = body.permanent,
+        error = %body.error,
+        "worker: fail_job"
+    );
+    let updated = JobRepository::fail(
+        &state.db,
+        job_id,
+        body.claim_token,
+        &body.error,
+        body.permanent,
+    )
+    .await?;
+    if updated.is_none() {
+        return Err(AppError::Conflict(
+            "job is no longer in processing state or claim token does not match".to_string(),
+        ));
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Parse an EXIF datetime string (`"YYYY:MM:DD HH:MM:SS"`) or ISO-8601 into `NaiveDateTime`.
 fn parse_exif_datetime(s: &str) -> Option<NaiveDateTime> {
     NaiveDateTime::parse_from_str(s, "%Y:%m:%d %H:%M:%S")
         .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S"))

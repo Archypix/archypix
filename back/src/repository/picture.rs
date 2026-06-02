@@ -64,7 +64,8 @@ impl PictureRepository {
                          filename, mime_type, file_size, width, height,
                          exif_data as "exif_data: _", metadata as "metadata: _",
                          deleted_at, captured_at, ingested_at, updated_at,
-                         blurhash, gps_lat, gps_lng, gps_alt, orientation, thumbnails_generated_at"#,
+                         blurhash, gps_lat, gps_lng, gps_alt, orientation, thumbnails_generated_at,
+                         file_hash"#,
             id,
             local_user_id,
             filename,
@@ -90,7 +91,8 @@ impl PictureRepository {
                       filename, mime_type, file_size, width, height,
                       exif_data as "exif_data: _", metadata as "metadata: _",
                       deleted_at, captured_at, ingested_at, updated_at,
-                      blurhash, gps_lat, gps_lng, gps_alt, orientation, thumbnails_generated_at
+                      blurhash, gps_lat, gps_lng, gps_alt, orientation, thumbnails_generated_at,
+                      file_hash
                FROM pictures WHERE id = $1"#,
             id
         )
@@ -133,7 +135,8 @@ impl PictureRepository {
                           p.owner_instance_domain, p.filename, p.mime_type, p.file_size,
                           p.width, p.height, p.exif_data, p.metadata,
                           p.deleted_at, p.captured_at, p.ingested_at, p.updated_at,
-                          p.blurhash, p.gps_lat, p.gps_lng, p.gps_alt, p.orientation, p.thumbnails_generated_at
+                          p.blurhash, p.gps_lat, p.gps_lng, p.gps_alt, p.orientation,
+                          p.thumbnails_generated_at, p.file_hash
                    FROM pictures p WHERE p.local_user_id = "#,
             );
             q.push_bind(local_user_id);
@@ -203,7 +206,8 @@ impl PictureRepository {
                          filename, mime_type, file_size, width, height,
                          exif_data as "exif_data: _", metadata as "metadata: _",
                          deleted_at, captured_at, ingested_at, updated_at,
-                         blurhash, gps_lat, gps_lng, gps_alt, orientation, thumbnails_generated_at"#,
+                         blurhash, gps_lat, gps_lng, gps_alt, orientation, thumbnails_generated_at,
+                         file_hash"#,
             id,
             mime_type,
             file_size,
@@ -231,6 +235,8 @@ impl PictureRepository {
         orientation: Option<i16>,
         blurhash: Option<&str>,
         exif_data_patch: Option<serde_json::Value>,
+        file_size: Option<i64>,
+        file_hash: Option<&str>,
     ) -> Result<Picture, AppError>
     where
         E: Executor<'e, Database = Postgres>,
@@ -238,25 +244,28 @@ impl PictureRepository {
         sqlx::query_as!(
             Picture,
             r#"UPDATE pictures
-               SET width       = COALESCE($2, width),
-                   height      = COALESCE($3, height),
-                   captured_at = COALESCE($4, captured_at),
-                   gps_lat     = COALESCE($5, gps_lat),
-                   gps_lng     = COALESCE($6, gps_lng),
-                   gps_alt     = COALESCE($7, gps_alt),
-                   orientation = COALESCE($8, orientation),
-                   blurhash    = COALESCE($9, blurhash),
+               SET width       = COALESCE($2,  width),
+                   height      = COALESCE($3,  height),
+                   captured_at = COALESCE($4,  captured_at),
+                   gps_lat     = COALESCE($5,  gps_lat),
+                   gps_lng     = COALESCE($6,  gps_lng),
+                   gps_alt     = COALESCE($7,  gps_alt),
+                   orientation = COALESCE($8,  orientation),
+                   blurhash    = COALESCE($9,  blurhash),
                    exif_data   = CASE WHEN $10::jsonb IS NOT NULL
                                       THEN exif_data || $10::jsonb
                                       ELSE exif_data
                                  END,
+                   file_size   = COALESCE($11, file_size),
+                   file_hash   = COALESCE($12, file_hash),
                    thumbnails_generated_at = COALESCE(thumbnails_generated_at, now() AT TIME ZONE 'utc')
                WHERE id = $1
                RETURNING id, local_user_id, remote_picture_id, owner_username, owner_instance_domain,
                          filename, mime_type, file_size, width, height,
                          exif_data as "exif_data: _", metadata as "metadata: _",
                          deleted_at, captured_at, ingested_at, updated_at,
-                         blurhash, gps_lat, gps_lng, gps_alt, orientation, thumbnails_generated_at"#,
+                         blurhash, gps_lat, gps_lng, gps_alt, orientation, thumbnails_generated_at,
+                         file_hash"#,
             id,
             width,
             height,
@@ -267,23 +276,45 @@ impl PictureRepository {
             orientation,
             blurhash,
             exif_data_patch as Option<serde_json::Value>,
+            file_size,
+            file_hash,
         )
             .fetch_one(ex)
             .await
             .map_err(map_sqlx_error)
     }
 
-    /// Mark that thumbnails have been generated for the first time.
-    /// No-op if already set (COALESCE keeps the original timestamp).
-    pub async fn set_thumbnails_generated<'e, E>(ex: E, id: Uuid) -> Result<(), AppError>
+    /// Update picture metadata set by the worker after any job completes, for cases
+    /// where no EXIF is returned (edit_picture, non-initial gen_thumbnail).
+    ///
+    /// `set_thumbnails` controls whether `thumbnails_generated_at` is stamped; the
+    /// other fields are always applied via COALESCE (existing value kept when `None`).
+    pub async fn update_after_processing<'e, E>(
+        ex: E,
+        id: Uuid,
+        set_thumbnails: bool,
+        blurhash: Option<&str>,
+        file_size: Option<i64>,
+        file_hash: Option<&str>,
+    ) -> Result<(), AppError>
     where
         E: Executor<'e, Database = Postgres>,
     {
         sqlx::query!(
             r#"UPDATE pictures
-               SET thumbnails_generated_at = COALESCE(thumbnails_generated_at, now() AT TIME ZONE 'utc')
+               SET thumbnails_generated_at = CASE WHEN $2
+                                                  THEN COALESCE(thumbnails_generated_at, now() AT TIME ZONE 'utc')
+                                                  ELSE thumbnails_generated_at
+                                             END,
+                   blurhash  = COALESCE($3, blurhash),
+                   file_size = COALESCE($4, file_size),
+                   file_hash = COALESCE($5, file_hash)
                WHERE id = $1"#,
             id,
+            set_thumbnails,
+            blurhash,
+            file_size,
+            file_hash,
         )
             .execute(ex)
             .await
@@ -296,12 +327,14 @@ impl PictureRepository {
     /// Only non-`None` fields in `overrides` are written; existing values are kept for
     /// fields left as `None`. Camera/lens metadata (brand, model, focal length, etc.) are
     /// merged into the `exif_data` JSONB column.
-    pub async fn apply_exif_overrides(
-        db: &PgPool,
+    pub async fn apply_exif_overrides<'e, E>(
+        ex: E,
         id: Uuid,
         overrides: &ExifOverrides,
-    ) -> Result<(), AppError> {
-        // Build the JSONB patch for camera/lens fields stored inside exif_data.
+    ) -> Result<(), AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
         let mut patch = serde_json::Map::new();
         if let Some(ref v) = overrides.camera_brand {
             patch.insert("camera_brand".to_string(), serde_json::json!(v));
@@ -350,7 +383,7 @@ impl PictureRepository {
             overrides.orientation,
             exif_patch as Option<serde_json::Value>,
         )
-        .execute(db)
+        .execute(ex)
         .await
         .map_err(map_sqlx_error)?;
         Ok(())

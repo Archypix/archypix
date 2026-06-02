@@ -37,6 +37,8 @@ pub struct Job {
     pub idempotency_key: Option<String>,
     pub picture_id: Option<Uuid>,
     pub claimed_by: Option<String>,
+    /// One-time token issued at claim time; echoed back by workers in complete/fail.
+    pub claim_token: Option<Uuid>,
     pub created_at: NaiveDateTime,
     pub started_at: Option<NaiveDateTime>,
     pub completed_at: Option<NaiveDateTime>,

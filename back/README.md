@@ -81,11 +81,12 @@ cargo sqlx prepare
 - `infra/` — raw connectivity primitives (config, DB, Redis, S3, crypto, error)
 - `state.rs` — `AppState`: holds all infra handles, no business logic
 - `api/` — HTTP handlers, auth extractors, request/response models
-    - `middleware/` — JWT extractors for each token type (user, resolver, federation)
+  - `middleware/` — JWT extractors for each token type (user, resolver, federation, worker)
     - `user/` — `/api/auth/*`, `/api/public/*`, `/api/authenticated/*`
     - `admin/` — `/api/admin/*`
     - `federation/` — `/api/federation/*`
     - `resolver/` — `/api/resolver/*`
+  - `worker/` — `/api/worker/*`
     - `webfinger.rs` — `/.well-known/webfinger` (standalone mode only)
 
 Dependency rule: `api → services → repository → domain`. No layer may reach upward. `clients` and `infra` are horizontal utilities.

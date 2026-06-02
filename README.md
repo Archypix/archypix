@@ -85,7 +85,7 @@ graph TB
 |---------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------|
 | [**Resolver**](https://github.com/ClementGre/Archypix/tree/main/resolver) | WebFinger service. Maps `@username:domain` to the owning backend. Routes new user registrations to the least-loaded backend. |
 | [**Backend**](https://github.com/ClementGre/Archypix/tree/main/back)      | Axum HTTP server. Authoritative store for users, pictures, tags, and shares. Serves the REST API and WebDAV.                 |
-| **Workers** *(planned)*                                                   | Async job pool for thumbnails, ML inference, face detection, geo clustering.                                                 |
+| [**Worker**](https://github.com/ClementGre/Archypix/tree/main/worker)     | Async job pool for thumbnail generation, EXIF extraction, BlurHash, file hashing. ML inference planned.                      |
 
 ## The Story of Archypix
 

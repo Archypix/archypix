@@ -6,8 +6,11 @@ use uuid::Uuid;
 pub struct PictureVersionRepository;
 
 impl PictureVersionRepository {
+    /// `id` must be the same UUID used to key the S3 object
+    /// (`{user_id}/{picture_id}/{id}`), so it can always be reconstructed from the DB.
     pub async fn create<'e, E>(
         ex: E,
+        id: Uuid,
         picture_id: Uuid,
         version_number: i32,
         file_size: Option<i64>,
@@ -18,9 +21,10 @@ impl PictureVersionRepository {
     {
         sqlx::query_as!(
             PictureVersion,
-            r#"INSERT INTO picture_versions (picture_id, version_number, file_size, mime_type)
-               VALUES ($1, $2, $3, $4)
+            r#"INSERT INTO picture_versions (id, picture_id, version_number, file_size, mime_type)
+               VALUES ($1, $2, $3, $4, $5)
                RETURNING id, picture_id, version_number, file_size, mime_type, created_at"#,
+            id,
             picture_id,
             version_number,
             file_size,

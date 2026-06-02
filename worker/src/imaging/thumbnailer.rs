@@ -46,7 +46,7 @@ pub async fn run(
     // All image work is CPU-bound — must run on a blocking thread.
     let (paths, blurhash) = tokio::task::spawn_blocking(move || -> Result<_> {
         let mut paths: Vec<(String, std::path::PathBuf)> = Vec::new();
-        for (name, height) in [("small", 100usize), ("medium", 500), ("large", 1000)] {
+        for &(name, height) in resize::THUMBNAIL_VARIANTS {
             let dest = dir_c.join(format!("{name}.webp"));
             resize::generate_thumbnail(&src_c, &dest, height)
                 .map_err(|e| WorkerError::Imaging(format!("'{name}' thumbnail: {e}")))?;

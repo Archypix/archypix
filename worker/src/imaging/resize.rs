@@ -13,15 +13,9 @@ fn init_magick() {
     });
 }
 
-/// Thumbnail height targets per variant name.
-pub fn thumbnail_height(variant: &str) -> Option<usize> {
-    match variant {
-        "small" => Some(100),
-        "medium" => Some(500),
-        "large" => Some(1000),
-        _ => None,
-    }
-}
+/// Named thumbnail variants and their target heights in pixels.
+pub const THUMBNAIL_VARIANTS: &[(&str, usize)] =
+    &[("small", 100), ("medium", 500), ("large", 1000)];
 
 /// Generate a WebP thumbnail at the specified height (maintaining aspect ratio).
 ///
@@ -64,7 +58,7 @@ pub fn generate_thumbnail(src: &Path, dest: &Path, target_height: usize) -> Resu
 pub fn generate_blurhash(src: &Path) -> Result<String> {
     init_magick();
 
-    let mut wand = MagickWand::new();
+    let wand = MagickWand::new();
     wand.read_image(src.to_str().unwrap())
         .map_err(|e| WorkerError::Imaging(format!("read image for blurhash: {e}")))?;
 
@@ -77,7 +71,7 @@ pub fn generate_blurhash(src: &Path) -> Result<String> {
     }
 
     // Choose component counts based on orientation.
-    let (cx, cy) = if w >= h {
+    let (cx, cy) = if w > h {
         (4, 3)
     } else if w == h {
         (3, 3)

@@ -114,6 +114,8 @@ pub async fn accept_incoming(
 ) -> Result<Json<serde_json::Value>, AppError> {
     debug!(user = %auth.claims.sub, token_type = auth.token_type(), share_id = %share_id, "accept_incoming_share");
     IncomingShareRepository::set_status(&state.db, share_id, ShareStatus::Active).await?;
+    // TODO: send a federation message to the sender for it to mark its OutgoingShare as accepted.
+    //  And for it to announce the shared pictures
     Ok(Json(serde_json::json!({ "accepted": true })))
 }
 
@@ -124,5 +126,6 @@ pub async fn reject_incoming(
 ) -> Result<Json<serde_json::Value>, AppError> {
     debug!(user = %auth.claims.sub, token_type = auth.token_type(), share_id = %share_id, "reject_incoming_share");
     IncomingShareRepository::set_status(&state.db, share_id, ShareStatus::Tombstoned).await?;
+    // TODO: send a federation message to the sender for it to mark its OutgoingShare as rejected.
     Ok(Json(serde_json::json!({ "rejected": true })))
 }

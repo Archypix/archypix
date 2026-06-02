@@ -1,7 +1,8 @@
 # Archypix — Worker
 
-The image-processing worker for Archypix. It polls the backend for pending jobs, processes pictures (thumbnails, EXIF extraction, blurhash), and
-reports results back — without ever touching the database or S3 directly.
+The image-processing worker for Archypix. It polls the backend for pending jobs, processes pictures
+(thumbnails, EXIF extraction, file hashing, BlurHash), and reports results back — without ever
+touching the database or S3 directly.
 
 For a full overview of the project, see the [root README](https://github.com/ClementGre/Archypix).
 
@@ -14,6 +15,7 @@ For a full overview of the project, see the [root README](https://github.com/Cle
 | Image processing    | [magick_rust](https://github.com/nlfiedler/magick-rust) (ImageMagick bindings) |
 | EXIF extraction     | [rexiv2](https://gitlab.gnome.org/GNOME/gexiv2) (GExiv2 / Exiv2 bindings)      |
 | BlurHash generation | [blurhash](https://github.com/nicowillis/blurhash)                             |
+| File hashing        | [sha2](https://github.com/RustCrypto/hashes) (SHA-256)                         |
 | Auth                | [jsonwebtoken](https://github.com/Keats/jsonwebtoken)                          |
 | Structured logging  | [tracing](https://github.com/tokio-rs/tracing) + tracing-subscriber            |
 | Health check server | [Axum](https://github.com/tokio-rs/axum)                                       |
@@ -41,7 +43,7 @@ Verify the installed version:
 pkg-config --modversion MagickWand
 ```
 
-The `magick_rust` crate version in `Cargo.toml` must match your system ImageMagick version. Adjust `magick_rust = "0.19"` in `Cargo.toml` if needed.
+The `magick_rust` crate version in `Cargo.toml` must match your system ImageMagick version.
 
 ### GExiv2 / Exiv2 (for EXIF extraction)
 
@@ -104,8 +106,15 @@ docker compose up
 
 ### `gen_thumbnail`
 
-Downloads the original picture, extracts EXIF data (when `is_initial` is `true`), generates WebP thumbnails at three sizes, computes a BlurHash, and
-uploads all outputs via presigned PUT URLs.
+Downloads the original picture (streaming, no full memory buffer), then:
+
+1. Runs a MIME pre-flight check — rejects unsupported formats before downloading thumbnails.
+2. Extracts EXIF metadata via rexiv2 (when `is_initial: true` in the job config).
+3. Computes the SHA-256 `file_hash` and reads `file_size` from disk.
+4. Generates WebP thumbnails at three sizes using ImageMagick.
+5. Computes a BlurHash from the original image.
+6. Uploads thumbnails via presigned PUT URLs.
+7. Reports all metadata to the backend.
 
 | Variant | Height  | Format |
 |---------|---------|--------|
@@ -113,35 +122,64 @@ uploads all outputs via presigned PUT URLs.
 | medium  | 500 px  | WebP   |
 | large   | 1000 px | WebP   |
 
-Width is derived from the original aspect ratio.
+Width is derived from the original aspect ratio. The `THUMBNAIL_VARIANTS` constant in
+`imaging/resize.rs` is the single source of truth for these values.
 
 ### `edit_picture`
 
-Downloads the original picture and re-extracts EXIF as the authoritative source. When `regenerate_thumbnails` is `true` in the job config, thumbnails
-are also regenerated. Full edit operations (crop, colour adjustments, etc.) are planned for a future milestone.
+Downloads the original picture, then:
+
+1. Applies EXIF overrides into the file's embedded metadata via rexiv2.
+   A write failure (unsupported format) is a **permanent error** — the job is immediately
+   marked failed without retry. MIME screening will be added server-side in a future milestone.
+2. Computes `file_hash` (SHA-256) and `file_size` from the modified file.
+3. Uploads the modified file via the `output` presigned PUT URL.
+4. Regenerates thumbnails and BlurHash if the backend provided thumbnail presigned URLs
+   (only for visual transform jobs; EXIF-only edits skip this step).
+5. Reports `file_size`, `file_hash`, and optionally `blurhash` to the backend.
+
+Visual transforms (crop, resize, colour adjustments) are not yet implemented; the original is
+uploaded unchanged when a `visual` config is present.
 
 ### ML jobs (stubs)
 
-`ml_style`, `ml_people`, and `ml_group_location` are accepted but not yet implemented. The worker logs the job and immediately reports completion with
-an empty result.
+`ml_style`, `ml_people`, and `ml_group_location` are accepted but not yet implemented. The worker
+logs the job type and immediately reports completion with an empty result.
+
+## Claim-token protocol
+
+The backend issues a one-time `claim_token` UUID when a job is claimed. The worker must include
+this token in every `complete` and `fail` call. The backend rejects calls where the token does not
+match or the job is no longer in `processing` state (returns 409). This prevents a stale worker
+(reset by the backend watchdog) from corrupting the results of a re-claimed job.
 
 ## Code structure
 
-- `src/main.rs` — Entry point: loads config, starts the health server and job polling loop.
-- `src/config.rs` — Environment-based configuration with validation.
-- `src/error.rs` — Unified `WorkerError` enum and `Result<T>` alias.
-- `src/auth.rs` — Short-lived worker JWT generation (HS256, 300 s TTL).
-- `src/backend/` — HTTP client for the Archypix backend API.
-    - `mod.rs` — `BackendClient`: claim jobs, report completion/failure, download/upload presigned URLs.
-    - `models.rs` — Request/response types shared with the backend API contract.
-- `src/imaging/` — Native image-processing routines (all blocking; called via `spawn_blocking`).
-    - `exif.rs` — EXIF extraction via rexiv2.
-    - `resize.rs` — WebP thumbnail generation and BlurHash computation via magick_rust.
-- `src/jobs/` — Job dispatch and per-type handlers.
-    - `mod.rs` — `run_job_loop`: concurrency-bounded poll loop with backoff on error.
-    - `thumbnail.rs` — `gen_thumbnail` handler.
-    - `edit_picture.rs` — `edit_picture` handler.
-    - `ml.rs` — Stub handler for ML job types.
+```
+src/
+  main.rs              Entry point: loads config, starts health server + job loop.
+  config.rs            Config::from_env(); all settings with defaults and validation.
+  error.rs             WorkerError enum + is_retriable() (transient vs permanent).
+  auth.rs              generate_token(): HS256 JWT generation.
+  backend.rs           BackendClient:
+                         api_http      — 10 s timeout, for claim/complete/fail API calls.
+                         presign_http  — connect-only timeout, for large-file S3 transfers.
+                         Token cache   — refreshes 30 s before expiry, shared across clones.
+                         claim_next_job / complete_job / fail_job(claim_token)
+                         download_presigned (streaming) / upload_presigned
+  imaging/
+    exif.rs            extract_exif() / write_exif_overrides() — rexiv2, blocking.
+    hash.rs            hash_file() — SHA-256 hex in 64 KiB chunks, blocking.
+    resize.rs          generate_thumbnail() (ImageMagick/WebP), generate_blurhash();
+                       THUMBNAIL_VARIANTS: single source of truth for sizes.
+    thumbnailer.rs     run(): spawn_blocking for CPU work, async upload per variant.
+  jobs/
+    mod.rs             run_job_loop(): semaphore-bounded poll (blocks on semaphore,
+                       not sleep-poll); dispatch() threads claim_token to all handlers.
+    thumbnail.rs       gen_thumbnail handler.
+    edit_picture.rs    edit_picture handler.
+    ml.rs              Stub handler for ml_* job types.
+```
 
 ## Health check
 
@@ -151,4 +189,4 @@ A minimal HTTP server runs on `LISTEN_ADDR` (default `0.0.0.0:80`) and exposes:
 GET /health  →  200  {"status": "healthy", "service": "archypix-worker"}
 ```
 
-Use this endpoint for Docker/Kubernetes liveness probes.
+Use this endpoint for Docker/Kubernetes liveness and readiness probes.

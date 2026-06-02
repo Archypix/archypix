@@ -1,3 +1,6 @@
+> **Maintenance notice** — Do not add more details on the work you did compared to the existing documentation. The same level of precision and depth
+> must be maintained in this document.
+
 # Backend Architecture
 
 ## A) Technology stack
@@ -21,7 +24,8 @@
 **Key rules:**
 
 - Repository functions accept `Executor<'e, Database = Postgres>` — callable on pool or transaction.
-- Multi-step workflows (user creation, picture upload, share creation) run in an explicit SQL transaction managed by the service.
+- Multi-step workflows (user creation, picture upload, share creation, job completion) run in an explicit SQL transaction managed by the service or
+  handler.
 - API handlers call repositories directly only for single-step CRUD with no orchestration.
 
 ## C) Module layout (`back/src/`)
@@ -32,27 +36,27 @@ main.rs / state.rs
 domain/
   auth.rs           # TokenType, JwtClaims
   user.rs / user_settings.rs
-  picture.rs        # Picture, PictureVersion, UploadSession
+  picture.rs        # Picture (includes file_hash, file_size), PictureVersion, UploadSession
   tag.rs            # TagPath (newtype), TagSource, Tag
   share.rs          # OutgoingShare, IncomingShare
   federation.rs     # FederationMessage, BackendMapping
-  job.rs
+  job.rs            # Job (includes claim_token), re-exports from archypix-common
   tagging.rs / tagging/pipeline.rs   # pipeline config types + pure evaluator
 
 repository/
   user.rs / picture.rs / picture_version.rs / user_settings.rs
-  tag.rs / share.rs / auth.rs
+  tag.rs / share.rs / auth.rs / job.rs
 
 clients/
   federation.rs     # WebFinger resolution, token lifecycle, federation calls
   resolver.rs       # self_register, update_mapping, verify_token
 
 services/
-  auth.rs / users.rs / pictures.rs / user_settings.rs / shares.rs
+  auth.rs / users.rs / pictures.rs / user_settings.rs / shares.rs / jobs.rs
 
 api/
-  middleware/auth_user.rs / auth_admin.rs / auth_resolver.rs / auth_federation.rs
-  user/auth.rs / users.rs / pictures.rs / settings.rs / shares.rs / tags.rs
+  middleware/auth_user.rs / auth_admin.rs / auth_resolver.rs / auth_federation.rs / auth_worker.rs
+  user/auth.rs / users.rs / pictures.rs / settings.rs / shares.rs / tags.rs / jobs.rs
   admin/handlers.rs + models.rs
   federation/handlers.rs + models.rs
   resolver/handlers.rs + models.rs
@@ -60,6 +64,8 @@ api/
 
 infra/
   config.rs / error.rs / redis.rs / crypto.rs / db.rs / s3.rs
+  tasks.rs       # in-process Tokio task queue (tag rename, tagging pipeline)
+  job_watchdog.rs  # periodic reset of stale processing jobs
 ```
 
 ## D) AppState
@@ -70,9 +76,11 @@ pub struct AppState {
     pub db: PgPool,
     pub redis: RedisClient,
     pub jwt: JwtService,
+   pub worker_jwt: JwtService,   // verifies inbound worker tokens
     pub storage: StorageClient,
     pub federation: FederationClient,
     pub resolver: ResolverClient,
+   pub task_queue: TaskQueue,    // in-process lightweight task queue
 }
 ```
 
@@ -100,14 +108,17 @@ All persistent storage uses the **global domain**. Backend domains are derived o
 
 ## 3) JWT tokens
 
-| Claim        | Description                                                                       |
-|--------------|-----------------------------------------------------------------------------------|
-| `sub`        | Username (user tokens) or global domain (federation tokens).                      |
-| `uid`        | User UUID (user tokens only).                                                     |
-| `is_admin`   | Boolean. Admin endpoints check this, not a separate token type.                   |
-| `instance`   | Global domain of the issuing instance.                                            |
-| `token_type` | `user` \| `resolver` \| `federation` \| `worker`. There is no `admin` token type. |
-| `aud`        | Backend domain of the verifying instance (checked against `BACK_DOMAIN`).         |
+| Claim        | Description                                                                               |
+|--------------|-------------------------------------------------------------------------------------------|
+| `sub`        | Username (user tokens) or global domain (federation tokens) or worker_id (worker tokens). |
+| `uid`        | User UUID (user tokens only).                                                             |
+| `is_admin`   | Boolean. Admin endpoints check this, not a separate token type.                           |
+| `instance`   | Global domain of the issuing instance.                                                    |
+| `token_type` | `user` \| `resolver` \| `federation` \| `worker`. There is no `admin` token type.         |
+| `aud`        | Backend domain of the verifying instance (checked against `BACK_DOMAIN`).                 |
+
+Worker tokens: `sub = worker_id`, `iss = global_domain`, signed with `WORKER_JWT_SECRET` (HS256, 300 s TTL). Workers cache the token and refresh it 30
+s before expiry, so at most one token generation per ~270 s per worker process.
 
 ## 4) Federation authentication (pairwise JWT)
 
@@ -171,10 +182,10 @@ via WebFinger and cached.
 
 **Pictures — upload**
 
-| Method | Path                                                        | Description                                                                                                                                   |
-|--------|-------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
-| `POST` | `/api/authenticated/pictures/uploads`                       | Begin upload. Returns `{ picture_id, presigned_url }` (staging bucket).                                                                       |
-| `POST` | `/api/authenticated/pictures/uploads/{picture_id}/complete` | Confirm upload. Optional body: `{ mime_type, file_size, width, height, ... }`. Automatically enqueues a `gen_thumbnail` job after completion. |
+| Method | Path                                                        | Description                                                                                                                                                                                    |
+|--------|-------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `POST` | `/api/authenticated/pictures/uploads`                       | Begin upload. Returns `{ picture_id, presigned_url }` (staging bucket).                                                                                                                        |
+| `POST` | `/api/authenticated/pictures/uploads/{picture_id}/complete` | Confirm upload. Optional body: `{ mime_type, file_size, width, height, ... }`. Enqueues a `gen_thumbnail` job; picture row, version record, and job are created atomically in one transaction. |
 
 **Pictures — list & details**
 
@@ -186,10 +197,10 @@ via WebFinger and cached.
 
 **Pictures — editing**
 
-| Method | Path                                    | Description                                                                                                 |
-|--------|-----------------------------------------|-------------------------------------------------------------------------------------------------------------|
-| `POST` | `/api/authenticated/pictures/{id}/edit` | Enqueue an `edit_picture` job. Body: `{ exif_overrides?, regenerate_thumbnails }`. Only for owned pictures. |
-| `GET`  | `/api/authenticated/pictures/{id}/jobs` | List all processing jobs for a picture.                                                                     |
+| Method | Path                                    | Description                                                                                                          |
+|--------|-----------------------------------------|----------------------------------------------------------------------------------------------------------------------|
+| `POST` | `/api/authenticated/pictures/{id}/edit` | Enqueue an `edit_picture` job. Body: `{ exif_overrides?, visual?, regenerate_thumbnails }`. Only for owned pictures. |
+| `GET`  | `/api/authenticated/pictures/{id}/jobs` | List all processing jobs for a picture.                                                                              |
 
 **Jobs**
 
@@ -227,23 +238,26 @@ via WebFinger and cached.
 
 ### Worker endpoints (`/api/worker/*`)
 
-Auth: `Authorization: Bearer <worker_jwt>` — a short-lived JWT signed with the shared `WORKER_JWT_SECRET` (`token_type: worker`). Workers generate a
-fresh token per request (300 s TTL).
+Auth: `Authorization: Bearer <worker_jwt>` — short-lived JWT (HS256, 300 s TTL) signed with `WORKER_JWT_SECRET` (`token_type: worker`). Workers cache
+the token and refresh 30 s before expiry.
 
-| Method | Path                             | Description                                                                                                                                                     |
-|--------|----------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `GET`  | `/api/worker/jobs/next`          | Atomically claim next pending job (`SELECT FOR UPDATE SKIP LOCKED`). Returns the job + presigned S3 URLs, or `null`. Query: `types=gen_thumbnail,edit_picture`. |
-| `POST` | `/api/worker/jobs/{id}/complete` | Report job success. Body: `{ exif?, blurhash? }`. Backend updates the picture row and marks the job `completed`.                                                |
-| `POST` | `/api/worker/jobs/{id}/fail`     | Report job failure. Body: `{ error }`. Backend auto-retries up to `max_retries` (default 3).                                                                    |
+| Method | Path                             | Description                                                                                                                                                                     |
+|--------|----------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `GET`  | `/api/worker/jobs/next`          | Atomically claim next pending job (`SELECT FOR UPDATE SKIP LOCKED`). Returns the job + presigned S3 URLs + a one-time `claim_token`, or `null`. Query: `types=gen_thumbnail,…`. |
+| `POST` | `/api/worker/jobs/{id}/complete` | Report job success. Body: `CompleteJobRequest` (see below). Backend applies picture updates and marks job `completed` in one transaction.                                       |
+| `POST` | `/api/worker/jobs/{id}/fail`     | Report job failure. Body: `FailJobRequest` (see below). Backend auto-retries up to `max_retries` (default 3) unless `permanent: true`.                                          |
 
-**Presigned URL shape returned by `GET /api/worker/jobs/next`**
+**`GET /api/worker/jobs/next` response shape**
 
 ```json
 {
    "job_id": "uuid",
    "job_type": "gen_thumbnail",
    "picture_id": "uuid",
+   "mime_type": "image/jpeg",
+   "claim_token": "uuid",
    "config": {
+      "type": "gen_thumbnail",
       "picture_id": "uuid",
       "is_initial": true
    },
@@ -256,7 +270,53 @@ fresh token per request (300 s TTL).
 }
 ```
 
-`presigned_writes` keys: `small/medium/large` for `gen_thumbnail`; `output` for `edit_picture`.
+`presigned_writes` keys by job type:
+
+| Job type                   | `presigned_writes` fields            |
+|----------------------------|--------------------------------------|
+| `gen_thumbnail`            | `small`, `medium`, `large`           |
+| `edit_picture` (EXIF only) | `output`                             |
+| `edit_picture` (visual)    | `output`, `small`, `medium`, `large` |
+| ML types                   | _(none)_                             |
+
+**`POST /api/worker/jobs/{id}/complete` request body (`CompleteJobRequest`)**
+
+```json
+{
+   "claim_token": "uuid",
+   "exif": {
+      "width": 4000,
+      "height": 3000,
+      "captured_at": "2024:08:03 14:22:00"
+      …
+   },
+   "blurhash": "LKO2?U%2Tw=w]~RBVZRi};RPxuwH",
+   "thumbnails_generated": true,
+   "file_size": 8473621,
+   "file_hash": "e3b0c44298fc1c149afb…"
+}
+```
+
+| Field                  | Required when                           | Description                                                                        |
+|------------------------|-----------------------------------------|------------------------------------------------------------------------------------|
+| `claim_token`          | Always                                  | Must match the token issued at claim. Backend rejects mismatches (409).            |
+| `exif`                 | `gen_thumbnail` with `is_initial: true` | EXIF extracted from the original file.                                             |
+| `blurhash`             | Optional                                | BlurHash computed from the original or modified file.                              |
+| `thumbnails_generated` | Always                                  | `true` when small/medium/large were generated and uploaded.                        |
+| `file_size`            | Always when available                   | Byte count of the file as stored in S3 after any EXIF writes or visual transforms. |
+| `file_hash`            | Always when available                   | SHA-256 hex digest of the stored file. Used as WebDAV ETag.                        |
+
+**`POST /api/worker/jobs/{id}/fail` request body (`FailJobRequest`)**
+
+```json
+{
+   "claim_token": "uuid",
+   "error": "unsupported MIME type: image/gif",
+   "permanent": true
+}
+```
+
+`claim_token` must match the issued token. `permanent: true` skips the retry counter and marks the job `failed` immediately.
 
 ## 6) Key flows
 
@@ -264,40 +324,49 @@ fresh token per request (300 s TTL).
 
 1. Client → `POST /uploads` → gets `{ picture_id, presigned_url }` (staging bucket).
 2. Client → MinIO: `PUT` binary to presigned URL.
-3. Client → `POST /uploads/{id}/complete` → backend server-copies staging → pictures bucket, optionally versions, inserts DB row, **enqueues
-   a `gen_thumbnail` job automatically**.
-4. Worker polls `GET /api/worker/jobs/next`, claims the job, downloads the original via presigned GET URL.
-5. Worker extracts EXIF (rexiv2), generates small/medium/large WebP thumbnails (ImageMagick), computes BlurHash.
-6. Worker uploads thumbnails via presigned PUT URLs provided in the claim response.
-7. Worker → `POST /api/worker/jobs/{id}/complete` with `{ exif, blurhash }` → backend populates
-   `pictures.width/height/captured_at/gps_*/blurhash/exif_data/thumbnails_generated_at`.
+3. Client → `POST /uploads/{id}/complete` → backend:
+   - S3: copies staging → pictures bucket, deletes staging object.
+   - S3 (if versioning enabled): copies pictures → versions bucket using a pre-generated `version_id`.
+   - **Single DB transaction**: creates `pictures` row, creates `picture_versions` row (id = `version_id`, matching the S3 key), enqueues
+     `gen_thumbnail` job.
+4. Worker polls `GET /api/worker/jobs/next`, claims the job, receives `claim_token` + presigned URLs.
+5. Worker downloads the original (streaming, no full-memory buffer). Extracts EXIF (rexiv2), generates WebP thumbnails (ImageMagick), computes
+   BlurHash, hashes the file (SHA-256).
+6. Worker uploads thumbnails via presigned PUT URLs.
+7. Worker → `POST /api/worker/jobs/{id}/complete` with `{ claim_token, exif, blurhash, thumbnails_generated, file_size, file_hash }`.
+8. Backend (single DB transaction): updates `pictures` row (width, height, captured_at, gps_*, blurhash, exif_data, thumbnails_generated_at,
+   file_size, file_hash), marks job `completed`. Rejects if `claim_token` mismatch or job no longer in `processing` state (409).
 
-S3 keys are derived as `{user_id}/{picture_id}` and never stored in the database. Workers never hold S3 credentials — all access is via presigned
-URLs.
+S3 keys: `{user_id}/{picture_id}` for originals/thumbnails; `{user_id}/{picture_id}/{version_id}` for versions. Keys are never stored — derived on
+demand. Workers never hold S3 credentials; all access is via presigned URLs.
+
+### Federation handshake
+
+1. Alice’s backend resolves Bob's backend url via WebFinger.
+2. Alice’s backend requests a Federation JWT to Bob’s backend at `POST /api/federation/auth/request`.
+3. Bob’s backend resolves Alice’s backend via WebFinger.
+4. Bob’s backend sends a JWT to Alice’s backend at `POST /api/federation/auth/grant`.
 
 ### Federation share announce
 
 1. Alice creates `OutgoingShare`; backend federates the announcement to Bob's backend.
-2. Bob's backend creates `IncomingShare` + `/SharedToMe/alice@instance.com/...` tags on each announced picture.
-3. When Bob accesses a picture, his backend resolves Alice's backend (WebFinger, cached) and calls `POST /api/federation/pictures/presign` with the
-   `share_token`. Alice's backend returns a presigned S3 URL; Bob's backend caches it and returns it to the client. The actual blob is fetched
-   directly from Alice's S3.
+2. If Alice and Bob are on different backend instances (otherwise, it creates an internal `IncomingShare` directly).
+
+- Federation handshake is required or JWT is in cache.
+- Alice's backend sends a `POST /api/federation/shares/announce` to Bob’s backend.
+
+2. Bob's backend creates `IncomingShare`
+3. Bob accepts the share.
+4. Bob's backend create the share tagging rule and sends a `POST /api/federation/shares/accept` and marks the `IncomingShare` as `accepted`.
+5. Alice's backend announces the shared pictures to Bob's backend at `POST /api/federation/shares/announce`.
+6. Bob’s backend add `/SharedToMe/alice@instance.com/...` tags on each announced picture + runs the tagging rules.
+7. When Bob accesses a picture, his backend resolves Alice's backend (WebFinger, cached) and calls `POST /api/federation/pictures/presign` with the
+   `share_token`.
+8. Alice's backend returns a presigned S3 URL; Bob's backend caches it and returns it to the client. The actual blob is fetched directly from Alice's
+   S3.
 
 ### Federation share revocation
 
 1. Alice's backend sends revocation to Bob's backend.
 2. Bob's backend tombstones `IncomingShare`, marks `/SharedToMe/...` tags broken.
 3. Bob's backend propagates revocation downstream to any transitive recipients.
-
-## 7) Not-yet-developed items
-
-1. Full tagging pipeline execution (`services/tagging.rs`) — `InternalTask::RunTaggingPipeline` is enqueued but the evaluator is not yet wired.
-2. Tag rename cascade — `InternalTask::TagRename` updates the `tags` table; cascading to `outgoing_shares`, segmentation configs, and hierarchies is
-   still TODO.
-3. Visual edits for `edit_picture` jobs (crop, brightness/contrast) — EXIF-only MVP is implemented.
-4. ML worker job handlers (`ml_style`, `ml_people`, `ml_group_location`) — infrastructure and stubs exist; processing logic not yet implemented.
-5. Worker job timeout/recovery — stale `processing` jobs (worker crash) are not yet auto-reset to `pending`.
-6. Federation token rotation schedule and retry logic.
-7. Redis-backed rate limiting and session invalidation.
-8. WebDAV implementation (presigned redirect for reads, staging pattern for writes).
-9. Admin job status and instance metrics endpoints.

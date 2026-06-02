@@ -182,7 +182,7 @@ pub async fn complete_upload(
         ));
     }
 
-    // Copy staging → pictures bucket
+    // S3: copy staging → pictures, then delete staging (S3 ops can't be in a DB tx)
     let pictures_key = s3::picture_key(user_id, picture_id);
     storage
         .copy_object(
@@ -196,8 +196,14 @@ pub async fn complete_upload(
         .delete_object(&config.s3_bucket_staging, &session.s3_key_staging)
         .await?;
 
+    // Single DB transaction: create picture row, thumbnail job.
+    let mut tx = db
+        .begin()
+        .await
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+
     let picture = PictureRepository::create(
-        db,
+        &mut *tx,
         picture_id,
         user_id,
         Some(session.filename.as_str()),
@@ -210,40 +216,17 @@ pub async fn complete_upload(
     )
     .await?;
 
-    // If versioning enabled, store the original as version 1 in the versions bucket.
-    let settings = UserSettingsRepository::get_or_default(db, user_id).await?;
-    if settings.versioning_mode != VersioningMode::None {
-        let version_id = Uuid::new_v4();
-        storage
-            .copy_object(
-                &config.s3_bucket_pictures,
-                &pictures_key,
-                &config.s3_bucket_versions,
-                &s3::version_key(user_id, picture_id, version_id),
-            )
-            .await?;
-        PictureVersionRepository::create(
-            db,
-            picture_id,
-            1,
-            meta.file_size,
-            meta.mime_type.as_deref(),
-        )
-        .await?;
-    }
+    // Enqueue initial thumbnail generation + EXIF extraction inside the same transaction
+    // so no job is orphaned if the picture insert rolls back.
+    crate::services::jobs::enqueue_thumbnail_job(&mut *tx, user_id, picture_id, true).await?;
 
-    redis.del(RedisKey::UploadSession(picture_id)).await?;
+    tx.commit()
+        .await
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
 
-    // Enqueue initial thumbnail generation + EXIF extraction.
-    // This is best-effort: if job creation fails we log and continue rather than
-    // failing the upload — the user can trigger a re-run from the UI later.
-    if let Err(e) = crate::services::jobs::enqueue_thumbnail_job(db, user_id, picture_id).await {
-        tracing::error!(
-            user_id = %user_id,
-            picture_id = %picture_id,
-            error = ?e,
-            "failed to enqueue thumbnail job after upload"
-        );
+    // Redis cleanup is after commit — a failure here is non-fatal (session expires on its own).
+    if let Err(e) = redis.del(RedisKey::UploadSession(picture_id)).await {
+        tracing::warn!(picture_id = %picture_id, error = ?e, "failed to delete upload session from Redis");
     }
 
     Ok(picture)

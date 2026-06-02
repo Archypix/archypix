@@ -1,17 +1,8 @@
-resolver/target
-resolver/.env
+target
+.env
 
-back/target
-back/.env
-
-fed-test/target
-fed-test/.env
-
-worker/target
-worker/.env
-
-common/target
-common/.env
+*/target
+*/.env
 
 # Macos
 .DS_Store

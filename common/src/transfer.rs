@@ -49,6 +49,10 @@ pub struct ClaimJobResponse {
     pub presigned_read: Option<String>,
     /// Presigned PUT URLs for output artifacts the worker must upload.
     pub presigned_writes: PresignedWrites,
+    /// One-time token issued at claim time. The worker must echo it back in every
+    /// `complete` and `fail` call so the backend can reject stale workers that
+    /// were reset by the watchdog and then woke up late.
+    pub claim_token: Uuid,
 }
 
 /// Typed presigned PUT URL map.
@@ -131,6 +135,9 @@ impl PresignedWrites {
 /// Request body for `POST /api/worker/jobs/{id}/complete`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CompleteJobRequest {
+    /// Must match the `claim_token` issued when this job was claimed.
+    /// The backend rejects completions from stale/wrong workers.
+    pub claim_token: Uuid,
     /// EXIF data extracted from the image.
     /// Required for `gen_thumbnail` with `is_initial = true`; optional otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -139,14 +146,23 @@ pub struct CompleteJobRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blurhash: Option<String>,
     /// Set to `true` when the worker generated and uploaded thumbnail variants.
-    /// The backend uses this to set `thumbnails_generated_at` unconditionally.
     #[serde(default)]
     pub thumbnails_generated: bool,
+    /// Size in bytes of the file as it now exists in S3 (after any EXIF writes or
+    /// visual transforms). Used to keep `pictures.file_size` accurate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_size: Option<i64>,
+    /// SHA-256 hex digest of the file as it now exists in S3. Used as the WebDAV
+    /// ETag and for content-addressed deduplication.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_hash: Option<String>,
 }
 
 /// Request body for `POST /api/worker/jobs/{id}/fail`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FailJobRequest {
+    /// Must match the `claim_token` issued when this job was claimed.
+    pub claim_token: Uuid,
     /// Human-readable error description for debugging and the job's `error_message` column.
     pub error: String,
     /// When `true`, skip the retry counter and mark the job as permanently `failed`.

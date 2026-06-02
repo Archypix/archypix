@@ -22,13 +22,8 @@ pub async fn run_job_loop(config: Arc<Config>, client: Arc<BackendClient>) {
     );
 
     loop {
-        let permit = match sem.clone().try_acquire_owned() {
-            Ok(p) => p,
-            Err(_) => {
-                sleep(Duration::from_millis(config.poll_interval_ms)).await;
-                continue;
-            }
-        };
+        // Block until a concurrency slot is free, then poll immediately.
+        let permit = sem.clone().acquire_owned().await.expect("semaphore closed");
 
         match client.claim_next_job().await {
             Ok(None) => {
@@ -62,6 +57,7 @@ pub async fn run_job_loop(config: Arc<Config>, client: Arc<BackendClient>) {
 async fn dispatch(client: &BackendClient, job: ClaimJobResponse) {
     let job_id = job.job_id;
     let job_type = job.job_type.clone();
+    let claim_token = job.claim_token;
     let presigned_read = job.presigned_read;
     let presigned_writes = job.presigned_writes;
     let mime_type = job.mime_type;
@@ -71,6 +67,7 @@ async fn dispatch(client: &BackendClient, job: ClaimJobResponse) {
             thumbnail::handle(
                 client,
                 job_id,
+                claim_token,
                 config,
                 presigned_read,
                 presigned_writes,
@@ -82,6 +79,7 @@ async fn dispatch(client: &BackendClient, job: ClaimJobResponse) {
             edit_picture::handle(
                 client,
                 job_id,
+                claim_token,
                 config,
                 presigned_read,
                 presigned_writes,
@@ -90,14 +88,17 @@ async fn dispatch(client: &BackendClient, job: ClaimJobResponse) {
             .await
         }
         JobConfig::MlStyle | JobConfig::MlPeople | JobConfig::MlGroupLocation => {
-            ml::handle_stub(client, job_id, job_type).await
+            ml::handle_stub(client, job_id, claim_token, job_type).await
         }
     };
 
     if let Err(ref e) = result {
         let permanent = !e.is_retriable();
         error!(job_id = %job_id, permanent, error = ?e, "job failed");
-        if let Err(report_err) = client.fail_job(job_id, &e.to_string(), permanent).await {
+        if let Err(report_err) = client
+            .fail_job(job_id, claim_token, &e.to_string(), permanent)
+            .await
+        {
             error!(
                 job_id = %job_id,
                 error = ?report_err,

@@ -2,31 +2,78 @@ use crate::auth::generate_token;
 use crate::config::Config;
 use crate::error::{Result, WorkerError};
 use archypix_common::transfer::{ClaimJobResponse, ClaimQuery, CompleteJobRequest, FailJobRequest};
+use futures_util::StreamExt;
 use reqwest::Client;
+use std::sync::{Arc, Mutex};
+use tokio::io::AsyncWriteExt;
 use tracing::debug;
 use uuid::Uuid;
+
+struct CachedToken {
+    token: String,
+    /// Unix timestamp after which the cached token must be refreshed.
+    valid_until: i64,
+}
 
 /// HTTP client for communicating with the Archypix backend.
 #[derive(Clone)]
 pub struct BackendClient {
-    http: Client,
+    /// Short-lived client for backend API calls (claim, complete, fail).
+    /// 10 s total timeout is plenty for lightweight JSON endpoints.
+    api_http: Client,
+    /// Separate client for presigned S3 downloads and uploads.
+    /// No total-request timeout — large files take as long as they take.
+    /// A connect timeout prevents hanging on unreachable endpoints.
+    presign_http: Client,
     config: Config,
+    /// Cached worker JWT shared across Arc-clones of this client.
+    token_cache: Arc<Mutex<Option<CachedToken>>>,
 }
 
 impl BackendClient {
     pub fn new(config: Config) -> Self {
+        let api_http = Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .expect("failed to build API HTTP client");
+
+        let presign_http = Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            // No total timeout — transfers of large raw files can take minutes.
+            .build()
+            .expect("failed to build presign HTTP client");
+
         Self {
-            http: Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .build()
-                .expect("failed to build HTTP client"),
+            api_http,
+            presign_http,
             config,
+            token_cache: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Return the cached worker JWT if still valid, otherwise generate and cache a fresh one.
+    ///
+    /// Tokens are valid for 300 s; refresh 30 s early to avoid using a token that
+    /// expires in flight.
+    fn get_or_refresh_token(&self) -> Result<String> {
+        let mut guard = self.token_cache.lock().expect("token cache poisoned");
+        let now = chrono::Utc::now().timestamp();
+        if let Some(ref cached) = *guard {
+            if cached.valid_until > now {
+                return Ok(cached.token.clone());
+            }
+        }
+        let token = generate_token(&self.config)?;
+        *guard = Some(CachedToken {
+            token: token.clone(),
+            valid_until: now + 300 - 30,
+        });
+        Ok(token)
     }
 
     /// Attempt to claim the next pending job. Returns `None` if no job is available.
     pub async fn claim_next_job(&self) -> Result<Option<ClaimJobResponse>> {
-        let token = generate_token(&self.config)?;
+        let token = self.get_or_refresh_token()?;
         let url = format!(
             "{}/api/worker/jobs/next",
             self.config.back_url.trim_end_matches('/')
@@ -35,7 +82,7 @@ impl BackendClient {
             types: self.config.job_types.clone(),
         };
         let resp = self
-            .http
+            .api_http
             .get(&url)
             .bearer_auth(&token)
             .query(&query)
@@ -49,7 +96,6 @@ impl BackendClient {
         }
 
         let body = resp.bytes().await?;
-        // The backend returns `null` JSON when no job is available.
         if body.as_ref() == b"null" || body.is_empty() {
             return Ok(None);
         }
@@ -60,13 +106,13 @@ impl BackendClient {
 
     /// Report a job as completed.
     pub async fn complete_job(&self, job_id: Uuid, body: CompleteJobRequest) -> Result<()> {
-        let token = generate_token(&self.config)?;
+        let token = self.get_or_refresh_token()?;
         let url = format!(
             "{}/api/worker/jobs/{job_id}/complete",
             self.config.back_url.trim_end_matches('/')
         );
         let resp = self
-            .http
+            .api_http
             .post(&url)
             .bearer_auth(&token)
             .json(&body)
@@ -82,20 +128,28 @@ impl BackendClient {
 
     /// Report a job as failed.
     ///
-    /// When `permanent` is `true`, the backend will skip the retry counter and
-    /// mark the job as permanently failed regardless of remaining retries.
-    pub async fn fail_job(&self, job_id: Uuid, error: &str, permanent: bool) -> Result<()> {
-        let token = generate_token(&self.config)?;
+    /// `claim_token` must match what was issued at claim time.
+    /// When `permanent` is `true` the backend marks the job permanently failed
+    /// regardless of remaining retries.
+    pub async fn fail_job(
+        &self,
+        job_id: Uuid,
+        claim_token: Uuid,
+        error: &str,
+        permanent: bool,
+    ) -> Result<()> {
+        let token = self.get_or_refresh_token()?;
         let url = format!(
             "{}/api/worker/jobs/{job_id}/fail",
             self.config.back_url.trim_end_matches('/')
         );
         let body = FailJobRequest {
+            claim_token,
             error: error.to_string(),
             permanent,
         };
         let resp = self
-            .http
+            .api_http
             .post(&url)
             .bearer_auth(&token)
             .json(&body)
@@ -109,24 +163,28 @@ impl BackendClient {
         Ok(())
     }
 
-    /// Download a file from a presigned URL to a local path.
+    /// Download a file from a presigned URL, streaming directly to disk.
     pub async fn download_presigned(&self, url: &str, dest: &std::path::Path) -> Result<()> {
-        let resp = self.http.get(url).send().await?;
+        let resp = self.presign_http.get(url).send().await?;
         if !resp.status().is_success() {
             return Err(WorkerError::BackendError {
                 status: resp.status().as_u16(),
                 body: "failed to download from presigned URL".to_string(),
             });
         }
-        let bytes = resp.bytes().await?;
-        tokio::fs::write(dest, &bytes).await?;
+        let mut file = tokio::fs::File::create(dest).await?;
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            file.write_all(&chunk?).await?;
+        }
+        file.flush().await?;
         Ok(())
     }
 
     /// Upload a file to a presigned PUT URL.
     pub async fn upload_presigned(&self, url: &str, src: &std::path::Path) -> Result<()> {
         let data = tokio::fs::read(src).await?;
-        let resp = self.http.put(url).body(data).send().await?;
+        let resp = self.presign_http.put(url).body(data).send().await?;
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO picture_versions (picture_id, version_number, file_size, mime_type)\n               VALUES ($1, $2, $3, $4)\n               RETURNING id, picture_id, version_number, file_size, mime_type, created_at",
+  "query": "INSERT INTO picture_versions (id, picture_id, version_number, file_size, mime_type)\n               VALUES ($1, $2, $3, $4, $5)\n               RETURNING id, picture_id, version_number, file_size, mime_type, created_at",
   "describe": {
     "columns": [
       {
@@ -73,6 +73,7 @@
     "parameters": {
       "Left": [
         "Uuid",
+        "Uuid",
         "Int4",
         "Int8",
         "Varchar"
@@ -87,5 +88,5 @@
       false
     ]
   },
-  "hash": "a2b785efe9646a61ea365ae7bd320d5fb88cc80fc3fa3dd39fec286c3c91df73"
+  "hash": "c70e2433521036c687d2ef17d225bd6320b68f6428ef8341806ae11bd26171b2"
 }
