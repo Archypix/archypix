@@ -28,6 +28,15 @@ pub struct ShareResponse {
     pub status: ShareStatus,
 }
 
+#[derive(Debug, Serialize)]
+pub struct IncomingShareResponse {
+    pub id: uuid::Uuid,
+    pub sender_username: String,
+    pub sender_instance: String,
+    pub outgoing_share_id: uuid::Uuid,
+    pub status: ShareStatus,
+}
+
 pub async fn create_outgoing(
     auth: AuthUser,
     State(state): State<AppState>,
@@ -43,6 +52,7 @@ pub async fn create_outgoing(
     );
     let share = services::shares::create_outgoing_share(
         &state.db,
+        &state.redis,
         &state.federation,
         &state.config,
         auth.user_id()?,
@@ -88,20 +98,18 @@ pub async fn list_outgoing(
 pub async fn list_incoming(
     auth: AuthUser,
     State(state): State<AppState>,
-) -> Result<Json<Vec<serde_json::Value>>, AppError> {
+) -> Result<Json<Vec<IncomingShareResponse>>, AppError> {
     debug!(user = %auth.claims.sub, token_type = auth.token_type(), "list_incoming_shares");
     let shares = IncomingShareRepository::list_by_recipient(&state.db, auth.user_id()?).await?;
     Ok(Json(
         shares
             .into_iter()
-            .map(|s| {
-                serde_json::json!({
-                    "id": s.id,
-                    "sender_username": s.sender_username,
-                    "sender_instance": s.sender_instance,
-                    "outgoing_share_id": s.outgoing_share_id,
-                    "status": s.status,
-                })
+            .map(|s| IncomingShareResponse {
+                id: s.id,
+                sender_username: s.sender_username,
+                sender_instance: s.sender_instance,
+                outgoing_share_id: s.outgoing_share_id,
+                status: s.status,
             })
             .collect(),
     ))
@@ -113,10 +121,19 @@ pub async fn accept_incoming(
     Path(share_id): Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     debug!(user = %auth.claims.sub, token_type = auth.token_type(), share_id = %share_id, "accept_incoming_share");
-    IncomingShareRepository::set_status(&state.db, share_id, ShareStatus::Active).await?;
-    // TODO: send a federation message to the sender for it to mark its OutgoingShare as accepted.
-    //  And for it to announce the shared pictures
-    Ok(Json(serde_json::json!({ "accepted": true })))
+    let registered = services::shares::accept_incoming_share(
+        &state.db,
+        &state.redis,
+        &state.federation,
+        &state.config,
+        auth.user_id()?,
+        &auth.claims.sub,
+        share_id,
+    )
+    .await?;
+    Ok(Json(
+        serde_json::json!({ "accepted": true, "pictures_registered": registered }),
+    ))
 }
 
 pub async fn reject_incoming(
@@ -125,7 +142,12 @@ pub async fn reject_incoming(
     Path(share_id): Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     debug!(user = %auth.claims.sub, token_type = auth.token_type(), share_id = %share_id, "reject_incoming_share");
+    let share = IncomingShareRepository::get_by_id(&state.db, share_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if share.recipient_id != auth.user_id()? {
+        return Err(AppError::NotFound);
+    }
     IncomingShareRepository::set_status(&state.db, share_id, ShareStatus::Tombstoned).await?;
-    // TODO: send a federation message to the sender for it to mark its OutgoingShare as rejected.
     Ok(Json(serde_json::json!({ "rejected": true })))
 }

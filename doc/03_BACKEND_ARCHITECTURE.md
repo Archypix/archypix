@@ -48,7 +48,10 @@ repository/
   tag.rs / share.rs / auth.rs / job.rs
 
 clients/
-  federation.rs     # WebFinger resolution, token lifecycle, federation calls
+  federation/
+    mod.rs          # FederationClient struct + shared protocol types
+    handshake.rs    # WebFinger resolution, token request/grant/store/issue
+    shares.rs       # announce_share, send_share_accept, announce_pictures, presign_remote
   resolver.rs       # self_register, update_mapping, verify_token
 
 services/
@@ -227,14 +230,14 @@ via WebFinger and cached.
 
 ### Federation endpoints
 
-| Method | Path                                | Description                                                        |
-|--------|-------------------------------------|--------------------------------------------------------------------|
-| `POST` | `/api/federation/auth/request`      | Request a federation JWT.                                          |
-| `POST` | `/api/federation/auth/grant`        | Receive a federation JWT from another instance.                    |
-| `POST` | `/api/federation/shares/announce`   | Share announcement. Requires federation JWT.                       |
-| `POST` | `/api/federation/shares/revoke`     | Share revocation. Requires federation JWT.                         |
-| `POST` | `/api/federation/pictures/announce` | Announce pictures for an active share. Requires federation JWT.    |
-| `POST` | `/api/federation/pictures/presign`  | Request presigned URL. Auth: `share_token` only — no JWT required. |
+| Method | Path                                | Description                                                                                                                                                                             |
+|--------|-------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `POST` | `/api/federation/auth/request`      | Request a federation JWT.                                                                                                                                                               |
+| `POST` | `/api/federation/auth/grant`        | Receive a federation JWT from another instance.                                                                                                                                         |
+| `POST` | `/api/federation/shares/announce`   | Share announcement. Requires federation JWT.                                                                                                                                            |
+| `POST` | `/api/federation/shares/revoke`     | Share revocation. Requires federation JWT.                                                                                                                                              |
+| `POST` | `/api/federation/pictures/announce` | Announce pictures for an active share. Requires federation JWT.                                                                                                                         |
+| `POST` | `/api/federation/pictures/presign`  | Request presigned URLs for a batch of pictures. Auth: `share_token` only — no JWT required. Body: `{ owner_username, owner_instance, share_token, pictures: [{picture_id, variant}] }`. |
 
 ### Worker endpoints (`/api/worker/*`)
 
@@ -349,21 +352,19 @@ demand. Workers never hold S3 credentials; all access is via presigned URLs.
 
 ### Federation share announce
 
-1. Alice creates `OutgoingShare`; backend federates the announcement to Bob's backend.
-2. If Alice and Bob are on different backend instances (otherwise, it creates an internal `IncomingShare` directly).
-
-- Federation handshake is required or JWT is in cache.
-- Alice's backend sends a `POST /api/federation/shares/announce` to Bob’s backend.
-
-2. Bob's backend creates `IncomingShare`
-3. Bob accepts the share.
-4. Bob's backend create the share tagging rule and sends a `POST /api/federation/shares/accept` and marks the `IncomingShare` as `accepted`.
-5. Alice's backend announces the shared pictures to Bob's backend at `POST /api/federation/shares/announce`.
-6. Bob’s backend add `/SharedToMe/alice@instance.com/...` tags on each announced picture + runs the tagging rules.
-7. When Bob accesses a picture, his backend resolves Alice's backend (WebFinger, cached) and calls `POST /api/federation/pictures/presign` with the
-   `share_token`.
-8. Alice's backend returns a presigned S3 URL; Bob's backend caches it and returns it to the client. The actual blob is fetched directly from Alice's
-   S3.
+1. Alice creates `OutgoingShare`.
+    - **Same-backend** (`recipient_instance == global_domain`): `IncomingShare` is created directly in DB; no HTTP federation.
+    - **Cross-instance**: federation handshake (or JWT from cache), then `POST /api/federation/shares/announce` to Bob’s backend.
+2. Bob’s backend creates `IncomingShare`.
+3. Bob accepts the share via `POST /api/authenticated/shares/incoming/{id}/accept`.
+    - **Same-backend**: Alice’s pictures under the tag are queried locally; received-picture rows + `/SharedToMe/…` tags are created directly.
+    - **Cross-instance**: Bob sends `POST /api/federation/shares/accept` to Alice’s backend.
+4. Alice’s backend (on receiving accept): queries her owned pictures under the shared tag, sends `POST /api/federation/pictures/announce` to Bob.
+5. Bob’s backend registers each announced picture (`PictureRepository::create_received`) and assigns the `/SharedToMe/alice_AT_instance_DOT_com/…`
+   tag (`source = incoming_share`, `source_id = incoming_share.id`).
+6. When Bob accesses a picture, `presign_for_picture` checks Redis cache first, then:
+    - **Same-backend owner**: derives S3 key from `remote_picture_id` and owner’s local `user_id`.
+    - **Cross-instance owner**: looks up `origin_share_token` (cached in Redis), calls `POST /api/federation/pictures/presign` on Alice’s backend.
 
 ### Federation share revocation
 

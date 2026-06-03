@@ -124,7 +124,7 @@ const AuthTab = {
 
                 <div class="space-y-2">
                     <h3 class="font-semibold text-green-700">Register (direct)</h3>
-                    <input class="input w-full" placeholder="Username" v-model="reg.username"/>
+                    <input class="input w-full" placeholder="Username [a-z0-9_]" v-model="reg.username"/>
                     <input class="input w-full" placeholder="Display name" v-model="reg.display"/>
                     <input class="input w-full" placeholder="Email" v-model="reg.email"/>
                     <input class="input w-full" placeholder="Password" type="password" v-model="reg.password"/>
@@ -134,7 +134,7 @@ const AuthTab = {
 
                 <div class="space-y-2">
                     <h3 class="font-semibold text-purple-700">Register via Resolver</h3>
-                    <input class="input w-full" placeholder="Username" v-model="rres.username"/>
+                    <input class="input w-full" placeholder="Username [a-z0-9_]" v-model="rres.username"/>
                     <input class="input w-full" placeholder="Display name" v-model="rres.display"/>
                     <input class="input w-full" placeholder="Email" v-model="rres.email"/>
                     <input class="input w-full" placeholder="Password" type="password" v-model="rres.password"/>

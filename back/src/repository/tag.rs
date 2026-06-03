@@ -81,6 +81,7 @@ impl TagRepository {
                  WHERE picture_id = ANY($1::uuid[])
                    AND tag_path @> ANY($3::ltree[])
                    AND NOT (tag_path = ANY($3::ltree[]))
+                   AND source = 'manual'::tag_source
                    AND picture_id IN (
                      SELECT id FROM pictures WHERE local_user_id = $2 AND deleted_at IS NULL
                    )
@@ -112,8 +113,8 @@ impl TagRepository {
     /// Remove tags (and all their subtags) from all pictures in the batch.
     /// All pictures must belong to `local_user_id`.
     ///
-    /// Uses ltree's `<@` operator: a stored tag is deleted if it is equal to OR a descendant of
-    /// any of the specified remove tags — the whole subtree is pruned.
+    /// Only removes `source = 'manual'` tags — system-assigned tags (`incoming_share`, `rule`, etc.)
+    /// are never touched by user operations.
     pub async fn batch_remove<'e, E>(
         ex: E,
         local_user_id: Uuid,
@@ -130,6 +131,7 @@ impl TagRepository {
             r#"DELETE FROM tags
                WHERE picture_id = ANY($1::uuid[])
                  AND tag_path <@ ANY($2::ltree[])
+                 AND source = 'manual'::tag_source
                  AND picture_id IN (
                    SELECT id FROM pictures WHERE local_user_id = $3 AND deleted_at IS NULL
                  )"#,
@@ -137,6 +139,52 @@ impl TagRepository {
         .bind(picture_ids)
         .bind(tags)
         .bind(local_user_id)
+        .execute(ex)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(())
+    }
+
+    /// Assign a `/SharedToMe/…` tag to a received picture, linked to the incoming share that
+    /// created it. Used exclusively by the share-acceptance and picture-announcement flows.
+    ///
+    /// Uses ON CONFLICT DO NOTHING so re-announcing the same picture is idempotent.
+    pub async fn assign_incoming_share_tag<'e, E>(
+        ex: E,
+        picture_id: Uuid,
+        tag_path_ltree: &str,
+        incoming_share_id: Uuid,
+    ) -> Result<(), AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query(
+            r#"INSERT INTO tags (picture_id, tag_path, source, source_id)
+               VALUES ($1, $2::ltree, 'incoming_share'::tag_source, $3)
+               ON CONFLICT (picture_id, tag_path) DO NOTHING"#,
+        )
+        .bind(picture_id)
+        .bind(tag_path_ltree)
+        .bind(incoming_share_id)
+        .execute(ex)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(())
+    }
+
+    /// Remove all `incoming_share` tags assigned by the given share.
+    /// Called on share revocation to clean up all `/SharedToMe/…` entries for that share.
+    pub async fn remove_incoming_share_tags<'e, E>(
+        ex: E,
+        incoming_share_id: Uuid,
+    ) -> Result<(), AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query(
+            r#"DELETE FROM tags WHERE source = 'incoming_share'::tag_source AND source_id = $1"#,
+        )
+        .bind(incoming_share_id)
         .execute(ex)
         .await
         .map_err(map_sqlx_error)?;

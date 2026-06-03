@@ -81,6 +81,139 @@ impl PictureRepository {
             .map_err(map_sqlx_error)
     }
 
+    /// Create a received (non-owned) picture row on behalf of a recipient user.
+    ///
+    /// `remote_picture_id` is the sender's picture UUID (stored as string for cross-instance compat).
+    /// Deduplication is handled by the `uq_received_picture` unique index: on conflict the existing
+    /// row is returned unchanged.
+    pub async fn create_received<'e, E>(
+        ex: E,
+        recipient_id: Uuid,
+        remote_picture_id: &str,
+        owner_username: &str,
+        owner_instance_domain: &str,
+        filename: Option<&str>,
+        mime_type: Option<&str>,
+        file_size: Option<i64>,
+        width: Option<i32>,
+        height: Option<i32>,
+        captured_at: Option<NaiveDateTime>,
+    ) -> Result<Picture, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query_as(
+            r#"INSERT INTO pictures
+                   (local_user_id, remote_picture_id, owner_username, owner_instance_domain,
+                    filename, mime_type, file_size, width, height, exif_data, metadata, captured_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, '{}'::jsonb, '{}'::jsonb, $10)
+               ON CONFLICT (local_user_id, remote_picture_id)
+               WHERE remote_picture_id IS NOT NULL
+               DO UPDATE SET
+                   filename  = COALESCE(EXCLUDED.filename,  pictures.filename),
+                   mime_type = COALESCE(EXCLUDED.mime_type, pictures.mime_type),
+                   file_size = COALESCE(EXCLUDED.file_size, pictures.file_size),
+                   width     = COALESCE(EXCLUDED.width,     pictures.width),
+                   height    = COALESCE(EXCLUDED.height,    pictures.height),
+                   captured_at = COALESCE(EXCLUDED.captured_at, pictures.captured_at)
+               RETURNING id, local_user_id, remote_picture_id, owner_username, owner_instance_domain,
+                         filename, mime_type, file_size, width, height,
+                         exif_data, metadata,
+                         deleted_at, captured_at, ingested_at, updated_at,
+                         blurhash, gps_lat, gps_lng, gps_alt, orientation, thumbnails_generated_at,
+                         file_hash"#,
+        )
+            .bind(recipient_id)
+            .bind(remote_picture_id)
+            .bind(owner_username)
+            .bind(owner_instance_domain)
+            .bind(filename)
+            .bind(mime_type)
+            .bind(file_size)
+            .bind(width)
+            .bind(height)
+            .bind(captured_at)
+            .fetch_one(ex)
+            .await
+            .map_err(map_sqlx_error)
+    }
+
+    /// Delete received-picture rows from `sender` for `recipient_id` that have no remaining
+    /// `incoming_share` tags.
+    ///
+    /// Called after `TagRepository::remove_incoming_share_tags` during share revocation.
+    ///
+    /// A revoked picture is unreachable regardless of any local tags Bob may have added —
+    /// the sender's presign endpoint will reject requests once the share token is invalid.
+    /// Manual tags are therefore not a reason to keep the row.
+    ///
+    /// Pictures received from the same sender via a *different, still-active* share survive:
+    /// they retain `incoming_share` tags from that other share, so the `NOT EXISTS` check
+    /// excludes them.
+    ///
+    /// Returns the number of deleted rows.
+    pub async fn delete_received_without_share_tags<'e, E>(
+        ex: E,
+        recipient_id: Uuid,
+        sender_username: &str,
+        sender_instance: &str,
+    ) -> Result<u64, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        let result = sqlx::query(
+            r#"DELETE FROM pictures
+               WHERE local_user_id = $1
+                 AND owner_username = $2
+                 AND owner_instance_domain = $3
+                 AND remote_picture_id IS NOT NULL
+                 AND NOT EXISTS (
+                     SELECT 1 FROM tags
+                     WHERE tags.picture_id = pictures.id
+                       AND tags.source = 'incoming_share'::tag_source
+                 )"#,
+        )
+        .bind(recipient_id)
+        .bind(sender_username)
+        .bind(sender_instance)
+        .execute(ex)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(result.rows_affected())
+    }
+
+    /// List all active owned pictures that carry a tag under `tag_path_ltree` (inclusive).
+    ///
+    /// Used by Alice's backend to enumerate pictures to announce when a share is accepted.
+    pub async fn list_by_tag_and_owner<'e, E>(
+        ex: E,
+        owner_id: Uuid,
+        tag_path_ltree: &str,
+    ) -> Result<Vec<Picture>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query_as(
+            r#"SELECT DISTINCT p.id, p.local_user_id, p.remote_picture_id, p.owner_username,
+                      p.owner_instance_domain, p.filename, p.mime_type, p.file_size,
+                      p.width, p.height, p.exif_data, p.metadata,
+                      p.deleted_at, p.captured_at, p.ingested_at, p.updated_at,
+                      p.blurhash, p.gps_lat, p.gps_lng, p.gps_alt, p.orientation,
+                      p.thumbnails_generated_at, p.file_hash
+               FROM pictures p
+               JOIN tags t ON t.picture_id = p.id
+               WHERE p.local_user_id = $1
+                 AND p.remote_picture_id IS NULL
+                 AND p.deleted_at IS NULL
+                 AND t.tag_path <@ $2::ltree"#,
+        )
+        .bind(owner_id)
+        .bind(tag_path_ltree)
+        .fetch_all(ex)
+        .await
+        .map_err(map_sqlx_error)
+    }
+
     pub async fn find_by_id<'e, E>(ex: E, id: Uuid) -> Result<Option<Picture>, AppError>
     where
         E: Executor<'e, Database = Postgres>,

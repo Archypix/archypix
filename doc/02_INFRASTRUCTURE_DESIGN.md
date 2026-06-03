@@ -15,7 +15,9 @@
     - Purpose: authoritative per-instance application server and metadata store.
     - Roles:
         - HTTP API & WebDAV: serve user requests, uploads, sync client endpoints.
-      - WebFinger client: consult resolver/WebFinger when needed for cross-instance discovery; caches backend domains in Redis.
+      - WebFinger client: consult resolver/WebFinger when needed for cross-instance discovery; caches backend **base URLs** (full scheme + host) in
+        Redis. The scheme for WebFinger calls is controlled by `WEBFINGER_USE_HTTPS`; all subsequent federation API calls use the scheme embedded in
+        the `backend_url` returned by WebFinger, so no separate federation-scheme config is needed.
       - Postgres: authoritative metadata (users, pictures, tags, shares, jobs). Key picture columns include `file_hash` (SHA-256, WebDAV ETag) and
         `file_size` (kept accurate after every worker processing run).
       - Federation endpoints: handle inbound/outbound federation messages (share announce/revoke, presign requests).

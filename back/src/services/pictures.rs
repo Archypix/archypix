@@ -1,6 +1,5 @@
 use crate::clients::federation::FederationClient;
 use crate::domain::picture::{Picture, UploadSession};
-use crate::domain::user_settings::VersioningMode;
 use crate::infra::config::Config;
 use crate::infra::error::AppError;
 use crate::infra::redis::{RedisClient, RedisKey};
@@ -8,13 +7,12 @@ use crate::infra::s3::{self, StorageClient};
 use crate::repository::picture::{
     PictureListFilter, PictureRepository, PictureSortField, SortOrder,
 };
-use crate::repository::picture_version::PictureVersionRepository;
 use crate::repository::share::IncomingShareRepository;
-use crate::repository::user::UserRepository;
-use crate::repository::user_settings::UserSettingsRepository;
+use crate::services::users::find_local_user_id;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::collections::HashMap;
 use std::str::FromStr;
 use tracing::trace;
 use uuid::Uuid;
@@ -263,27 +261,35 @@ pub async fn list_pictures(
 
     let (pictures, total) = PictureRepository::list(db, user_id, &filter).await?;
 
-    let mut items = Vec::with_capacity(pictures.len());
-    for pic in pictures {
-        let thumbnail_url = if let Some(size) = params.thumbnail {
-            Some(
-                presign_for_picture(db, redis, storage, config, federation, user_id, &pic, size)
-                    .await?,
+    // Batch-presign thumbnails: one Redis lookup + one HTTP call per remote owner backend
+    // instead of N sequential calls.
+    let thumbnail_urls = if let Some(variant) = params.thumbnail {
+        Some(
+            presign_for_picture_list(
+                db, redis, storage, config, federation, user_id, &pictures, variant,
             )
-        } else {
-            None
-        };
-        items.push(PictureListItem {
+            .await?,
+        )
+    } else {
+        None
+    };
+
+    let items = pictures
+        .into_iter()
+        .map(|pic| PictureListItem {
             id: pic.id,
             filename: pic.filename,
             width: pic.width,
             height: pic.height,
             captured_at: pic.captured_at,
             ingested_at: pic.ingested_at,
-            blurhash: pic.blurhash.clone(),
-            thumbnail_url,
-        });
-    }
+            blurhash: pic.blurhash,
+            thumbnail_url: thumbnail_urls
+                .as_ref()
+                .and_then(|m| m.get(&pic.id))
+                .cloned(),
+        })
+        .collect();
 
     Ok(PictureListResult {
         total,
@@ -293,11 +299,155 @@ pub async fn list_pictures(
     })
 }
 
-/// Resolve the presigned URL for `pic` at the given `variant`.
+/// Resolve presigned URLs for a list of pictures at the given variant in a single pass.
+///
+/// Strategy:
+/// 1. Redis cache check for all pictures.
+/// 2. Owned + same-backend cache misses: individual local S3 presigns (cheap, no network hop).
+/// 3. Cross-instance cache misses: grouped by (owner_username, owner_instance) → one HTTP call
+///    per remote owner backend instead of one call per picture.
+async fn presign_for_picture_list(
+    db: &PgPool,
+    redis: &RedisClient,
+    storage: &StorageClient,
+    config: &Config,
+    federation: &FederationClient,
+    local_user_id: Uuid,
+    pictures: &[Picture],
+    variant: PictureVariant,
+) -> Result<HashMap<Uuid, String>, AppError> {
+    let ttl = config
+        .s3_presign_ttl_secs
+        .saturating_sub(config.s3_presign_cache_margin_secs);
+
+    let mut urls: HashMap<Uuid, String> = HashMap::new();
+    let mut misses: Vec<&Picture> = Vec::new();
+
+    // Step 1: cache check
+    for pic in pictures {
+        match redis
+            .get_string(RedisKey::PictureUrl(pic.id, variant.as_str()))
+            .await?
+        {
+            Some(url) => {
+                urls.insert(pic.id, url);
+            }
+            None => misses.push(pic),
+        }
+    }
+
+    if misses.is_empty() {
+        return Ok(urls);
+    }
+
+    // Step 2: classify cache misses
+    let mut owned_misses: Vec<&Picture> = Vec::new();
+    let mut same_backend_misses: Vec<(&Picture, Uuid)> = Vec::new();
+    let mut cross_instance_groups: HashMap<(String, String), Vec<&Picture>> = HashMap::new();
+
+    for pic in &misses {
+        if pic.is_owned() {
+            owned_misses.push(pic);
+        } else {
+            let owner_username = pic.owner_username.as_deref().unwrap_or_default();
+            let owner_instance = pic.owner_instance_domain.as_deref().unwrap_or_default();
+            if let Some(owner_id) =
+                find_local_user_id(redis, db, config, owner_username, owner_instance).await?
+            {
+                same_backend_misses.push((pic, owner_id));
+            } else {
+                cross_instance_groups
+                    .entry((owner_username.to_string(), owner_instance.to_string()))
+                    .or_default()
+                    .push(pic);
+            }
+        }
+    }
+
+    // Step 3: presign owned pictures locally
+    for pic in owned_misses {
+        let key = s3::picture_key(pic.local_user_id, pic.id);
+        let url = storage.presign_get(variant.bucket(config), &key).await?;
+        if ttl > 0 {
+            let _ = redis
+                .set_string_ex(RedisKey::PictureUrl(pic.id, variant.as_str()), &url, ttl)
+                .await;
+        }
+        urls.insert(pic.id, url);
+    }
+
+    // Step 4: presign same-backend received pictures locally (using sender's key)
+    for (pic, owner_id) in same_backend_misses {
+        let remote_id: Uuid = pic
+            .remote_picture_id
+            .as_deref()
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| {
+                AppError::InternalServerError("received picture missing remote_picture_id".into())
+            })?;
+        let key = s3::picture_key(owner_id, remote_id);
+        let url = storage.presign_get(variant.bucket(config), &key).await?;
+        if ttl > 0 {
+            let _ = redis
+                .set_string_ex(RedisKey::PictureUrl(pic.id, variant.as_str()), &url, ttl)
+                .await;
+        }
+        urls.insert(pic.id, url);
+    }
+
+    // Step 5: batch-presign cross-instance pictures — one HTTP call per remote owner backend
+    for ((owner_username, owner_instance), pics) in &cross_instance_groups {
+        let share_token = cached_share_token(
+            redis,
+            db,
+            config,
+            local_user_id,
+            owner_username,
+            owner_instance,
+        )
+        .await?
+        .ok_or_else(|| {
+            AppError::Unauthorized(format!(
+                "No active incoming share token for {owner_username}@{owner_instance}"
+            ))
+        })?;
+
+        let batch: Vec<(Uuid, &str)> = pics
+            .iter()
+            .filter_map(|p| {
+                let id = p.remote_picture_id.as_deref()?.parse::<Uuid>().ok()?;
+                Some((id, variant.as_str()))
+            })
+            .collect();
+
+        let remote_urls = federation
+            .presign_remote_pictures(owner_username, owner_instance, &batch, share_token)
+            .await?;
+
+        for pic in pics {
+            if let Some(remote_id_str) = pic.remote_picture_id.as_deref() {
+                if let Some(url) = remote_urls.get(remote_id_str) {
+                    if ttl > 0 {
+                        let _ = redis
+                            .set_string_ex(RedisKey::PictureUrl(pic.id, variant.as_str()), url, ttl)
+                            .await;
+                    }
+                    urls.insert(pic.id, url.clone());
+                }
+            }
+        }
+    }
+
+    Ok(urls)
+}
+
+/// Resolve the presigned URL for a single picture at the given variant.
 ///
 /// Checks `PictureUrl` cache first. On miss: owned picture → local S3; received picture →
 /// look up owner in local DB (same-backend share) or call the owner's backend via share_token
 /// (cross-instance). Result is cached under the same key regardless of path taken.
+///
+/// Used for single-picture endpoints (e.g. `GET /pictures/{id}/url`).
 async fn presign_for_picture(
     db: &PgPool,
     redis: &RedisClient,
@@ -319,28 +469,33 @@ async fn presign_for_picture(
 
     let url = if pic.is_owned() {
         let key = s3::picture_key(pic.local_user_id, pic.id);
-        let url = storage.presign_get(variant.bucket(config), &key).await?;
-        redis
-            .set_string_ex(
-                RedisKey::PictureUrl(pic.id, variant.as_str()),
-                &url,
-                config.s3_presign_ttl_secs,
-            )
-            .await?;
-        url
+        storage.presign_get(variant.bucket(config), &key).await?
     } else {
         let owner_username = pic.owner_username.as_deref().unwrap_or_default();
         let owner_instance = pic.owner_instance_domain.as_deref().unwrap_or_default();
+        // The remote picture's UUID on the owner's backend is stored as remote_picture_id.
+        let remote_id: Uuid = pic
+            .remote_picture_id
+            .as_deref()
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| {
+                AppError::InternalServerError("received picture missing remote_picture_id".into())
+            })?;
 
-        // Check if the owner lives on this backend. Multiple backends can share the same global
-        // domain (resolver setup), so we must look the user up in the local DB
-        if let Some(owner) = UserRepository::find_by_username(db, owner_username).await? {
-            let key = s3::picture_key(owner.id, pic.id);
+        // Check if the owner lives on this backend (resolver setup allows multiple backends per
+        // global domain). Cache the lookup to avoid a DB hit on every picture in a listing.
+        if let Some(owner_id) =
+            find_local_user_id(redis, db, config, owner_username, owner_instance).await?
+        {
+            // Owner is on this backend — derive S3 key from their user_id + original picture id.
+            let key = s3::picture_key(owner_id, remote_id);
             storage.presign_get(variant.bucket(config), &key).await?
         } else {
             // Owner is on a different backend — authorise via share_token and call remote.
-            let share_token = IncomingShareRepository::find_token_by_sender(
+            let share_token = cached_share_token(
+                redis,
                 db,
+                config,
                 local_user_id,
                 owner_username,
                 owner_instance,
@@ -355,7 +510,7 @@ async fn presign_for_picture(
                 .presign_remote_picture(
                     owner_username,
                     owner_instance,
-                    pic.id,
+                    remote_id,
                     variant.as_str(),
                     share_token,
                 )
@@ -372,6 +527,46 @@ async fn presign_for_picture(
             .await?;
     }
     Ok(url)
+}
+
+/// Cache-aside lookup for the `origin_share_token` of an active incoming share
+/// from `sender_username@sender_instance` held by `local_user_id`.
+///
+/// Returns `None` when no active share token exists (caller decides whether that is
+/// an error).
+async fn cached_share_token(
+    redis: &RedisClient,
+    db: &PgPool,
+    config: &Config,
+    local_user_id: Uuid,
+    sender_username: &str,
+    sender_instance: &str,
+) -> Result<Option<Uuid>, AppError> {
+    let key = RedisKey::IncomingShareToken(local_user_id, sender_username, sender_instance);
+
+    if let Some(tok_str) = redis.get_string(key).await.ok().flatten() {
+        return Ok(tok_str.parse::<Uuid>().ok());
+    }
+
+    let token = IncomingShareRepository::find_token_by_sender(
+        db,
+        local_user_id,
+        sender_username,
+        sender_instance,
+    )
+    .await?;
+
+    if let Some(tok) = token {
+        let _ = redis
+            .set_string_ex(
+                key,
+                &tok.to_string(),
+                config.federation_backend_cache_ttl_secs,
+            )
+            .await;
+    }
+
+    Ok(token)
 }
 
 pub async fn presign_picture_variant(

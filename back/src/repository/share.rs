@@ -40,6 +40,21 @@ impl OutgoingShareRepository {
             .map_err(map_sqlx_error)
     }
 
+    pub async fn get_by_id<'e, E>(ex: E, share_id: Uuid) -> Result<Option<OutgoingShare>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query_as(
+            r#"SELECT id, owner_id, tag_path::text as tag_path, recipient_username, recipient_instance,
+                      allow_share_back, future, status, share_token, created_at, revoked_at
+               FROM outgoing_shares WHERE id = $1"#,
+        )
+            .bind(share_id)
+            .fetch_optional(ex)
+            .await
+            .map_err(map_sqlx_error)
+    }
+
     /// Check if a share token belongs to an active outgoing share. Used for transitive presign
     /// authorization: a recipient holds the token from the original sender's OutgoingShare.
     pub async fn has_active_share_for_token<'e, E>(
@@ -149,7 +164,7 @@ impl IncomingShareRepository {
         Ok(())
     }
 
-    pub async fn get_by_id<'e, E>(ex: E, share_id: Uuid) -> Result<IncomingShare, AppError>
+    pub async fn get_by_id<'e, E>(ex: E, share_id: Uuid) -> Result<Option<IncomingShare>, AppError>
     where
         E: Executor<'e, Database = Postgres>,
     {
@@ -159,7 +174,30 @@ impl IncomingShareRepository {
                FROM incoming_shares WHERE id = $1"#,
         )
         .bind(share_id)
-        .fetch_one(ex)
+        .fetch_optional(ex)
+        .await
+        .map_err(map_sqlx_error)
+    }
+
+    /// Find the incoming share for a given outgoing_share_id from a specific sender instance.
+    /// Used by the recipient backend when the sender announces pictures after share acceptance.
+    pub async fn find_by_outgoing_share<'e, E>(
+        ex: E,
+        outgoing_share_id: Uuid,
+        sender_instance: &str,
+    ) -> Result<Option<IncomingShare>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query_as(
+            r#"SELECT id, recipient_id, sender_username, sender_instance, outgoing_share_id,
+                      local_mapping_service_id, status, origin_share_token, created_at, revoked_at
+               FROM incoming_shares
+               WHERE outgoing_share_id = $1 AND sender_instance = $2"#,
+        )
+        .bind(outgoing_share_id)
+        .bind(sender_instance)
+        .fetch_optional(ex)
         .await
         .map_err(map_sqlx_error)
     }

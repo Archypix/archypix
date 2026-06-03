@@ -16,10 +16,11 @@
 
 ## To-do
 
-- [ ] **Tag sharing full support** — review current federation, setup the accept incoming share flow (federation message -> pictures announcement),
-  cache in redis the value of (IncomingShareRepository::find_token_by_sender) and of (UserRepository::find_by_username) because it can be used a lot
-  of time when looking for shared pictures. Verify that the flow works also with locally shared pictures (shared within the same backend), and with
-  pictures shared within the same global backend.
+- [x] **Tag sharing full support** — federation client split into `handshake.rs` / `shares.rs`; accept incoming share flow wired (federation message →
+  pictures announcement); `POST /api/federation/shares/accept` added; `announce_pictures` handler implemented; same-backend short-circuit in
+  `create_outgoing_share`; `PictureRepository::create_received`; `TagRepository::assign_incoming_share_tag` / `remove_incoming_share_tags`;
+  `batch_remove` protected to `source = manual` only; Redis caching for `find_token_by_sender` and `find_by_username`; presign fixed to use
+  `remote_picture_id` for both same-backend and cross-instance received pictures.
 - [ ] **Tests** — Add tests
 - [ ] **Tagging pipeline execution** — wire `services/tagging.rs` to run the domain pipeline evaluator on ingest/edit/share events; connect the
   in-process `TaskQueue::RunTaggingPipeline` variant.

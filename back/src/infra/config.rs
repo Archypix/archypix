@@ -45,8 +45,10 @@ pub struct Config {
     pub refresh_token_ttl_secs: i64,
 
     // ── Federation ────────────────────────────────────────────────────────────
-    /// Whether to use HTTPS when contacting remote federated backends.
-    pub federation_use_https: bool,
+    /// Whether to use HTTPS when resolving remote backends via WebFinger.
+    /// Controls only the `.well-known/webfinger` call; all subsequent API calls
+    /// use the scheme embedded in the `backend_url` returned by the resolver.
+    pub webfinger_use_https: bool,
     pub federation_jwt_ttl_secs: i64,
     pub federation_backend_cache_ttl_secs: u64,
     pub federation_request_timeout_ms: u64,
@@ -137,7 +139,7 @@ impl Config {
             access_token_ttl_secs: env_i64("ACCESS_TOKEN_TTL_SECS", 900)?,
             refresh_token_ttl_secs: env_i64("REFRESH_TOKEN_TTL_SECS", 15_552_000)?,
 
-            federation_use_https: env_bool("FEDERATION_USE_HTTPS", true)?,
+            webfinger_use_https: env_bool("WEBFINGER_USE_HTTPS", true)?,
             federation_jwt_ttl_secs: env_i64("FEDERATION_JWT_TTL_SECS", 86_400)?,
             federation_backend_cache_ttl_secs: env_u64("FEDERATION_BACKEND_CACHE_TTL_SECS", 3600)?,
             federation_request_timeout_ms: env_u64("FEDERATION_REQUEST_TIMEOUT_MS", 1000)?,
@@ -197,8 +199,8 @@ impl Config {
         format!("{}://{}", self.back_scheme(), self.back_domain)
     }
 
-    pub fn federation_scheme(&self) -> &'static str {
-        if self.federation_use_https {
+    pub fn webfinger_scheme(&self) -> &'static str {
+        if self.webfinger_use_https {
             "https"
         } else {
             "http"

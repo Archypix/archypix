@@ -11,6 +11,9 @@ use uuid::Uuid;
 
 /// Canonical Redis key definitions. Every key used anywhere in the codebase is listed here.
 /// Pass a value of this enum directly to `RedisClient` methods — no manual key building needed.
+///
+/// All variants hold only `Copy` types (`Uuid`, `&str`) so the enum itself is `Copy`.
+#[derive(Copy, Clone)]
 pub enum RedisKey<'a> {
     /// Transient upload session during the presigned-PUT window.
     UploadSession(Uuid),
@@ -21,6 +24,13 @@ pub enum RedisKey<'a> {
     FederationToken(&'a str),
     /// Cached backend domain for `username@global_domain`.
     FederationBackend(&'a str, &'a str),
+    /// Cached `origin_share_token` for an active incoming share from `sender@instance` to `user_id`.
+    /// Populated on first `find_token_by_sender` DB hit; invalidated on share revocation.
+    IncomingShareToken(Uuid, &'a str, &'a str),
+    /// Cached local user UUID for a given username.
+    /// Accelerates the hot path in presign_for_picture where every received-picture fetch checks
+    /// whether the owner lives on this backend.
+    UserByUsername(&'a str),
 }
 
 impl<'a> RedisKey<'a> {
@@ -30,6 +40,10 @@ impl<'a> RedisKey<'a> {
             Self::PictureUrl(id, variant) => format!("presign:{id}:{variant}"),
             Self::FederationToken(domain) => format!("federation:token:{domain}"),
             Self::FederationBackend(u, d) => format!("federation:backend:{u}@{d}"),
+            Self::IncomingShareToken(uid, sender, instance) => {
+                format!("share:token:{uid}:{sender}@{instance}")
+            }
+            Self::UserByUsername(username) => format!("user:username:{username}"),
         }
     }
 }

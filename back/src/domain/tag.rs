@@ -48,8 +48,12 @@ impl TagPath {
     }
 
     /// Build the `/SharedToMe/<sender>/...` path for a federation-received tag.
+    ///
+    /// Sender identity is encoded as `{username}_AT_{instance}` where `.` becomes `_DOT_`,
+    /// giving a reversible, unambiguous LTREE label. Example:
+    /// `alice@instance.com` + `Photos.Travel` → `SharedToMe.alice_AT_instance_DOT_com.Photos.Travel`
     pub fn shared_to_me(sender_username: &str, sender_instance: &str, original: &TagPath) -> Self {
-        let label = sanitize_ltree_label(&format!("{sender_username}@{sender_instance}"));
+        let label = encode_sender_label(sender_username, sender_instance);
         if original.0.is_empty() {
             TagPath(format!("SharedToMe.{label}"))
         } else {
@@ -88,16 +92,21 @@ impl From<&str> for TagPath {
     }
 }
 
-/// Replace characters not allowed in ltree labels with underscores.
-fn sanitize_ltree_label(input: &str) -> String {
-    input
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+/// Encode a sender identity (`username@instance`) as a single LTREE label.
+///
+/// `@` → `_AT_`, `.` → `_DOT_`, any remaining non-alphanumeric → `_`.
+///
+/// Usernames are restricted to `[a-z0-9_]` at registration, so only dots and the `_AT_`
+/// separator need escaping. No collisions are possible within the username component.
+fn encode_sender_label(username: &str, instance: &str) -> String {
+    let encode = |s: &str| -> String {
+        s.chars()
+            .map(|c| match c {
+                '.' => "_DOT_".to_string(),
+                c if c.is_ascii_alphanumeric() || c == '_' => c.to_string(),
+                _ => "_".to_string(),
+            })
+            .collect()
+    };
+    format!("{}_AT_{}", encode(username), encode(instance))
 }

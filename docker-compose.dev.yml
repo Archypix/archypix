@@ -7,7 +7,7 @@
 #   backend3:   standalone (own resolver)        → solo.archypix.test
 #   worker1-3:  one worker per backend
 #
-# All inter-service traffic uses HTTP (BACK_USE_HTTPS=false, FEDERATION_USE_HTTPS=false).
+# All inter-service traffic uses HTTP (BACK_USE_HTTPS=false, WEBFINGER_USE_HTTPS=false).
 #
 # Traefik (172.30.0.10) routes fake hostnames to the right containers so that
 # inter-backend federation works from inside the Docker network:
