@@ -79,6 +79,49 @@ impl FederationClient {
         })
     }
 
+    /// Notify the recipient's backend that an outgoing share has been revoked.
+    ///
+    /// Identified by `outgoing_share_id` so the recipient can look up their `IncomingShare`
+    /// without Alice needing to know Bob's internal IDs.
+    pub async fn send_revocation(
+        &self,
+        sender_username: &str,
+        recipient_username: &str,
+        recipient_global_domain: &str,
+        outgoing_share_id: uuid::Uuid,
+    ) -> Result<(), AppError> {
+        let token = self
+            .get_or_wait_federation_token(
+                sender_username,
+                recipient_username,
+                recipient_global_domain,
+            )
+            .await?;
+        let backend_base_url = self
+            .resolve_backend_url(recipient_username, recipient_global_domain)
+            .await?;
+        debug!(
+            recipient_global_domain,
+            backend_base_url,
+            %outgoing_share_id,
+            "federation: sending share revocation"
+        );
+        let url = format!("{}/api/federation/shares/revoke", backend_base_url);
+        self.http
+            .post(&url)
+            .bearer_auth(&token)
+            .json(&ShareRevokeRequest { outgoing_share_id })
+            .send()
+            .await
+            .map_err(|e| {
+                warn!(recipient_global_domain, error = %e, "federation: revocation delivery failed");
+                AppError::InternalServerError(e.to_string())
+            })?
+            .error_for_status()
+            .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+        Ok(())
+    }
+
     /// Announce a new outgoing share to the recipient's backend.
     pub async fn announce_share(
         &self,
@@ -224,5 +267,10 @@ struct BatchPresignResponse {
 
 #[derive(Serialize)]
 struct ShareAcceptRequest {
+    outgoing_share_id: Uuid,
+}
+
+#[derive(Serialize)]
+struct ShareRevokeRequest {
     outgoing_share_id: Uuid,
 }

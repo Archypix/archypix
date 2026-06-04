@@ -32,9 +32,11 @@ pub struct ShareAnnouncement {
     pub share_token: Uuid,
 }
 
+/// Sent by the sender (Alice) to the recipient's (Bob's) backend to revoke a share.
+/// Keyed by Alice's `outgoing_share_id`; Bob looks up the matching IncomingShare himself.
 #[derive(Debug, Deserialize)]
 pub struct ShareRevokeRequest {
-    pub incoming_share_id: Uuid,
+    pub outgoing_share_id: Uuid,
 }
 
 /// Sent by the recipient (Bob) to the sender (Alice) to accept a share.

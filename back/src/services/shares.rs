@@ -1,9 +1,9 @@
 use crate::clients::federation::{FederationClient, ShareAnnouncement};
-use crate::domain::share::OutgoingShare;
+use crate::domain::share::{OutgoingShare, ShareStatus};
 use crate::domain::tag::TagPath;
 use crate::infra::config::Config;
 use crate::infra::error::AppError;
-use crate::infra::redis::RedisClient;
+use crate::infra::redis::{RedisClient, RedisKey};
 use crate::repository::picture::PictureRepository;
 use crate::repository::share::{IncomingShareRepository, OutgoingShareRepository};
 use crate::repository::tag::TagRepository;
@@ -103,8 +103,17 @@ pub async fn create_outgoing_share(
         recipient_instance,
         "shares: create_outgoing_share"
     );
+
+    let recipient_local_id =
+        find_local_user_id(redis, db, config, recipient_username, recipient_instance).await?;
+
+    let mut tx = db
+        .begin()
+        .await
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+
     let share = OutgoingShareRepository::create(
-        db,
+        &mut *tx,
         owner_id,
         tag_path,
         recipient_username,
@@ -114,12 +123,10 @@ pub async fn create_outgoing_share(
     )
     .await?;
 
-    if let Some(recipient_id) =
-        find_local_user_id(redis, db, config, recipient_username, recipient_instance).await?
-    {
-        // Same-backend share: create the IncomingShare directly without federation HTTP.
+    if let Some(recipient_id) = recipient_local_id {
+        // Same-backend: create IncomingShare in the same transaction.
         IncomingShareRepository::create(
-            db,
+            &mut *tx,
             recipient_id,
             sender_username,
             &config.global_domain,
@@ -153,6 +160,10 @@ pub async fn create_outgoing_share(
             .await?;
     }
 
+    tx.commit()
+        .await
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+
     Ok(share)
 }
 
@@ -179,6 +190,17 @@ pub async fn accept_incoming_share(
     if incoming.recipient_id != acceptor_id {
         return Err(AppError::NotFound);
     }
+
+    match incoming.status {
+        ShareStatus::Pending => {}           // normal path
+        ShareStatus::Active => return Ok(0), // already accepted — idempotent
+        ShareStatus::Revoked | ShareStatus::Tombstoned => return Err(AppError::NotFound),
+    }
+
+    // Transition to Active immediately — this is Bob's consent. For the cross-instance
+    // path, pictures arrive asynchronously via `announce_pictures`; the share must already
+    // be Active by then.
+    IncomingShareRepository::set_status(db, incoming.id, ShareStatus::Active).await?;
 
     if let Some(sender_id) = find_local_user_id(
         redis,
@@ -218,7 +240,11 @@ pub async fn accept_incoming_share(
             })
             .collect();
 
-        register_received_pictures(db, acceptor_id, incoming.id, &shared_tag, &pics).await
+        let count =
+            register_received_pictures(db, acceptor_id, incoming.id, &shared_tag, &pics).await?;
+        OutgoingShareRepository::set_status(db, incoming.outgoing_share_id, ShareStatus::Active)
+            .await?;
+        Ok(count)
     } else {
         // ── Cross-instance path ───────────────────────────────────────────────
         federation
@@ -229,7 +255,97 @@ pub async fn accept_incoming_share(
                 incoming.outgoing_share_id,
             )
             .await?;
-        // Pictures will arrive asynchronously via /api/federation/pictures/announce.
         Ok(0)
     }
+}
+
+/// Revoke an outgoing share owned by `owner_id`.
+///
+/// - Marks the `OutgoingShare` as `revoked`.
+/// - Same-backend: directly revokes the matching `IncomingShare` (removes tags, deletes
+///   unreachable received pictures, invalidates the share-token Redis cache).
+/// - Cross-instance: sends a federation revocation message to the recipient's backend.
+pub async fn revoke_outgoing_share(
+    db: &PgPool,
+    redis: &RedisClient,
+    federation: &FederationClient,
+    config: &Config,
+    owner_id: Uuid,
+    owner_username: &str,
+    share_id: Uuid,
+) -> Result<(), AppError> {
+    trace!(share_id = %share_id, owner_id = %owner_id, "shares: revoke_outgoing_share");
+
+    let share = OutgoingShareRepository::get_by_id(db, share_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if share.owner_id != owner_id {
+        return Err(AppError::NotFound);
+    }
+    if share.status == ShareStatus::Revoked {
+        return Ok(()); // idempotent
+    }
+
+    // Mark the outgoing share as revoked first so no new picture announcements go out.
+    OutgoingShareRepository::set_status(db, share_id, ShareStatus::Revoked).await?;
+
+    if let Some(_recipient_id) = find_local_user_id(
+        redis,
+        db,
+        config,
+        &share.recipient_username,
+        &share.recipient_instance,
+    )
+    .await?
+    {
+        // ── Same-backend path ─────────────────────────────────────────────────
+        // The IncomingShare may not exist yet (e.g. share created and immediately revoked).
+        if let Some(incoming) =
+            IncomingShareRepository::find_by_outgoing_share(db, share_id, &config.global_domain)
+                .await?
+        {
+            if incoming.status != ShareStatus::Revoked && incoming.status != ShareStatus::Tombstoned
+            {
+                let mut tx = db
+                    .begin()
+                    .await
+                    .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+
+                TagRepository::remove_incoming_share_tags(&mut *tx, incoming.id).await?;
+                PictureRepository::delete_received_without_share_tags(
+                    &mut *tx,
+                    incoming.recipient_id,
+                    owner_username,
+                    &config.global_domain,
+                )
+                .await?;
+                IncomingShareRepository::set_status(&mut *tx, incoming.id, ShareStatus::Revoked)
+                    .await?;
+
+                tx.commit()
+                    .await
+                    .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+
+                let _ = redis
+                    .del(RedisKey::IncomingShareToken(
+                        incoming.recipient_id,
+                        &incoming.sender_username,
+                        &incoming.sender_instance,
+                    ))
+                    .await;
+            }
+        }
+    } else {
+        // ── Cross-instance path ───────────────────────────────────────────────
+        federation
+            .send_revocation(
+                owner_username,
+                &share.recipient_username,
+                &share.recipient_instance,
+                share.id,
+            )
+            .await?;
+    }
+
+    Ok(())
 }

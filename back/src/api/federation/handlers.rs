@@ -18,10 +18,12 @@ use crate::repository::tag::TagRepository;
 use crate::repository::user::UserRepository;
 use crate::services::pictures::PictureVariant;
 use crate::services::shares::{ReceivedPictureInfo, register_received_pictures};
+use crate::services::users::find_local_user_id;
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::State;
 use chrono::Utc;
+use std::os::macos::raw::stat;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -144,17 +146,18 @@ pub async fn revoke_share(
     debug!(
         user = %auth.claims.sub,
         token_type = "federation",
-        share_id = %payload.incoming_share_id,
+        outgoing_share_id = %payload.outgoing_share_id,
         "federation: revoke_share"
     );
-    let share = IncomingShareRepository::get_by_id(&state.db, payload.incoming_share_id)
-        .await?
-        .ok_or(AppError::NotFound)?;
-    if share.sender_instance != auth.claims.sub {
-        return Err(AppError::Unauthorized(
-            "Sender instance does not match authenticated instance".to_string(),
-        ));
-    }
+    // The authenticated instance IS the sender; use it to look up the IncomingShare so
+    // Alice does not need to know Bob's internal IncomingShare UUID.
+    let share = IncomingShareRepository::find_by_outgoing_share(
+        &state.db,
+        payload.outgoing_share_id,
+        &auth.claims.sub,
+    )
+    .await?
+    .ok_or(AppError::NotFound)?;
 
     let mut tx = state
         .db
@@ -177,8 +180,7 @@ pub async fn revoke_share(
     .await?;
 
     // 3. Mark the share as revoked.
-    IncomingShareRepository::set_status(&mut *tx, payload.incoming_share_id, ShareStatus::Revoked)
-        .await?;
+    IncomingShareRepository::set_status(&mut *tx, share.id, ShareStatus::Revoked).await?;
 
     tx.commit()
         .await
@@ -198,7 +200,7 @@ pub async fn revoke_share(
     debug!(
         user = %auth.claims.sub,
         token_type = "federation",
-        share_id = %payload.incoming_share_id,
+        outgoing_share_id = %payload.outgoing_share_id,
         deleted_pictures = deleted,
         "federation: share revoked"
     );
@@ -231,9 +233,11 @@ pub async fn accept_share(
         .await?
         .ok_or(AppError::NotFound)?;
 
-    // Fix #4: reject if the share was revoked before the accept arrived.
-    if share.status != ShareStatus::Active {
-        return Err(AppError::NotFound);
+    // Reject if the share was revoked or tombstoned before the accept arrived.
+    // Allow both Pending (normal path) and Active (idempotent retry — re-announce pictures).
+    match share.status {
+        ShareStatus::Pending | ShareStatus::Active => {}
+        ShareStatus::Revoked | ShareStatus::Tombstoned => return Err(AppError::NotFound),
     }
 
     // Verify the authenticated instance is the intended recipient.
@@ -248,6 +252,8 @@ pub async fn accept_share(
             "Authenticated instance is not the share recipient".to_string(),
         ));
     }
+
+    OutgoingShareRepository::set_status(&state.db, share.id, ShareStatus::Active).await?;
 
     // Look up Alice (the owner) by owner_id to get her username for the announcement.
     let owner = UserRepository::find_by_id(&state.db, share.owner_id)
@@ -335,7 +341,6 @@ pub async fn announce_pictures(
     .await?
     .ok_or(AppError::NotFound)?;
 
-    // Fix #3: ignore announcements for shares that are no longer active.
     if incoming_share.status != ShareStatus::Active {
         return Err(AppError::NotFound);
     }
@@ -392,9 +397,6 @@ pub async fn presign_picture(
         picture_count = payload.pictures.len(),
         "federation: presign_picture"
     );
-    if payload.owner_instance != state.config.global_domain {
-        return Err(AppError::BadRequest("Invalid owner instance".to_string()));
-    }
 
     let allowed =
         OutgoingShareRepository::has_active_share_for_token(&state.db, payload.share_token).await?;
@@ -404,9 +406,15 @@ pub async fn presign_picture(
         ));
     }
 
-    let owner = UserRepository::find_by_username(&state.db, &payload.owner_username)
-        .await?
-        .ok_or(AppError::NotFound)?;
+    let owner_id = find_local_user_id(
+        &state.redis,
+        &state.db,
+        &state.config,
+        &payload.owner_username,
+        &payload.owner_instance,
+    )
+    .await?
+    .ok_or(AppError::NotFound)?;
 
     let mut urls = Vec::with_capacity(payload.pictures.len());
     for item in &payload.pictures {
@@ -419,7 +427,7 @@ pub async fn presign_picture(
             .await?
             .ok_or(AppError::NotFound)?;
 
-        if picture.local_user_id != owner.id || !picture.is_owned() {
+        if picture.local_user_id != owner_id || !picture.is_owned() {
             return Err(AppError::NotFound);
         }
 

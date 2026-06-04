@@ -10,20 +10,12 @@ Regenerate the SQLx offline query cache (requires a running database):
 cargo sqlx prepare
 ```
 
-### After modifying the latest migration file (not adding a new one)
+### After modifying the migration file
 
-Revert the last migration, then re-apply it:
-
-```bash
-sqlx migrate revert
-sqlx migrate run
-cargo sqlx prepare
-```
-
-### After adding a new migration file
+There is only one migration (`001_initial_schema`). Recreate the database and regenerate the offline cache:
 
 ```bash
-sqlx migrate run
+docker compose down -v && docker compose up -d
 cargo sqlx prepare
 ```
 
@@ -115,7 +107,7 @@ All PostgreSQL enums use snake_case values and map directly to Rust enums via `s
 
 | PG type                   | Values                                                         |
 |---------------------------|----------------------------------------------------------------|
-| `share_status`            | `active`, `revoked`, `tombstoned`                              |
+| `share_status`            | `pending`, `active`, `revoked`, `tombstoned`                   |
 | `tag_source`              | `manual`, `rule`, `segment`, `share_mapping`, `incoming_share` |
 | `job_status`              | `pending`, `processing`, `completed`, `failed`                 |
 | `job_type`                | `gen_thumbnail`, `ml_style`, `ml_people`, `ml_group_location`  |

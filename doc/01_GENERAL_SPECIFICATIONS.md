@@ -203,28 +203,27 @@ OutgoingShare:
   recipient: "@bob:other.com"
   allowShareBack: true         # if false, ShareBack creates a normal share request (no auto-accept)
   future: true                 # new pictures added to the tag are announced automatically
+  status: pending              # pending | active | revoked
 
 IncomingShare:
   id: is-001
   sender: "@alice:instance.com"
   outgoingShareId: os-001      # reference to the sender's OutgoingShare
   localMappingServiceId: stms-007   # optional: linked SharedTagMappingService entry
-  status: active               # active | revoked | tombstoned
+  status: pending              # pending | active | revoked | tombstoned
 ```
 
 ### 6.2 Sharing a tag
 
 Alice shares `/Photos/Travel/Alps` with Bob. Alice's backend creates an `OutgoingShare` and federates a share announcement to Bob's backend. Bob's
-backend creates an `IncomingShare` and assigns the tag:
+backend creates an `IncomingShare` (`status = pending`).
 
-```
-/SharedToMe/alice@instance.com/Photos/Travel/Alps
-```
+Bob then accepts the share. His backend transitions the `IncomingShare` to `active` and registers each picture under the tag:
+`/SharedToMe/alice_AT_instance_DOT_com/Photos/Travel/Alps`
 
-to each announced picture. The picture's `owner` field remains `@alice:instance.com`. When Bob's client displays it, it fetches the blob directly from
-Alice's backend.   
-If `future: true`, any picture Alice subsequently adds to `/Photos/Travel/Alps` triggers a new announcement to Bob's backend, which assigns the same
-`/SharedToMe/...` tag and re-runs Bob's pipeline with label `incoming-share`.
+The picture's `owner` field remains `@alice:instance.com`. When Bob's client displays it, it fetches the blob directly from Alice's backend.   
+If `future: true`, any picture Alice subsequently adds to `/Photos/Travel/Alps` triggers a new announcement to Bob's backend (only delivered if the
+share is `active`), which assigns the same `/SharedToMe/...` tag and re-runs Bob's pipeline with label `incoming-share`.
 
 ### 6.3 Re-tagging received pictures
 
@@ -265,17 +264,18 @@ Alice are already shared by Bob.
 
 ### 6.7 Revocation
 
-Alice revokes `OutgoingShare` os-001. Alice's backend:
+Alice calls `POST /api/authenticated/shares/outgoing/{id}/revoke`. Alice's backend:
 
-1. Federates a revocation message to Bob's backend.
-2. Invalidates any presigned URLs or access tokens it had issued for the shared pictures, so Bob's client can no longer fetch the blobs.
+1. Sets `OutgoingShare` os-001 status to `revoked`.
+2. Notifies the recipient (same-backend: directly; cross-instance: `POST /api/federation/shares/revoke`).
 
 Bob's backend on receiving revocation:
 
-1. Sets `IncomingShare` is-001 status to `revoked` and tombstones all `/SharedToMe/alice@instance.com/...` tag entries (marked broken, not silently
-   deleted) — Bob can see that content was intentionally removed.
-2. Propagates revocation downstream to all transitive recipients (Carol, etc.) by terminating the `OutgoingShare` s that depended on pictures sourced
-   from is-001.
+1. Removes all `/SharedToMe/alice@instance.com/...` tag entries assigned by this share.
+2. Deletes any received-picture rows from Alice that have no other active incoming-share tag (pictures covered by a separate active share from Alice
+   survive).
+3. Sets `IncomingShare` is-001 status to `revoked` and invalidates the cached share token so presign requests fail immediately.
+4. Propagates revocation downstream to any transitive recipients (Carol, etc.) whose `OutgoingShare`s depended on pictures sourced from is-001.
 
 Bob's own pictures in `/Photos/Holidays/2024` are unaffected. The `SharedTagMappingService` mapping for is-001 is flagged as broken in the UI. The tag
 `/Photos/Holidays/2024` remains, possibly now containing fewer pictures, until Bob cleans it up.

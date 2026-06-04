@@ -10,7 +10,7 @@ CREATE EXTENSION IF NOT EXISTS "ltree";
 -- ============================================================================
 -- ENUM TYPES
 -- ============================================================================
-CREATE TYPE share_status AS ENUM ('active', 'revoked', 'tombstoned');
+CREATE TYPE share_status AS ENUM ('pending', 'active', 'revoked', 'tombstoned');
 CREATE TYPE tag_source AS ENUM ('manual', 'rule', 'segment', 'share_mapping', 'incoming_share');
 CREATE TYPE job_status AS ENUM ('pending', 'processing', 'completed', 'failed');
 CREATE TYPE job_type AS ENUM ('gen_thumbnail', 'ml_style', 'ml_people', 'ml_group_location', 'edit_picture');
@@ -188,8 +188,8 @@ CREATE TABLE outgoing_shares
     allow_share_back   BOOLEAN      NOT NULL DEFAULT TRUE,
     future             BOOLEAN      NOT NULL DEFAULT TRUE, -- Auto-announce new pictures
 
-    -- Status
-    status             share_status NOT NULL DEFAULT 'active',
+    -- Status: starts as pending until the recipient accepts, then active.
+    status share_status NOT NULL DEFAULT 'pending',
 
     -- Capability token forwarded to recipients for transitive presign authorization
     share_token UUID NOT NULL DEFAULT gen_random_uuid(),
@@ -226,8 +226,8 @@ CREATE TABLE incoming_shares
     -- Local mapping service (optional)
     local_mapping_service_id UUID,                  -- FK added after tagging_services table
 
-    -- Status
-    status                   share_status NOT NULL DEFAULT 'active',
+    -- Status: starts as pending until the recipient explicitly accepts.
+    status share_status NOT NULL DEFAULT 'pending',
 
     -- Share token from the upstream sender; propagated for transitive presign authorization
     origin_share_token UUID,

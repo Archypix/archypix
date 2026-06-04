@@ -77,6 +77,31 @@ impl OutgoingShareRepository {
         Ok(exists.unwrap_or(false))
     }
 
+    pub async fn set_status<'e, E>(
+        ex: E,
+        share_id: Uuid,
+        status: ShareStatus,
+    ) -> Result<(), AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query(
+            r#"UPDATE outgoing_shares
+               SET status = $2,
+                   revoked_at = CASE WHEN $2 = 'revoked'::share_status
+                                     THEN now() AT TIME ZONE 'utc'
+                                     ELSE revoked_at
+                                END
+               WHERE id = $1"#,
+        )
+        .bind(share_id)
+        .bind(status)
+        .execute(ex)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(())
+    }
+
     pub async fn list_by_owner<'e, E>(ex: E, owner_id: Uuid) -> Result<Vec<OutgoingShare>, AppError>
     where
         E: Executor<'e, Database = Postgres>,
@@ -153,11 +178,17 @@ impl IncomingShareRepository {
     where
         E: Executor<'e, Database = Postgres>,
     {
-        sqlx::query!(
-            r#"UPDATE incoming_shares SET status = $2 WHERE id = $1"#,
-            share_id,
-            status as ShareStatus
+        sqlx::query(
+            r#"UPDATE incoming_shares
+               SET status = $2,
+                   revoked_at = CASE WHEN $2 = 'revoked'::share_status
+                                     THEN now() AT TIME ZONE 'utc'
+                                     ELSE revoked_at
+                                END
+               WHERE id = $1"#,
         )
+        .bind(share_id)
+        .bind(status)
         .execute(ex)
         .await
         .map_err(map_sqlx_error)?;

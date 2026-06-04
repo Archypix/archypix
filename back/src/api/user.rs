@@ -42,6 +42,10 @@ pub fn authenticated_routes() -> Router<AppState> {
             "/shares/outgoing",
             post(shares::create_outgoing).get(shares::list_outgoing),
         )
+        .route(
+            "/shares/outgoing/{id}/revoke",
+            post(shares::revoke_outgoing),
+        )
         .route("/shares/incoming", get(shares::list_incoming))
         .route(
             "/shares/incoming/{id}/accept",

@@ -6,8 +6,13 @@ use uuid::Uuid;
 #[sqlx(type_name = "share_status", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum ShareStatus {
+    /// Announced to the recipient but not yet accepted.
+    Pending,
+    /// Accepted by the recipient; pictures are visible.
     Active,
+    /// Revoked by the sender; pictures are no longer accessible.
     Revoked,
+    /// Rejected or deleted by the recipient.
     Tombstoned,
 }
 

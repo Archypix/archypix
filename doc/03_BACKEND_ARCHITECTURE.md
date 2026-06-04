@@ -25,7 +25,9 @@
 
 - Repository functions accept `Executor<'e, Database = Postgres>` — callable on pool or transaction.
 - Multi-step workflows (user creation, picture upload, share creation, job completion) run in an explicit SQL transaction managed by the service or
-  handler.
+  handler. For cross-instance share creation, the outbound federation HTTP calls run while the transaction is still open so that any federation
+  failure
+  automatically rolls back the `OutgoingShare` insert.
 - API handlers call repositories directly only for single-step CRUD with no orchestration.
 
 ## C) Module layout (`back/src/`)
@@ -51,7 +53,7 @@ clients/
   federation/
     mod.rs          # FederationClient struct + shared protocol types
     handshake.rs    # WebFinger resolution, token request/grant/store/issue
-    shares.rs       # announce_share, send_share_accept, announce_pictures, presign_remote
+    shares.rs       # announce_share, send_share_accept, send_revocation, announce_pictures, presign_remote_pictures
   resolver.rs       # self_register, update_mapping, verify_token
 
 services/
@@ -220,13 +222,14 @@ via WebFinger and cached.
 
 **Sharing**
 
-| Method | Path                                             | Description            |
-|--------|--------------------------------------------------|------------------------|
-| `POST` | `/api/authenticated/shares/outgoing`             | Create outgoing share. |
-| `GET`  | `/api/authenticated/shares/outgoing`             | List outgoing shares.  |
-| `GET`  | `/api/authenticated/shares/incoming`             | List incoming shares.  |
-| `POST` | `/api/authenticated/shares/incoming/{id}/accept` | Accept incoming share. |
-| `POST` | `/api/authenticated/shares/incoming/{id}/reject` | Reject incoming share. |
+| Method | Path                                             | Description                                                                                 |
+|--------|--------------------------------------------------|---------------------------------------------------------------------------------------------|
+| `POST` | `/api/authenticated/shares/outgoing`             | Create outgoing share.                                                                      |
+| `GET`  | `/api/authenticated/shares/outgoing`             | List outgoing shares.                                                                       |
+| `POST` | `/api/authenticated/shares/outgoing/{id}/revoke` | Revoke an outgoing share. Notifies the recipient; removes their tags and received pictures. |
+| `GET`  | `/api/authenticated/shares/incoming`             | List incoming shares.                                                                       |
+| `POST` | `/api/authenticated/shares/incoming/{id}/accept` | Accept incoming share (`pending → active`).                                                 |
+| `POST` | `/api/authenticated/shares/incoming/{id}/reject` | Reject incoming share (`pending/active → tombstoned`).                                      |
 
 ### Federation endpoints
 
@@ -235,8 +238,9 @@ via WebFinger and cached.
 | `POST` | `/api/federation/auth/request`      | Request a federation JWT.                                                                                                                                                               |
 | `POST` | `/api/federation/auth/grant`        | Receive a federation JWT from another instance.                                                                                                                                         |
 | `POST` | `/api/federation/shares/announce`   | Share announcement. Requires federation JWT.                                                                                                                                            |
-| `POST` | `/api/federation/shares/revoke`     | Share revocation. Requires federation JWT.                                                                                                                                              |
-| `POST` | `/api/federation/pictures/announce` | Announce pictures for an active share. Requires federation JWT.                                                                                                                         |
+| `POST` | `/api/federation/shares/accept`     | Recipient notifies sender that a share was accepted. Sender responds by announcing current pictures. Requires federation JWT.                                                           |
+| `POST` | `/api/federation/shares/revoke`     | Share revocation. Body: `{ outgoing_share_id }`. Requires federation JWT.                                                                                                               |
+| `POST` | `/api/federation/pictures/announce` | Announce pictures for an active share. Only accepted when `IncomingShare.status == active`. Requires federation JWT.                                                                    |
 | `POST` | `/api/federation/pictures/presign`  | Request presigned URLs for a batch of pictures. Auth: `share_token` only — no JWT required. Body: `{ owner_username, owner_instance, share_token, pictures: [{picture_id, variant}] }`. |
 
 ### Worker endpoints (`/api/worker/*`)
@@ -352,22 +356,32 @@ demand. Workers never hold S3 credentials; all access is via presigned URLs.
 
 ### Federation share announce
 
-1. Alice creates `OutgoingShare`.
-    - **Same-backend** (`recipient_instance == global_domain`): `IncomingShare` is created directly in DB; no HTTP federation.
-    - **Cross-instance**: federation handshake (or JWT from cache), then `POST /api/federation/shares/announce` to Bob’s backend.
-2. Bob’s backend creates `IncomingShare`.
-3. Bob accepts the share via `POST /api/authenticated/shares/incoming/{id}/accept`.
-    - **Same-backend**: Alice’s pictures under the tag are queried locally; received-picture rows + `/SharedToMe/…` tags are created directly.
-    - **Cross-instance**: Bob sends `POST /api/federation/shares/accept` to Alice’s backend.
-4. Alice’s backend (on receiving accept): queries her owned pictures under the shared tag, sends `POST /api/federation/pictures/announce` to Bob.
-5. Bob’s backend registers each announced picture (`PictureRepository::create_received`) and assigns the `/SharedToMe/alice_AT_instance_DOT_com/…`
-   tag (`source = incoming_share`, `source_id = incoming_share.id`).
-6. When Bob accesses a picture, `presign_for_picture` checks Redis cache first, then:
+1. Alice creates `OutgoingShare` (`status = pending`). The `OutgoingShare` insert and the federation delivery run in a single transaction: if the
+   federation call fails the insert is rolled back.
+   - **Same-backend** (`recipient_instance == global_domain`): `IncomingShare` is created in the same transaction (`status = pending`); no HTTP
+     federation.
+   - **Cross-instance**: federation handshake (or JWT from cache), then `POST /api/federation/shares/announce` to Bob’s backend. Bob’s backend creates
+     `IncomingShare` (`status = pending`).
+2. Bob accepts the share via `POST /api/authenticated/shares/incoming/{id}/accept`. Bob’s backend **immediately transitions `IncomingShare`
+   to `active`** (Bob’s consent), then handles delivery:
+   - **Same-backend**: Alice’s pictures under the tag are queried locally; received-picture rows + `/SharedToMe/…` tags are created in a single
+     transaction. Alice’s `OutgoingShare` is also transitioned to `active`.
+   - **Cross-instance**: sends `POST /api/federation/shares/accept` to Alice’s backend.
+3. Alice’s backend (on receiving accept): transitions `OutgoingShare` to `active`, queries her owned pictures under the shared tag, sends
+   `POST /api/federation/pictures/announce` to Bob.
+4. Bob’s `announce_pictures` handler registers each announced picture (`PictureRepository::create_received`) and assigns the
+   `/SharedToMe/alice_AT_instance_DOT_com/…` tag (`source = incoming_share`). It only accepts `active` shares — `pending` shares are rejected (
+   prevents picture injection into unaccepted shares).
+5. When Bob accesses a picture, `presign_for_picture` checks Redis cache first, then:
     - **Same-backend owner**: derives S3 key from `remote_picture_id` and owner’s local `user_id`.
     - **Cross-instance owner**: looks up `origin_share_token` (cached in Redis), calls `POST /api/federation/pictures/presign` on Alice’s backend.
 
 ### Federation share revocation
 
-1. Alice's backend sends revocation to Bob's backend.
-2. Bob's backend tombstones `IncomingShare`, marks `/SharedToMe/...` tags broken.
-3. Bob's backend propagates revocation downstream to any transitive recipients.
+1. Alice calls `POST /api/authenticated/shares/outgoing/{id}/revoke`. Alice’s backend sets `OutgoingShare` status to `revoked` and notifies the
+   recipient.
+   - **Same-backend**: directly removes `/SharedToMe/…` tags, deletes unreachable received pictures, sets `IncomingShare` status to `revoked`,
+     invalidates Redis presign-token cache.
+   - **Cross-instance**: sends `POST /api/federation/shares/revoke` (keyed by `outgoing_share_id`) to Bob’s backend, which performs the same cleanup
+     locally.
+2. Bob’s backend propagates revocation downstream to any transitive recipients.
