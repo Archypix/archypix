@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod federation;
 pub mod jobs;
 pub mod pictures;
 pub mod shares;

@@ -46,6 +46,13 @@ pub struct ShareAcceptRequest {
     pub outgoing_share_id: Uuid,
 }
 
+/// Sent by the recipient (Bob) to the sender (Alice) to reject a share.
+/// Alice will tombstone her OutgoingShare.
+#[derive(Debug, Deserialize)]
+pub struct ShareRejectRequest {
+    pub outgoing_share_id: Uuid,
+}
+
 /// A single picture entry inside an inbound pictures announcement.
 #[derive(Debug, Deserialize)]
 pub struct AnnouncedPicture {

@@ -195,6 +195,45 @@ impl FederationClient {
         Ok(())
     }
 
+    /// Send a share-rejection notification to the sender's backend.
+    ///
+    /// Called by the recipient (Bob) after rejecting an incoming share. The sender (Alice) will
+    /// tombstone her OutgoingShare so it no longer appears as pending/active on her side.
+    pub async fn send_share_reject(
+        &self,
+        rejector_username: &str,
+        sender_username: &str,
+        sender_global_domain: &str,
+        outgoing_share_id: Uuid,
+    ) -> Result<(), AppError> {
+        let token = self
+            .get_or_wait_federation_token(rejector_username, sender_username, sender_global_domain)
+            .await?;
+        let backend_base_url = self
+            .resolve_backend_url(sender_username, sender_global_domain)
+            .await?;
+        debug!(
+            sender_global_domain,
+            backend_base_url,
+            %outgoing_share_id,
+            "federation: sending share reject"
+        );
+        let url = format!("{}/api/federation/shares/reject", backend_base_url);
+        self.http
+            .post(&url)
+            .bearer_auth(&token)
+            .json(&ShareRejectRequest { outgoing_share_id })
+            .send()
+            .await
+            .map_err(|e| {
+                warn!(sender_global_domain, error = %e, "federation: share reject delivery failed");
+                AppError::InternalServerError(e.to_string())
+            })?
+            .error_for_status()
+            .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+        Ok(())
+    }
+
     /// Announce a batch of pictures to the recipient's backend after share acceptance.
     ///
     /// Called by the sender (Alice) to push all pictures currently under the shared tag to Bob.
@@ -267,6 +306,11 @@ struct BatchPresignResponse {
 
 #[derive(Serialize)]
 struct ShareAcceptRequest {
+    outgoing_share_id: Uuid,
+}
+
+#[derive(Serialize)]
+struct ShareRejectRequest {
     outgoing_share_id: Uuid,
 }
 

@@ -1,5 +1,5 @@
 use crate::clients::federation::{FederationClient, ShareAnnouncement};
-use crate::domain::share::{OutgoingShare, ShareStatus};
+use crate::domain::share::{IncomingShare, OutgoingShare, ShareStatus};
 use crate::domain::tag::TagPath;
 use crate::infra::config::Config;
 use crate::infra::error::AppError;
@@ -79,6 +79,112 @@ pub async fn register_received_pictures(
         .map_err(|e| AppError::InternalServerError(e.to_string()))?;
 
     Ok(pictures.len())
+}
+
+/// Remove tags, delete unreachable received pictures, set the share to `final_status`, and
+/// invalidate the Redis presign-token cache. Used by both revocation (→ Revoked) and
+/// rejection (→ Tombstoned) to avoid duplicating cleanup logic.
+pub async fn cleanup_incoming_share(
+    db: &PgPool,
+    redis: &RedisClient,
+    share: &IncomingShare,
+    final_status: ShareStatus,
+) -> Result<u64, AppError> {
+    let mut tx = db
+        .begin()
+        .await
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+
+    TagRepository::remove_incoming_share_tags(&mut *tx, share.id).await?;
+    let deleted = PictureRepository::delete_received_without_share_tags(
+        &mut *tx,
+        share.recipient_id,
+        &share.sender_username,
+        &share.sender_instance,
+    )
+    .await?;
+    IncomingShareRepository::set_status(&mut *tx, share.id, final_status).await?;
+
+    tx.commit()
+        .await
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+
+    let _ = redis
+        .del(RedisKey::IncomingShareToken(
+            share.recipient_id,
+            &share.sender_username,
+            &share.sender_instance,
+        ))
+        .await;
+
+    Ok(deleted)
+}
+
+/// Reject an incoming share on behalf of `rejector_username`.
+///
+/// - If the share was Active: removes SharedToMe tags and unreachable received pictures.
+/// - Same-backend: tombstones the sender's OutgoingShare directly.
+/// - Cross-instance: sends a federation rejection message to the sender's backend.
+pub async fn reject_incoming_share(
+    db: &PgPool,
+    redis: &RedisClient,
+    federation: &FederationClient,
+    config: &Config,
+    rejector_id: Uuid,
+    rejector_username: &str,
+    share_id: Uuid,
+) -> Result<(), AppError> {
+    trace!(share_id = %share_id, rejector_id = %rejector_id, "shares: reject_incoming_share");
+
+    let incoming = IncomingShareRepository::get_by_id(db, share_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if incoming.recipient_id != rejector_id {
+        return Err(AppError::NotFound);
+    }
+
+    match incoming.status {
+        ShareStatus::Tombstoned => return Ok(()),
+        ShareStatus::Revoked => return Err(AppError::NotFound),
+        ShareStatus::Pending => {
+            IncomingShareRepository::set_status(db, share_id, ShareStatus::Tombstoned).await?;
+        }
+        ShareStatus::Active => {
+            cleanup_incoming_share(db, redis, &incoming, ShareStatus::Tombstoned).await?;
+        }
+    }
+
+    // Notify the sender that their share was rejected.
+    if find_local_user_id(
+        redis,
+        db,
+        config,
+        &incoming.sender_username,
+        &incoming.sender_instance,
+    )
+    .await?
+    .is_some()
+    {
+        // Same-backend: directly tombstone the sender's OutgoingShare.
+        OutgoingShareRepository::set_status(
+            db,
+            incoming.outgoing_share_id,
+            ShareStatus::Tombstoned,
+        )
+        .await?;
+    } else {
+        // Cross-instance: send rejection to the sender's backend.
+        federation
+            .send_share_reject(
+                rejector_username,
+                &incoming.sender_username,
+                &incoming.sender_instance,
+                incoming.outgoing_share_id,
+            )
+            .await?;
+    }
+
+    Ok(())
 }
 
 pub async fn create_outgoing_share(
@@ -306,33 +412,7 @@ pub async fn revoke_outgoing_share(
         {
             if incoming.status != ShareStatus::Revoked && incoming.status != ShareStatus::Tombstoned
             {
-                let mut tx = db
-                    .begin()
-                    .await
-                    .map_err(|e| AppError::InternalServerError(e.to_string()))?;
-
-                TagRepository::remove_incoming_share_tags(&mut *tx, incoming.id).await?;
-                PictureRepository::delete_received_without_share_tags(
-                    &mut *tx,
-                    incoming.recipient_id,
-                    owner_username,
-                    &config.global_domain,
-                )
-                .await?;
-                IncomingShareRepository::set_status(&mut *tx, incoming.id, ShareStatus::Revoked)
-                    .await?;
-
-                tx.commit()
-                    .await
-                    .map_err(|e| AppError::InternalServerError(e.to_string()))?;
-
-                let _ = redis
-                    .del(RedisKey::IncomingShareToken(
-                        incoming.recipient_id,
-                        &incoming.sender_username,
-                        &incoming.sender_instance,
-                    ))
-                    .await;
+                cleanup_incoming_share(db, redis, &incoming, ShareStatus::Revoked).await?;
             }
         }
     } else {

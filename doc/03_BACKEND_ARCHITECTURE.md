@@ -53,11 +53,12 @@ clients/
   federation/
     mod.rs          # FederationClient struct + shared protocol types
     handshake.rs    # WebFinger resolution, token request/grant/store/issue
-    shares.rs       # announce_share, send_share_accept, send_revocation, announce_pictures, presign_remote_pictures
+    shares.rs       # announce_share, send_share_accept, send_share_reject, send_revocation, announce_pictures, presign_remote_pictures
   resolver.rs       # self_register, update_mapping, verify_token
 
 services/
   auth.rs / users.rs / pictures.rs / user_settings.rs / shares.rs / jobs.rs
+  federation.rs     # inbound federation protocol handlers (receive_share_announcement, receive_share_accept, receive_share_revoke, receive_share_reject, receive_pictures_announcement, presign_batch_for_token)
 
 api/
   middleware/auth_user.rs / auth_admin.rs / auth_resolver.rs / auth_federation.rs / auth_worker.rs

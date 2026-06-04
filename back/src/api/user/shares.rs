@@ -161,14 +161,15 @@ pub async fn reject_incoming(
     Path(share_id): Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     debug!(user = %auth.claims.sub, token_type = auth.token_type(), share_id = %share_id, "reject_incoming_share");
-    let share = IncomingShareRepository::get_by_id(&state.db, share_id)
-        .await?
-        .ok_or(AppError::NotFound)?;
-    if share.recipient_id != auth.user_id()? {
-        return Err(AppError::NotFound);
-    }
-    IncomingShareRepository::set_status(&state.db, share_id, ShareStatus::Tombstoned).await?;
-    // TODO: send a federation request to the sender to tell them the share was rejected.
-    // TODO: if the status was Active, delete the pictures like it is done in the federation api handler "revoke_share" (factorize code).
+    services::shares::reject_incoming_share(
+        &state.db,
+        &state.redis,
+        &state.federation,
+        &state.config,
+        auth.user_id()?,
+        &auth.claims.sub,
+        share_id,
+    )
+    .await?;
     Ok(Json(serde_json::json!({ "rejected": true })))
 }
