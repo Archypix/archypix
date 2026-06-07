@@ -3,8 +3,8 @@ use crate::domain::share::ShareStatus;
 use crate::domain::tag::TagPath;
 use crate::infra::config::Config;
 use crate::infra::error::AppError;
-use crate::infra::redis::RedisClient;
-use crate::infra::s3::{self, StorageClient};
+use crate::infra::redis::Cache;
+use crate::infra::s3::{self, Storage};
 use crate::repository::picture::PictureRepository;
 use crate::repository::share::{IncomingShareRepository, OutgoingShareRepository};
 use crate::repository::user::UserRepository;
@@ -150,7 +150,7 @@ pub async fn receive_share_accept(
 /// Received a share revocation from the sender; clean up the matching IncomingShare.
 pub async fn receive_share_revoke(
     db: &PgPool,
-    redis: &RedisClient,
+    cache: &dyn Cache,
     authenticated_instance: &str,
     outgoing_share_id: Uuid,
 ) -> Result<u64, AppError> {
@@ -161,7 +161,7 @@ pub async fn receive_share_revoke(
     )
     .await?
     .ok_or(AppError::NotFound)?;
-    cleanup_incoming_share(db, redis, &share, ShareStatus::Revoked).await
+    cleanup_incoming_share(db, cache, &share, ShareStatus::Revoked).await
 }
 
 /// Received a share rejection from the recipient; tombstone the OutgoingShare.
@@ -241,8 +241,8 @@ pub async fn receive_pictures_announcement(
 /// Validate a share_token and presign a batch of owned pictures for a remote recipient.
 pub async fn presign_batch_for_token(
     db: &PgPool,
-    redis: &RedisClient,
-    storage: &StorageClient,
+    cache: &dyn Cache,
+    storage: &dyn Storage,
     config: &Config,
     share_token: Uuid,
     owner_username: &str,
@@ -256,7 +256,7 @@ pub async fn presign_batch_for_token(
         ));
     }
 
-    let owner_id = find_local_user_id(redis, db, config, owner_username, owner_instance)
+    let owner_id = find_local_user_id(cache, db, config, owner_username, owner_instance)
         .await?
         .ok_or(AppError::NotFound)?;
 

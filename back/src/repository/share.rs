@@ -264,3 +264,203 @@ impl IncomingShareRepository {
         .map(|opt| opt.flatten())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::share::ShareStatus;
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+    async fn seed_user(db: &PgPool) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query!(
+            "INSERT INTO users (id, username, email, display_name) VALUES ($1, $2, $3, $4)",
+            id,
+            format!("u_{}", &id.to_string()[..8]),
+            format!("{}@t.com", id),
+            "T",
+        )
+        .execute(db)
+        .await
+        .unwrap();
+        id
+    }
+
+    // ── OutgoingShare ─────────────────────────────────────────────────────────
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn create_outgoing_share_defaults_to_pending(db: PgPool) {
+        let owner = seed_user(&db).await;
+        let share = OutgoingShareRepository::create(
+            &db,
+            owner,
+            "Photos.Travel",
+            "bob",
+            "other.com",
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(share.status, ShareStatus::Pending);
+        assert_eq!(share.owner_id, owner);
+        assert_eq!(share.recipient_username, "bob");
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn set_status_outgoing_transitions_correctly(db: PgPool) {
+        let owner = seed_user(&db).await;
+        let share =
+            OutgoingShareRepository::create(&db, owner, "Photos", "bob", "other.com", true, true)
+                .await
+                .unwrap();
+
+        OutgoingShareRepository::set_status(&db, share.id, ShareStatus::Active)
+            .await
+            .unwrap();
+
+        let updated = OutgoingShareRepository::get_by_id(&db, share.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, ShareStatus::Active);
+    }
+
+    // ── IncomingShare ─────────────────────────────────────────────────────────
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn create_incoming_share_defaults_to_pending(db: PgPool) {
+        let sender = seed_user(&db).await;
+        let recipient = seed_user(&db).await;
+        let outgoing = OutgoingShareRepository::create(
+            &db,
+            sender,
+            "Photos",
+            "recipient",
+            "this.com",
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+
+        let incoming = IncomingShareRepository::create(
+            &db,
+            recipient,
+            "sender",
+            "other.com",
+            outgoing.id,
+            Some(outgoing.share_token),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(incoming.status, ShareStatus::Pending);
+        assert_eq!(incoming.outgoing_share_id, outgoing.id);
+        assert_eq!(incoming.origin_share_token, Some(outgoing.share_token));
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn find_by_outgoing_share_returns_correct_record(db: PgPool) {
+        let sender = seed_user(&db).await;
+        let recipient = seed_user(&db).await;
+        let outgoing = OutgoingShareRepository::create(
+            &db,
+            sender,
+            "Photos",
+            "recipient",
+            "this.com",
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+
+        IncomingShareRepository::create(&db, recipient, "sender", "other.com", outgoing.id, None)
+            .await
+            .unwrap();
+
+        let found = IncomingShareRepository::find_by_outgoing_share(&db, outgoing.id, "other.com")
+            .await
+            .unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().recipient_id, recipient);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn find_token_by_sender_returns_token_for_active_share(db: PgPool) {
+        let sender = seed_user(&db).await;
+        let recipient = seed_user(&db).await;
+        let outgoing = OutgoingShareRepository::create(
+            &db,
+            sender,
+            "Photos",
+            "recipient",
+            "this.com",
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+        let token = outgoing.share_token;
+
+        let incoming = IncomingShareRepository::create(
+            &db,
+            recipient,
+            "sender",
+            "other.com",
+            outgoing.id,
+            Some(token),
+        )
+        .await
+        .unwrap();
+        IncomingShareRepository::set_status(&db, incoming.id, ShareStatus::Active)
+            .await
+            .unwrap();
+
+        let found =
+            IncomingShareRepository::find_token_by_sender(&db, recipient, "sender", "other.com")
+                .await
+                .unwrap();
+        assert_eq!(found, Some(token));
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn find_token_returns_none_for_non_active_share(db: PgPool) {
+        let sender = seed_user(&db).await;
+        let recipient = seed_user(&db).await;
+        let outgoing = OutgoingShareRepository::create(
+            &db,
+            sender,
+            "Photos",
+            "recipient",
+            "this.com",
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+
+        // Remains Pending, not Active
+        IncomingShareRepository::create(
+            &db,
+            recipient,
+            "sender",
+            "other.com",
+            outgoing.id,
+            Some(outgoing.share_token),
+        )
+        .await
+        .unwrap();
+
+        let found =
+            IncomingShareRepository::find_token_by_sender(&db, recipient, "sender", "other.com")
+                .await
+                .unwrap();
+        assert!(found.is_none());
+    }
+}

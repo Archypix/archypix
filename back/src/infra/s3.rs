@@ -1,5 +1,6 @@
 use crate::infra::config::Config;
 use crate::infra::error::AppError;
+use async_trait::async_trait;
 use aws_config::Region;
 use aws_config::meta::region::RegionProviderChain;
 use aws_sdk_s3::Client;
@@ -13,6 +14,26 @@ use base64::Engine as _;
 use std::time::Duration;
 use tracing::{info, warn};
 use uuid::Uuid;
+
+// ── Storage trait ─────────────────────────────────────────────────────────────
+
+/// Abstraction over the object storage layer. Implemented by `StorageClient` in production
+/// and `MockStorage` in tests.
+#[async_trait]
+pub trait Storage: Send + Sync {
+    async fn presign_get(&self, bucket: &str, key: &str) -> Result<String, AppError>;
+    async fn presign_put(&self, bucket: &str, key: &str) -> Result<String, AppError>;
+    async fn presign_get_worker(&self, bucket: &str, key: &str) -> Result<String, AppError>;
+    async fn presign_put_worker(&self, bucket: &str, key: &str) -> Result<String, AppError>;
+    async fn copy_object(
+        &self,
+        src_bucket: &str,
+        src_key: &str,
+        dst_bucket: &str,
+        dst_key: &str,
+    ) -> Result<(), AppError>;
+    async fn delete_object(&self, bucket: &str, key: &str) -> Result<(), AppError>;
+}
 
 pub fn picture_key(user_id: Uuid, picture_id: Uuid) -> String {
     format!("{}/{}", user_id, picture_id)
@@ -98,6 +119,35 @@ impl StorageClient {
             .await
             .map(|_| ())
             .map_err(|e| AppError::InternalServerError(e.to_string()))
+    }
+}
+
+#[async_trait]
+impl Storage for StorageClient {
+    async fn presign_get(&self, bucket: &str, key: &str) -> Result<String, AppError> {
+        self.presign_get(bucket, key).await
+    }
+    async fn presign_put(&self, bucket: &str, key: &str) -> Result<String, AppError> {
+        self.presign_put(bucket, key).await
+    }
+    async fn presign_get_worker(&self, bucket: &str, key: &str) -> Result<String, AppError> {
+        self.presign_get_worker(bucket, key).await
+    }
+    async fn presign_put_worker(&self, bucket: &str, key: &str) -> Result<String, AppError> {
+        self.presign_put_worker(bucket, key).await
+    }
+    async fn copy_object(
+        &self,
+        src_bucket: &str,
+        src_key: &str,
+        dst_bucket: &str,
+        dst_key: &str,
+    ) -> Result<(), AppError> {
+        self.copy_object(src_bucket, src_key, dst_bucket, dst_key)
+            .await
+    }
+    async fn delete_object(&self, bucket: &str, key: &str) -> Result<(), AppError> {
+        self.delete_object(bucket, key).await
     }
 }
 

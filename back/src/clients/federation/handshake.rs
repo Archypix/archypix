@@ -18,8 +18,8 @@ impl FederationClient {
         recipient_global_domain: &str,
     ) -> Result<Option<String>, AppError> {
         if let Some(token) = self
-            .redis
-            .get_string(RedisKey::FederationToken(recipient_global_domain))
+            .cache
+            .get_str(RedisKey::FederationToken(recipient_global_domain))
             .await
             .ok()
             .flatten()
@@ -63,7 +63,7 @@ impl FederationClient {
         Ok(None)
     }
 
-    /// Get a valid federation token for `recipient_global_domain`, polling Redis until the
+    /// Get a valid federation token for `recipient_global_domain`, polling the cache until the
     /// grant callback arrives if the token is not already cached.
     pub async fn get_or_wait_federation_token(
         &self,
@@ -84,12 +84,12 @@ impl FederationClient {
         );
         let deadline = Duration::from_millis(self.config.federation_request_timeout_ms);
         let domain = recipient_global_domain;
+        let cache = self.cache.clone();
 
         timeout(deadline, async move {
             loop {
-                if let Some(token) = self
-                    .redis
-                    .get_string(RedisKey::FederationToken(domain))
+                if let Some(token) = cache
+                    .get_str(RedisKey::FederationToken(domain))
                     .await
                     .ok()
                     .flatten()
@@ -123,8 +123,8 @@ impl FederationClient {
             issuer_global_domain,
             ttl_secs, "federation: storing auth token"
         );
-        self.redis
-            .set_string_ex(RedisKey::FederationToken(issuer_global_domain), token, ttl)
+        self.cache
+            .set_str_ex(RedisKey::FederationToken(issuer_global_domain), token, ttl)
             .await
     }
 

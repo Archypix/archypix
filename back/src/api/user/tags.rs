@@ -1,6 +1,7 @@
 use crate::api::middleware::auth_user::AuthUser;
-use crate::infra::error::{AppError, map_sqlx_error};
+use crate::infra::error::AppError;
 use crate::repository::tag::TagRepository;
+use crate::services;
 use crate::state::AppState;
 use axum::Json;
 use axum::extract::{Query, State};
@@ -49,35 +50,15 @@ pub async fn edit(
         user = %auth.claims.sub,
         token_type = auth.token_type(),
         picture_count = payload.picture_ids.len(),
-        add_count = payload.add_tags.len(),
-        remove_count = payload.remove_tags.len(),
         "edit_picture_tags"
     );
-
-    if payload.picture_ids.is_empty() {
-        return Err(AppError::BadRequest(
-            "picture_ids must not be empty".to_string(),
-        ));
-    }
-    if payload.add_tags.is_empty() && payload.remove_tags.is_empty() {
-        return Err(AppError::BadRequest(
-            "at least one of add_tags or remove_tags must be non-empty".to_string(),
-        ));
-    }
-
-    let user_id = auth.user_id()?;
-    let mut tx = state.db.begin().await.map_err(map_sqlx_error)?;
-
-    TagRepository::batch_remove(
-        &mut *tx,
-        user_id,
+    services::tags::edit_picture_tags(
+        &state.db,
+        auth.user_id()?,
         &payload.picture_ids,
+        &payload.add_tags,
         &payload.remove_tags,
     )
     .await?;
-    TagRepository::batch_assign(&mut *tx, user_id, &payload.picture_ids, &payload.add_tags).await?;
-
-    tx.commit().await.map_err(map_sqlx_error)?;
-
     Ok(Json(serde_json::json!({ "ok": true })))
 }

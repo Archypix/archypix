@@ -246,6 +246,55 @@ impl Config {
             self.redis_db,
         )
     }
+
+    pub fn test_defaults() -> Self {
+        Self {
+            listen_addr: "127.0.0.1:0".to_string(),
+            global_domain: "test.com".to_string(),
+            back_domain: "backend.test.com".to_string(),
+            back_use_https: false,
+            db_host: "localhost".to_string(),
+            db_port: 5432,
+            db_user: "postgres".to_string(),
+            db_password: None,
+            db_name: "test".to_string(),
+            redis_host: "localhost".to_string(),
+            redis_port: 6379,
+            redis_user: None,
+            redis_password: None,
+            redis_db: 0,
+            cors_origins: vec![],
+            use_resolver: false,
+            resolver_internal_url: "http://localhost:8081".to_string(),
+            resolver_jwt_secret: String::new(),
+            back_internal_url: None,
+            jwt_secret: "test_jwt_secret_must_be_long_enough_for_hmac_sha256".to_string(),
+            access_token_ttl_secs: 900,
+            refresh_token_ttl_secs: 86400,
+            webfinger_use_https: false,
+            federation_jwt_ttl_secs: 3600,
+            federation_backend_cache_ttl_secs: 300,
+            federation_request_timeout_ms: 1000,
+            worker_jwt_secret: "test_worker_secret_must_be_long_enough_also".to_string(),
+            task_queue_concurrency: 1,
+            job_processing_timeout_secs: 600,
+            job_watchdog_interval_secs: 60,
+            s3_endpoint: "http://localhost:9000".to_string(),
+            s3_public_endpoint: "http://localhost:9000".to_string(),
+            s3_workers_endpoint: "http://localhost:9000".to_string(),
+            s3_access_key: "minioadmin".to_string(),
+            s3_secret_key: "minioadmin".to_string(),
+            s3_region: "us-east-1".to_string(),
+            s3_bucket_staging: "archypix-staging".to_string(),
+            s3_bucket_pictures: "archypix-pictures".to_string(),
+            s3_bucket_versions: "archypix-versions".to_string(),
+            s3_bucket_small: "archypix-small".to_string(),
+            s3_bucket_medium: "archypix-medium".to_string(),
+            s3_bucket_large: "archypix-large".to_string(),
+            s3_presign_ttl_secs: 3600,
+            s3_presign_cache_margin_secs: 600,
+        }
+    }
 }
 
 fn build_postgres_url(

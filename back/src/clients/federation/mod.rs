@@ -4,8 +4,9 @@ mod webfinger;
 
 use crate::infra::config::Config;
 use crate::infra::crypto::JwtService;
-use crate::infra::redis::RedisClient;
+use crate::infra::redis::Cache;
 use reqwest::Client as HttpClient;
+use std::sync::Arc;
 
 /// Outbound federation HTTP client — resolves remote backends via WebFinger,
 /// manages federation token lifecycle, and sends federation protocol messages.
@@ -20,16 +21,16 @@ pub struct FederationClient {
     pub(super) http: HttpClient,
     pub(super) config: Config,
     pub(super) jwt: JwtService,
-    pub(super) redis: RedisClient,
+    pub(super) cache: Arc<dyn Cache>,
 }
 
 impl FederationClient {
-    pub fn new(http: HttpClient, config: Config, jwt: JwtService, redis: RedisClient) -> Self {
+    pub fn new(http: HttpClient, config: Config, jwt: JwtService, cache: Arc<dyn Cache>) -> Self {
         Self {
             http,
             config,
             jwt,
-            redis,
+            cache,
         }
     }
 }

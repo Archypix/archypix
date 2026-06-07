@@ -44,8 +44,12 @@ async fn main() -> anyhow::Result<()> {
     let resolver_jwt = JwtService::new(&config.resolver_jwt_secret, &config.back_domain);
     let worker_jwt = JwtService::new(&config.worker_jwt_secret, &config.back_domain);
 
-    let federation =
-        FederationClient::new(http.clone(), config.clone(), jwt.clone(), redis.clone());
+    let federation = FederationClient::new(
+        http.clone(),
+        config.clone(),
+        jwt.clone(),
+        std::sync::Arc::new(redis.clone()),
+    );
     let resolver = ResolverClient::new(http, config.clone(), resolver_jwt);
 
     // Register with the resolver so it can route user registrations to this backend.

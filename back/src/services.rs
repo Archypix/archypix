@@ -3,5 +3,6 @@ pub mod federation;
 pub mod jobs;
 pub mod pictures;
 pub mod shares;
+pub mod tags;
 pub mod user_settings;
 pub mod users;

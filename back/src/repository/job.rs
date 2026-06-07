@@ -332,3 +332,250 @@ impl JobRepository {
         Ok(result.rows_affected())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::job::{JobConfig, JobStatus, JobType};
+    use archypix_common::job::GenThumbnailConfig;
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+    async fn seed_user(db: &PgPool) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query!(
+            "INSERT INTO users (id, username, email, display_name) VALUES ($1, $2, $3, $4)",
+            id,
+            format!("testuser_{}", id.to_string().split('-').next().unwrap()),
+            format!("{}@test.com", id),
+            "Test User",
+        )
+        .execute(db)
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn seed_job(db: &PgPool, owner_id: Uuid) -> Job {
+        let config = JobConfig::GenThumbnail(GenThumbnailConfig {
+            picture_id: Uuid::new_v4(),
+            is_initial: true,
+        });
+        JobRepository::create(db, owner_id, None, &config, None)
+            .await
+            .unwrap()
+    }
+
+    // ── claim_next ────────────────────────────────────────────────────────────
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn claim_next_returns_none_when_empty(db: PgPool) {
+        let result = JobRepository::claim_next(&db, "worker1", &[JobType::GenThumbnail])
+            .await
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn claim_next_marks_job_processing(db: PgPool) {
+        let owner = seed_user(&db).await;
+        let created = seed_job(&db, owner).await;
+
+        let claimed = JobRepository::claim_next(&db, "worker1", &[])
+            .await
+            .unwrap()
+            .expect("should find a job");
+
+        assert_eq!(claimed.id, created.id);
+        assert_eq!(claimed.status, JobStatus::Processing);
+        assert!(claimed.claim_token.is_some());
+        assert_eq!(claimed.claimed_by.as_deref(), Some("worker1"));
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn claim_next_respects_job_type_filter(db: PgPool) {
+        let owner = seed_user(&db).await;
+        seed_job(&db, owner).await; // gen_thumbnail
+
+        // Claim only edit_picture — should find nothing
+        let result = JobRepository::claim_next(&db, "worker1", &[JobType::EditPicture])
+            .await
+            .unwrap();
+        assert!(result.is_none());
+
+        // Claim any — should find the gen_thumbnail
+        let result = JobRepository::claim_next(&db, "worker1", &[JobType::GenThumbnail])
+            .await
+            .unwrap();
+        assert!(result.is_some());
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn claimed_job_is_not_double_claimed(db: PgPool) {
+        let owner = seed_user(&db).await;
+        seed_job(&db, owner).await;
+
+        JobRepository::claim_next(&db, "worker1", &[])
+            .await
+            .unwrap();
+
+        // Second claim should find nothing (job is now processing)
+        let second = JobRepository::claim_next(&db, "worker2", &[])
+            .await
+            .unwrap();
+        assert!(second.is_none());
+    }
+
+    // ── complete ──────────────────────────────────────────────────────────────
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn complete_with_correct_token_marks_completed(db: PgPool) {
+        let owner = seed_user(&db).await;
+        seed_job(&db, owner).await;
+
+        let claimed = JobRepository::claim_next(&db, "worker1", &[])
+            .await
+            .unwrap()
+            .unwrap();
+        let token = claimed.claim_token.unwrap();
+
+        let completed = JobRepository::complete(&db, claimed.id, token, serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(completed.is_some());
+        assert_eq!(completed.unwrap().status, JobStatus::Completed);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn complete_with_wrong_token_returns_none(db: PgPool) {
+        let owner = seed_user(&db).await;
+        seed_job(&db, owner).await;
+
+        let claimed = JobRepository::claim_next(&db, "worker1", &[])
+            .await
+            .unwrap()
+            .unwrap();
+
+        let wrong_token = Uuid::new_v4();
+        let result = JobRepository::complete(&db, claimed.id, wrong_token, serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(result.is_none(), "wrong claim_token must be rejected");
+
+        // Job must still be in processing state
+        let job = JobRepository::find_by_id(&db, claimed.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.status, JobStatus::Processing);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn complete_on_already_completed_job_is_rejected(db: PgPool) {
+        let owner = seed_user(&db).await;
+        seed_job(&db, owner).await;
+
+        let claimed = JobRepository::claim_next(&db, "worker1", &[])
+            .await
+            .unwrap()
+            .unwrap();
+        let token = claimed.claim_token.unwrap();
+
+        // First completion
+        JobRepository::complete(&db, claimed.id, token, serde_json::json!({}))
+            .await
+            .unwrap();
+
+        // Second completion with same token — status is no longer 'processing'
+        let result = JobRepository::complete(&db, claimed.id, token, serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    // ── fail ──────────────────────────────────────────────────────────────────
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn fail_with_correct_token_and_retries_resets_to_pending(db: PgPool) {
+        let owner = seed_user(&db).await;
+        seed_job(&db, owner).await; // default max_retries = 3
+
+        let claimed = JobRepository::claim_next(&db, "worker1", &[])
+            .await
+            .unwrap()
+            .unwrap();
+        let token = claimed.claim_token.unwrap();
+
+        let failed = JobRepository::fail(&db, claimed.id, token, "transient error", false)
+            .await
+            .unwrap();
+        assert!(failed.is_some());
+
+        let job = JobRepository::find_by_id(&db, claimed.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.status, JobStatus::Pending, "should reset to pending");
+        assert_eq!(job.retry_count, 1);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn fail_permanent_skips_retry(db: PgPool) {
+        let owner = seed_user(&db).await;
+        seed_job(&db, owner).await;
+
+        let claimed = JobRepository::claim_next(&db, "worker1", &[])
+            .await
+            .unwrap()
+            .unwrap();
+        let token = claimed.claim_token.unwrap();
+
+        JobRepository::fail(&db, claimed.id, token, "permanent error", true)
+            .await
+            .unwrap();
+
+        let job = JobRepository::find_by_id(&db, claimed.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.status, JobStatus::Failed);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn fail_with_wrong_token_is_rejected(db: PgPool) {
+        let owner = seed_user(&db).await;
+        seed_job(&db, owner).await;
+
+        let claimed = JobRepository::claim_next(&db, "worker1", &[])
+            .await
+            .unwrap()
+            .unwrap();
+
+        let result = JobRepository::fail(&db, claimed.id, Uuid::new_v4(), "error", false)
+            .await
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    // ── idempotency key ───────────────────────────────────────────────────────
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn duplicate_idempotency_key_returns_conflict(db: PgPool) {
+        let owner = seed_user(&db).await;
+        let config = JobConfig::GenThumbnail(GenThumbnailConfig {
+            picture_id: Uuid::new_v4(),
+            is_initial: true,
+        });
+        JobRepository::create(&db, owner, None, &config, Some("unique-key"))
+            .await
+            .unwrap();
+
+        let result = JobRepository::create(&db, owner, None, &config, Some("unique-key")).await;
+        assert!(
+            matches!(result, Err(AppError::Conflict(_))),
+            "second insert with same idempotency key should conflict"
+        );
+    }
+}

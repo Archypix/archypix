@@ -1,7 +1,5 @@
 use crate::api::middleware::auth_user::AuthUser;
-use crate::domain::picture::Picture;
 use crate::infra::error::AppError;
-use crate::repository::picture_version::PictureVersionRepository;
 use crate::services;
 use crate::services::pictures::{
     PictureListParams, PictureListResult, PictureVariant, UploadMetadata,
@@ -49,7 +47,7 @@ pub async fn complete_upload(
     State(state): State<AppState>,
     Path(picture_id): Path<Uuid>,
     Json(meta): Json<UploadMetadata>,
-) -> Result<Json<Picture>, AppError> {
+) -> Result<Json<serde_json::Value>, AppError> {
     debug!(user = %auth.claims.sub, token_type = auth.token_type(), picture_id = %picture_id, "complete_upload");
     let picture = services::pictures::complete_upload(
         &state.db,
@@ -61,7 +59,7 @@ pub async fn complete_upload(
         meta,
     )
     .await?;
-    Ok(Json(picture))
+    Ok(Json(serde_json::json!({ "id": picture.id })))
 }
 
 pub async fn list(
@@ -117,30 +115,19 @@ pub async fn details(
     Path(picture_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     debug!(user = %auth.claims.sub, token_type = auth.token_type(), picture_id = %picture_id, "picture_details");
-    use crate::repository::picture::PictureRepository;
-
-    let picture = PictureRepository::find_by_id(&state.db, picture_id)
-        .await?
-        .ok_or(AppError::NotFound)?;
-
-    if picture.local_user_id != auth.user_id()? {
-        return Err(AppError::NotFound);
-    }
-
-    let versions = PictureVersionRepository::list_by_picture(&state.db, picture_id).await?;
-
+    let d = services::pictures::get_picture_details(&state.db, auth.user_id()?, picture_id).await?;
     Ok(Json(serde_json::json!({
-        "id": picture.id,
-        "filename": picture.filename,
-        "mime_type": picture.mime_type,
-        "file_size": picture.file_size,
-        "width": picture.width,
-        "height": picture.height,
-        "captured_at": picture.captured_at,
-        "ingested_at": picture.ingested_at,
-        "updated_at": picture.updated_at,
-        "owner_username": picture.owner_username,
-        "owner_instance_domain": picture.owner_instance_domain,
-        "versions": versions,
+        "id": d.picture.id,
+        "filename": d.picture.filename,
+        "mime_type": d.picture.mime_type,
+        "file_size": d.picture.file_size,
+        "width": d.picture.width,
+        "height": d.picture.height,
+        "captured_at": d.picture.captured_at,
+        "ingested_at": d.picture.ingested_at,
+        "updated_at": d.picture.updated_at,
+        "owner_username": d.picture.owner_username,
+        "owner_instance_domain": d.picture.owner_instance_domain,
+        "versions": d.versions,
     })))
 }

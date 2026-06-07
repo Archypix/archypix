@@ -47,11 +47,3 @@ pub struct IncomingShare {
     pub created_at: NaiveDateTime,
     pub revoked_at: Option<NaiveDateTime>,
 }
-
-impl OutgoingShare {
-    /// True when announcing this share to `recipient_instance` would loop back to
-    /// the picture's original owner (federation loop prevention).
-    pub fn would_loop_to(&self, owner_instance: &str) -> bool {
-        self.recipient_instance == owner_instance
-    }
-}

@@ -98,7 +98,7 @@ impl From<&str> for TagPath {
 ///
 /// Usernames are restricted to `[a-z0-9_]` at registration, so only dots and the `_AT_`
 /// separator need escaping. No collisions are possible within the username component.
-fn encode_sender_label(username: &str, instance: &str) -> String {
+pub fn encode_sender_label(username: &str, instance: &str) -> String {
     let encode = |s: &str| -> String {
         s.chars()
             .map(|c| match c {
@@ -109,4 +109,111 @@ fn encode_sender_label(username: &str, instance: &str) -> String {
             .collect()
     };
     format!("{}_AT_{}", encode(username), encode(instance))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── TagPath::ancestors ────────────────────────────────────────────────────
+
+    #[test]
+    fn ancestors_root_is_empty() {
+        let t = TagPath::from_ltree("Photos");
+        assert_eq!(t.ancestors(), vec![]);
+    }
+
+    #[test]
+    fn ancestors_two_levels() {
+        let t = TagPath::from_ltree("Photos.Travel");
+        assert_eq!(t.ancestors(), vec![TagPath::from_ltree("Photos")]);
+    }
+
+    #[test]
+    fn ancestors_three_levels() {
+        let t = TagPath::from_ltree("Photos.Travel.Alps");
+        assert_eq!(
+            t.ancestors(),
+            vec![
+                TagPath::from_ltree("Photos"),
+                TagPath::from_ltree("Photos.Travel"),
+            ]
+        );
+    }
+
+    #[test]
+    fn ancestors_empty_path_is_empty() {
+        let t = TagPath::from_ltree("");
+        assert_eq!(t.ancestors(), vec![]);
+    }
+
+    // ── TagPath::from_slash ───────────────────────────────────────────────────
+
+    #[test]
+    fn from_slash_strips_leading_slash() {
+        let t = TagPath::from_slash("/Photos/Travel/Alps");
+        assert_eq!(t.as_ltree(), "Photos.Travel.Alps");
+    }
+
+    #[test]
+    fn from_slash_no_leading_slash() {
+        let t = TagPath::from_slash("Photos/Travel");
+        assert_eq!(t.as_ltree(), "Photos.Travel");
+    }
+
+    // ── encode_sender_label ───────────────────────────────────────────────────
+
+    #[test]
+    fn encode_simple_domain() {
+        let label = encode_sender_label("alice", "example.com");
+        assert_eq!(label, "alice_AT_example_DOT_com");
+    }
+
+    #[test]
+    fn encode_multi_dot_domain() {
+        let label = encode_sender_label("bob", "sub.instance.org");
+        assert_eq!(label, "bob_AT_sub_DOT_instance_DOT_org");
+    }
+
+    #[test]
+    fn encode_username_with_underscores() {
+        let label = encode_sender_label("my_user", "host.io");
+        assert_eq!(label, "my_user_AT_host_DOT_io");
+    }
+
+    // ── TagPath::shared_to_me ─────────────────────────────────────────────────
+
+    #[test]
+    fn shared_to_me_basic() {
+        let original = TagPath::from_ltree("Photos.Travel.Alps");
+        let shared = TagPath::shared_to_me("alice", "example.com", &original);
+        assert_eq!(
+            shared.as_ltree(),
+            "SharedToMe.alice_AT_example_DOT_com.Photos.Travel.Alps"
+        );
+    }
+
+    #[test]
+    fn shared_to_me_empty_original() {
+        let original = TagPath::from_ltree("");
+        let shared = TagPath::shared_to_me("alice", "example.com", &original);
+        assert_eq!(shared.as_ltree(), "SharedToMe.alice_AT_example_DOT_com");
+    }
+
+    // ── ancestor satisfaction (used by pipeline::should_run) ─────────────────
+
+    #[test]
+    fn ancestor_of_self_is_not_ancestor() {
+        let t = TagPath::from_ltree("Photos");
+        assert!(!t.ancestors().contains(&t));
+    }
+
+    #[test]
+    fn deep_tag_satisfies_ancestor_require() {
+        // A picture with /Photos/Travel/Alps satisfies requires: [/Photos]
+        let stored = TagPath::from_ltree("Photos.Travel.Alps");
+        let required = TagPath::from_ltree("Photos");
+        let satisfied = stored == required || stored.ancestors().contains(&required);
+        assert!(satisfied);
+    }
 }

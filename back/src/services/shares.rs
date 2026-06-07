@@ -3,7 +3,7 @@ use crate::domain::share::{IncomingShare, OutgoingShare, ShareStatus};
 use crate::domain::tag::TagPath;
 use crate::infra::config::Config;
 use crate::infra::error::AppError;
-use crate::infra::redis::{RedisClient, RedisKey};
+use crate::infra::redis::{Cache, RedisKey};
 use crate::repository::picture::PictureRepository;
 use crate::repository::share::{IncomingShareRepository, OutgoingShareRepository};
 use crate::repository::tag::TagRepository;
@@ -82,11 +82,11 @@ pub async fn register_received_pictures(
 }
 
 /// Remove tags, delete unreachable received pictures, set the share to `final_status`, and
-/// invalidate the Redis presign-token cache. Used by both revocation (→ Revoked) and
+/// invalidate the cache presign-token entry. Used by both revocation (→ Revoked) and
 /// rejection (→ Tombstoned) to avoid duplicating cleanup logic.
 pub async fn cleanup_incoming_share(
     db: &PgPool,
-    redis: &RedisClient,
+    cache: &dyn Cache,
     share: &IncomingShare,
     final_status: ShareStatus,
 ) -> Result<u64, AppError> {
@@ -109,7 +109,7 @@ pub async fn cleanup_incoming_share(
         .await
         .map_err(|e| AppError::InternalServerError(e.to_string()))?;
 
-    let _ = redis
+    let _ = cache
         .del(RedisKey::IncomingShareToken(
             share.recipient_id,
             &share.sender_username,
@@ -127,7 +127,7 @@ pub async fn cleanup_incoming_share(
 /// - Cross-instance: sends a federation rejection message to the sender's backend.
 pub async fn reject_incoming_share(
     db: &PgPool,
-    redis: &RedisClient,
+    cache: &dyn Cache,
     federation: &FederationClient,
     config: &Config,
     rejector_id: Uuid,
@@ -150,13 +150,13 @@ pub async fn reject_incoming_share(
             IncomingShareRepository::set_status(db, share_id, ShareStatus::Tombstoned).await?;
         }
         ShareStatus::Active => {
-            cleanup_incoming_share(db, redis, &incoming, ShareStatus::Tombstoned).await?;
+            cleanup_incoming_share(db, cache, &incoming, ShareStatus::Tombstoned).await?;
         }
     }
 
     // Notify the sender that their share was rejected.
     if find_local_user_id(
-        redis,
+        cache,
         db,
         config,
         &incoming.sender_username,
@@ -189,7 +189,7 @@ pub async fn reject_incoming_share(
 
 pub async fn create_outgoing_share(
     db: &PgPool,
-    redis: &RedisClient,
+    cache: &dyn Cache,
     federation: &FederationClient,
     config: &Config,
     owner_id: Uuid,
@@ -211,7 +211,7 @@ pub async fn create_outgoing_share(
     );
 
     let recipient_local_id =
-        find_local_user_id(redis, db, config, recipient_username, recipient_instance).await?;
+        find_local_user_id(cache, db, config, recipient_username, recipient_instance).await?;
 
     let mut tx = db
         .begin()
@@ -281,7 +281,7 @@ pub async fn create_outgoing_share(
 ///   will asynchronously call `/api/federation/pictures/announce` with the current pictures.
 pub async fn accept_incoming_share(
     db: &PgPool,
-    redis: &RedisClient,
+    cache: &dyn Cache,
     federation: &FederationClient,
     config: &Config,
     acceptor_id: Uuid,
@@ -309,7 +309,7 @@ pub async fn accept_incoming_share(
     IncomingShareRepository::set_status(db, incoming.id, ShareStatus::Active).await?;
 
     if let Some(sender_id) = find_local_user_id(
-        redis,
+        cache,
         db,
         config,
         &incoming.sender_username,
@@ -369,11 +369,11 @@ pub async fn accept_incoming_share(
 ///
 /// - Marks the `OutgoingShare` as `revoked`.
 /// - Same-backend: directly revokes the matching `IncomingShare` (removes tags, deletes
-///   unreachable received pictures, invalidates the share-token Redis cache).
+///   unreachable received pictures, invalidates the share-token cache).
 /// - Cross-instance: sends a federation revocation message to the recipient's backend.
 pub async fn revoke_outgoing_share(
     db: &PgPool,
-    redis: &RedisClient,
+    cache: &dyn Cache,
     federation: &FederationClient,
     config: &Config,
     owner_id: Uuid,
@@ -396,7 +396,7 @@ pub async fn revoke_outgoing_share(
     OutgoingShareRepository::set_status(db, share_id, ShareStatus::Revoked).await?;
 
     if let Some(_recipient_id) = find_local_user_id(
-        redis,
+        cache,
         db,
         config,
         &share.recipient_username,
@@ -412,7 +412,7 @@ pub async fn revoke_outgoing_share(
         {
             if incoming.status != ShareStatus::Revoked && incoming.status != ShareStatus::Tombstoned
             {
-                cleanup_incoming_share(db, redis, &incoming, ShareStatus::Revoked).await?;
+                cleanup_incoming_share(db, cache, &incoming, ShareStatus::Revoked).await?;
             }
         }
     } else {
@@ -428,4 +428,15 @@ pub async fn revoke_outgoing_share(
     }
 
     Ok(())
+}
+
+pub async fn list_outgoing(db: &PgPool, owner_id: Uuid) -> Result<Vec<OutgoingShare>, AppError> {
+    OutgoingShareRepository::list_by_owner(db, owner_id).await
+}
+
+pub async fn list_incoming(
+    db: &PgPool,
+    recipient_id: Uuid,
+) -> Result<Vec<IncomingShare>, AppError> {
+    IncomingShareRepository::list_by_recipient(db, recipient_id).await
 }

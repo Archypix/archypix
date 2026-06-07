@@ -5,7 +5,7 @@ use serde::Deserialize;
 use tracing::{debug, trace, warn};
 
 impl FederationClient {
-    /// Resolve a user's owning backend base URL via WebFinger, with Redis caching.
+    /// Resolve a user's owning backend base URL via WebFinger, with cache-aside caching.
     ///
     /// Queries `{webfinger_scheme}://{global_domain}/.well-known/webfinger` and returns the
     /// full `backend_url` link href (e.g. `https://backend1.example.com`), which already
@@ -19,8 +19,8 @@ impl FederationClient {
         global_domain: &str,
     ) -> Result<String, AppError> {
         if let Some(cached) = self
-            .redis
-            .get_string(RedisKey::FederationBackend(username, global_domain))
+            .cache
+            .get_str(RedisKey::FederationBackend(username, global_domain))
             .await
             .ok()
             .flatten()
@@ -74,13 +74,14 @@ impl FederationClient {
             global_domain, backend_url, "federation: backend URL resolved via WebFinger"
         );
 
-        self.redis
-            .set_string_ex(
+        let _ = self
+            .cache
+            .set_str_ex(
                 RedisKey::FederationBackend(username, global_domain),
                 &backend_url,
                 self.config.federation_backend_cache_ttl_secs,
             )
-            .await?;
+            .await;
 
         Ok(backend_url)
     }

@@ -47,7 +47,6 @@ pub async fn create_outgoing(
         token_type = auth.token_type(),
         tag_path = %payload.tag_path,
         recipient = %payload.recipient_username,
-        recipient_instance = %payload.recipient_instance,
         "create_outgoing_share"
     );
     let share = services::shares::create_outgoing_share(
@@ -65,7 +64,6 @@ pub async fn create_outgoing(
         payload.shareback_of,
     )
     .await?;
-
     Ok(Json(ShareResponse {
         id: share.id,
         tag_path: share.tag_path,

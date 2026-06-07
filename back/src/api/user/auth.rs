@@ -1,5 +1,6 @@
 use crate::api::middleware::auth_user::AuthUser;
 use crate::infra::error::AppError;
+use crate::repository::user::UserRepository;
 use crate::services;
 use crate::state::AppState;
 use axum::Json;
@@ -77,12 +78,9 @@ pub async fn me(
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     debug!(user = %auth.claims.sub, token_type = auth.token_type(), "me");
-    use crate::repository::user::UserRepository;
-    let user_id = auth.user_id()?;
-    let user = UserRepository::find_by_id(&state.db, user_id)
+    let user = UserRepository::find_by_id(&state.db, auth.user_id()?)
         .await?
         .ok_or(AppError::Unauthorized("User not found".to_string()))?;
-
     Ok(Json(serde_json::json!({
         "id": user.id,
         "username": user.username,

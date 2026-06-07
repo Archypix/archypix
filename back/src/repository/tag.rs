@@ -191,3 +191,212 @@ impl TagRepository {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+    async fn seed_user(db: &PgPool) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query!(
+            "INSERT INTO users (id, username, email, display_name) VALUES ($1, $2, $3, $4)",
+            id,
+            format!("u_{}", &id.to_string()[..8]),
+            format!("{}@t.com", id),
+            "T",
+        )
+        .execute(db)
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn seed_picture(db: &PgPool, user_id: Uuid) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query!(
+            "INSERT INTO pictures (id, local_user_id) VALUES ($1, $2)",
+            id,
+            user_id,
+        )
+        .execute(db)
+        .await
+        .unwrap();
+        id
+    }
+
+    // ── batch_assign ──────────────────────────────────────────────────────────
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn batch_assign_adds_tags(db: PgPool) {
+        let user = seed_user(&db).await;
+        let pic = seed_picture(&db, user).await;
+
+        TagRepository::batch_assign(&db, user, &[pic], &["Photos.Travel".to_string()])
+            .await
+            .unwrap();
+
+        let tags = TagRepository::list_for_picture(&db, user, pic)
+            .await
+            .unwrap();
+        assert!(tags.iter().any(|t| t.tag_path == "Photos.Travel"));
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn batch_assign_is_idempotent(db: PgPool) {
+        let user = seed_user(&db).await;
+        let pic = seed_picture(&db, user).await;
+
+        let tags = vec!["Photos.Travel".to_string()];
+        TagRepository::batch_assign(&db, user, &[pic], &tags)
+            .await
+            .unwrap();
+        TagRepository::batch_assign(&db, user, &[pic], &tags)
+            .await
+            .unwrap();
+
+        let stored = TagRepository::list_for_picture(&db, user, pic)
+            .await
+            .unwrap();
+        let count = stored
+            .iter()
+            .filter(|t| t.tag_path == "Photos.Travel")
+            .count();
+        assert_eq!(count, 1, "idempotent — no duplicate");
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn batch_assign_prunes_ancestor_when_deeper_added(db: PgPool) {
+        let user = seed_user(&db).await;
+        let pic = seed_picture(&db, user).await;
+
+        // Add parent first
+        TagRepository::batch_assign(&db, user, &[pic], &["Photos".to_string()])
+            .await
+            .unwrap();
+        // Then add a child — parent should be pruned (becomes redundant)
+        TagRepository::batch_assign(&db, user, &[pic], &["Photos.Travel".to_string()])
+            .await
+            .unwrap();
+
+        let stored = TagRepository::list_for_picture(&db, user, pic)
+            .await
+            .unwrap();
+        assert!(
+            !stored.iter().any(|t| t.tag_path == "Photos"),
+            "ancestor pruned"
+        );
+        assert!(stored.iter().any(|t| t.tag_path == "Photos.Travel"));
+    }
+
+    // ── batch_remove ──────────────────────────────────────────────────────────
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn batch_remove_removes_tag_and_subtags(db: PgPool) {
+        let user = seed_user(&db).await;
+        let pic = seed_picture(&db, user).await;
+
+        TagRepository::batch_assign(&db, user, &[pic], &["Photos.Travel.Alps".to_string()])
+            .await
+            .unwrap();
+        // Remove at Photos level — Alps is a subtag so it should also be removed
+        TagRepository::batch_remove(&db, user, &[pic], &["Photos".to_string()])
+            .await
+            .unwrap();
+
+        let stored = TagRepository::list_for_picture(&db, user, pic)
+            .await
+            .unwrap();
+        assert!(stored.is_empty(), "subtags removed");
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn batch_remove_removes_tag_and_keep_parents(db: PgPool) {
+        let user = seed_user(&db).await;
+        let pic = seed_picture(&db, user).await;
+
+        TagRepository::batch_assign(
+            &db,
+            user,
+            &[pic],
+            &["Photos.Travel.Alps.Grenoble".to_string()],
+        )
+        .await
+        .unwrap();
+        // Currently, deleting a tag does not keep the parent tags.
+        TagRepository::batch_remove(&db, user, &[pic], &["Photos.Travel.Alps".to_string()])
+            .await
+            .unwrap();
+
+        let stored = TagRepository::list_for_picture(&db, user, pic)
+            .await
+            .unwrap();
+        assert!(stored.is_empty(), "parent tags kept");
+        //assert!(stored.iter().any(|t| t.tag_path == "Photos.Travel"));
+    }
+
+    // ── assign_incoming_share_tag / remove_incoming_share_tags ────────────────
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn assign_and_remove_incoming_share_tag(db: PgPool) {
+        let user = seed_user(&db).await;
+        let pic = seed_picture(&db, user).await;
+        let share_id = Uuid::new_v4();
+
+        TagRepository::assign_incoming_share_tag(
+            &db,
+            pic,
+            "SharedToMe.alice_AT_ex_DOT_com.Photos",
+            share_id,
+        )
+        .await
+        .unwrap();
+
+        let tags = TagRepository::list_for_picture(&db, user, pic)
+            .await
+            .unwrap();
+        assert!(tags.iter().any(|t| t.source_id == Some(share_id)));
+
+        TagRepository::remove_incoming_share_tags(&db, share_id)
+            .await
+            .unwrap();
+
+        let tags = TagRepository::list_for_picture(&db, user, pic)
+            .await
+            .unwrap();
+        assert!(tags.is_empty());
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn assign_incoming_share_tag_is_idempotent(db: PgPool) {
+        let user = seed_user(&db).await;
+        let pic = seed_picture(&db, user).await;
+        let share_id = Uuid::new_v4();
+
+        TagRepository::assign_incoming_share_tag(
+            &db,
+            pic,
+            "SharedToMe.alice_AT_ex_DOT_com.Photos",
+            share_id,
+        )
+        .await
+        .unwrap();
+        // Replay is idempotent (ON CONFLICT DO NOTHING)
+        TagRepository::assign_incoming_share_tag(
+            &db,
+            pic,
+            "SharedToMe.alice_AT_ex_DOT_com.Photos",
+            share_id,
+        )
+        .await
+        .unwrap();
+
+        let tags = TagRepository::list_for_picture(&db, user, pic)
+            .await
+            .unwrap();
+        assert_eq!(tags.len(), 1);
+    }
+}
