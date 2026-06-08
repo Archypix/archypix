@@ -29,8 +29,8 @@ pub async fn create_upload(
 ) -> Result<Json<CreateUploadResponse>, AppError> {
     debug!(user = %auth.claims.sub, token_type = auth.token_type(), filename = %payload.filename, "create_upload");
     let (picture_id, presigned_url) = services::pictures::begin_upload(
-        &state.redis,
-        &state.storage,
+        state.cache.as_ref(),
+        state.storage.as_ref(),
         &state.config,
         auth.user_id()?,
         &payload.filename,
@@ -51,8 +51,8 @@ pub async fn complete_upload(
     debug!(user = %auth.claims.sub, token_type = auth.token_type(), picture_id = %picture_id, "complete_upload");
     let picture = services::pictures::complete_upload(
         &state.db,
-        &state.redis,
-        &state.storage,
+        state.cache.as_ref(),
+        state.storage.as_ref(),
         &state.config,
         auth.user_id()?,
         picture_id,
@@ -70,8 +70,8 @@ pub async fn list(
     debug!(user = %auth.claims.sub, token_type = auth.token_type(), page = params.page, page_size = params.page_size, "list_pictures");
     let result = services::pictures::list_pictures(
         &state.db,
-        &state.redis,
-        &state.storage,
+        state.cache.as_ref(),
+        state.storage.as_ref(),
         &state.config,
         &state.federation,
         auth.user_id()?,
@@ -95,8 +95,8 @@ pub async fn picture_url(
     debug!(user = %auth.claims.sub, token_type = auth.token_type(), picture_id = %picture_id, variant = ?query.variant, "picture_url");
     let url = services::pictures::presign_picture_variant(
         &state.db,
-        &state.redis,
-        &state.storage,
+        state.cache.as_ref(),
+        state.storage.as_ref(),
         &state.config,
         &state.federation,
         auth.user_id()?,

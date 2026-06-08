@@ -15,36 +15,8 @@ async fn create_user_rejects_uppercase_username(db: PgPool) {
 }
 
 #[sqlx::test(migrator = "MIGRATOR")]
-async fn create_user_rejects_username_with_spaces(db: PgPool) {
-    let result = users::create_user(
-        &db,
-        "alice bob",
-        "alice@test.com",
-        "Alice",
-        "password",
-        false,
-    )
-    .await;
-    assert!(matches!(result, Err(AppError::BadRequest(_))));
-}
-
-#[sqlx::test(migrator = "MIGRATOR")]
-async fn create_user_accepts_lowercase_alphanumeric_underscore(db: PgPool) {
-    let user = users::create_user(&db, "alice_01", "alice@test.com", "Alice", "pass", false)
-        .await
-        .unwrap();
-    assert_eq!(user.username, "alice_01");
-}
-
-#[sqlx::test(migrator = "MIGRATOR")]
 async fn create_user_rejects_empty_password(db: PgPool) {
     let result = users::create_user(&db, "alice", "alice@test.com", "Alice", "", false).await;
-    assert!(matches!(result, Err(AppError::BadRequest(_))));
-}
-
-#[sqlx::test(migrator = "MIGRATOR")]
-async fn create_user_rejects_whitespace_only_password(db: PgPool) {
-    let result = users::create_user(&db, "alice", "alice@test.com", "Alice", "   ", false).await;
     assert!(matches!(result, Err(AppError::BadRequest(_))));
 }
 

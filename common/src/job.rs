@@ -177,6 +177,92 @@ pub struct ResizeTransform {
     pub height: u32,
 }
 
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    /// Serialize `value` to JSON, deserialize back, re-serialize, and assert the two JSON
+    /// strings are identical. `JobConfig` and friends don't derive `PartialEq`, so comparing
+    /// JSON is the most reliable equality check.
+    fn round_trip<T: serde::Serialize + serde::de::DeserializeOwned>(value: &T) {
+        let json = serde_json::to_string(value).expect("serialize");
+        let back: T = serde_json::from_str(&json).expect("deserialize");
+        let json2 = serde_json::to_string(&back).expect("re-serialize");
+        assert_eq!(json, json2, "round-trip must produce identical JSON");
+    }
+
+    #[test]
+    fn job_config_gen_thumbnail_roundtrips_json() {
+        let cfg = JobConfig::GenThumbnail(GenThumbnailConfig {
+            picture_id: Uuid::new_v4(),
+            is_initial: true,
+        });
+        round_trip(&cfg);
+    }
+
+    #[test]
+    fn job_config_edit_picture_exif_only_roundtrips_json() {
+        let cfg = JobConfig::EditPicture(EditPictureConfig {
+            picture_id: Uuid::new_v4(),
+            exif_overrides: Some(ExifOverrides {
+                captured_at: None,
+                gps_lat: Some(48.8566),
+                gps_lng: Some(2.3522),
+                ..Default::default()
+            }),
+            visual: None,
+        });
+        round_trip(&cfg);
+    }
+
+    #[test]
+    fn job_config_edit_picture_visual_roundtrips_json() {
+        let cfg = JobConfig::EditPicture(EditPictureConfig {
+            picture_id: Uuid::new_v4(),
+            exif_overrides: None,
+            visual: Some(VisualTransformations {
+                crop: Some(CropTransform {
+                    x: 10,
+                    y: 20,
+                    width: 800,
+                    height: 600,
+                }),
+                resize: Some(ResizeTransform {
+                    width: 1920,
+                    height: 1080,
+                }),
+            }),
+        });
+        round_trip(&cfg);
+    }
+
+    #[test]
+    fn job_config_ml_variants_roundtrip_json() {
+        round_trip(&JobConfig::MlStyle);
+        round_trip(&JobConfig::MlPeople);
+        round_trip(&JobConfig::MlGroupLocation);
+    }
+
+    /// The `"type"` discriminant tag must survive a JSON round-trip so the worker
+    /// can always deserialize configs stored as JSONB in the database.
+    #[test]
+    fn job_config_type_tag_is_snake_case() {
+        let cfg = JobConfig::GenThumbnail(GenThumbnailConfig {
+            picture_id: Uuid::nil(),
+            is_initial: true,
+        });
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(
+            json["type"].as_str().unwrap(),
+            "gen_thumbnail",
+            "type discriminant must be snake_case"
+        );
+    }
+}
+
 // ── Worker result types ───────────────────────────────────────────────────────
 
 /// EXIF metadata extracted from a picture and returned in the job completion body.

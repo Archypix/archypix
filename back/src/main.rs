@@ -13,6 +13,7 @@ use crate::infra::crypto::JwtService;
 use crate::infra::tasks;
 use crate::state::AppState;
 use reqwest::Client as HttpClient;
+use std::sync::Arc;
 use tracing::info;
 
 #[tokio::main]
@@ -69,10 +70,10 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState::new(
         config.clone(),
         db,
-        redis,
+        Arc::new(redis),
         jwt,
         worker_jwt,
-        storage,
+        Arc::new(storage),
         federation,
         resolver,
         task_queue,

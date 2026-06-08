@@ -51,7 +51,7 @@ pub async fn create_outgoing(
     );
     let share = services::shares::create_outgoing_share(
         &state.db,
-        &state.redis,
+        state.cache.as_ref(),
         &state.federation,
         &state.config,
         auth.user_id()?,
@@ -121,7 +121,7 @@ pub async fn accept_incoming(
     debug!(user = %auth.claims.sub, token_type = auth.token_type(), share_id = %share_id, "accept_incoming_share");
     let registered = services::shares::accept_incoming_share(
         &state.db,
-        &state.redis,
+        state.cache.as_ref(),
         &state.federation,
         &state.config,
         auth.user_id()?,
@@ -142,7 +142,7 @@ pub async fn revoke_outgoing(
     debug!(user = %auth.claims.sub, token_type = auth.token_type(), share_id = %share_id, "revoke_outgoing_share");
     services::shares::revoke_outgoing_share(
         &state.db,
-        &state.redis,
+        state.cache.as_ref(),
         &state.federation,
         &state.config,
         auth.user_id()?,
@@ -161,7 +161,7 @@ pub async fn reject_incoming(
     debug!(user = %auth.claims.sub, token_type = auth.token_type(), share_id = %share_id, "reject_incoming_share");
     services::shares::reject_incoming_share(
         &state.db,
-        &state.redis,
+        state.cache.as_ref(),
         &state.federation,
         &state.config,
         auth.user_id()?,

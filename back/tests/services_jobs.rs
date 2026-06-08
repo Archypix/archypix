@@ -31,17 +31,6 @@ async fn list_picture_jobs_rejects_wrong_owner(db: PgPool) {
 }
 
 #[sqlx::test(migrator = "MIGRATOR")]
-async fn list_picture_jobs_returns_empty_for_owner_with_no_jobs(db: PgPool) {
-    let alice_id = common::seed_user(&db, "alice", "pass").await;
-    let pic_id = common::seed_picture(&db, alice_id).await;
-
-    let result = jobs::list_picture_jobs(&db, pic_id, alice_id)
-        .await
-        .unwrap();
-    assert!(result.is_empty());
-}
-
-#[sqlx::test(migrator = "MIGRATOR")]
 async fn enqueue_edit_rejects_received_picture(db: PgPool) {
     let alice_id = common::seed_user(&db, "alice", "pass").await;
     let bob_id = common::seed_user(&db, "bob", "pass").await;

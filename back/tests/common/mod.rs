@@ -1,10 +1,13 @@
 use archypix_back::clients::federation::FederationClient;
+use archypix_back::clients::resolver::ResolverClient;
 use archypix_back::domain::tag::encode_sender_label;
 use archypix_back::infra::config::Config;
 use archypix_back::infra::crypto::JwtService;
 use archypix_back::infra::error::AppError;
 use archypix_back::infra::redis::{Cache, RedisKey};
 use archypix_back::infra::s3::Storage;
+use archypix_back::infra::tasks;
+use archypix_back::state::AppState;
 use async_trait::async_trait;
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -95,6 +98,44 @@ pub fn make_federation(config: &Config) -> (FederationClient, Arc<InMemoryCache>
         cache.clone(),
     );
     (fed, cache)
+}
+
+// ── Full AppState helper ──────────────────────────────────────────────────────
+
+/// Build a test `AppState` suitable for spinning up the Axum router in integration tests.
+///
+/// Uses `InMemoryCache` (no Redis) and `MockStorage` (no S3).
+/// The task-queue runner future is dropped immediately — tasks submitted during
+/// tests will never execute, which is fine for contract tests.
+pub fn test_app_state(db: PgPool, config: &Config) -> AppState {
+    let cache: Arc<dyn Cache> = Arc::new(InMemoryCache::new());
+    let storage: Arc<dyn Storage> = Arc::new(MockStorage);
+    let jwt = JwtService::new(&config.jwt_secret, &config.back_domain);
+    let worker_jwt = JwtService::new(&config.worker_jwt_secret, &config.back_domain);
+    let resolver_jwt = JwtService::new(&config.resolver_jwt_secret, &config.back_domain);
+
+    let federation = FederationClient::new(
+        reqwest::Client::new(),
+        config.clone(),
+        jwt.clone(),
+        cache.clone(),
+    );
+    let resolver = ResolverClient::new(reqwest::Client::new(), config.clone(), resolver_jwt);
+
+    let (task_queue, _runner) = tasks::create(db.clone(), 1);
+    // _runner is dropped; tasks submitted during tests are silently ignored.
+
+    AppState::new(
+        config.clone(),
+        db,
+        cache,
+        jwt,
+        worker_jwt,
+        storage,
+        federation,
+        resolver,
+        task_queue,
+    )
 }
 
 // ── DB helpers ────────────────────────────────────────────────────────────────

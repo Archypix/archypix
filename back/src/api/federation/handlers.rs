@@ -115,7 +115,7 @@ pub async fn revoke_share(
     );
     let deleted = fed::receive_share_revoke(
         &state.db,
-        &state.redis,
+        state.cache.as_ref(),
         &auth.claims.sub,
         payload.outgoing_share_id,
     )
@@ -239,8 +239,8 @@ pub async fn presign_picture(
         .collect();
     let results = fed::presign_batch_for_token(
         &state.db,
-        &state.redis,
-        &state.storage,
+        state.cache.as_ref(),
+        state.storage.as_ref(),
         &state.config,
         payload.share_token,
         &payload.owner_username,
