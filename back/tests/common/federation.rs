@@ -1,12 +1,14 @@
 //! Helpers shared by federation integration tests.
 //!
 //! Provides:
-//! - [`config_a`] / [`config_b`]  — two-domain test configurations
+//! - [`config_a`] / [`config_b`]   — two-domain test configurations
 //! - [`spawn_backend`]             — real Axum server on an OS-assigned port
+//! - [`make_client`]               — FederationClient sharing a server's cache
 //! - [`seed_backend_url`]          — bypass WebFinger by pre-seeding the cache
 //! - [`federation_jwt`]            — forge a federation JWT for a given server
 //! - [`user_jwt`]                  — forge a user access JWT for a given server
 
+use archypix_back::clients::federation::FederationClient;
 use archypix_back::domain::auth::TokenType;
 use archypix_back::infra::config::Config;
 use archypix_back::infra::crypto::JwtService;
@@ -76,6 +78,23 @@ pub async fn spawn_backend(
     });
 
     (addr, cache, config)
+}
+
+// ── Client helper ─────────────────────────────────────────────────────────────
+
+/// Build a `FederationClient` that **shares `cache` with the running server**.
+///
+/// The cache is the same `Arc` returned by [`spawn_backend`], so tokens written
+/// by the server's `/api/federation/auth/grant` handler are immediately visible
+/// to this client's poll loop, and backend-URL seeds written via [`seed_backend_url`]
+/// are resolved without a real WebFinger lookup.
+pub fn make_client(config: &Config, cache: &Arc<InMemoryCache>) -> FederationClient {
+    FederationClient::new(
+        reqwest::Client::new(),
+        config.clone(),
+        JwtService::new(&config.jwt_secret, &config.back_domain),
+        cache.clone() as Arc<dyn Cache>,
+    )
 }
 
 // ── Cache helpers ─────────────────────────────────────────────────────────────
