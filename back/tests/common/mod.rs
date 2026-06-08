@@ -1,3 +1,5 @@
+pub mod federation;
+
 use archypix_back::clients::federation::FederationClient;
 use archypix_back::clients::resolver::ResolverClient;
 use archypix_back::domain::tag::encode_sender_label;
@@ -102,13 +104,12 @@ pub fn make_federation(config: &Config) -> (FederationClient, Arc<InMemoryCache>
 
 // ── Full AppState helper ──────────────────────────────────────────────────────
 
-/// Build a test `AppState` suitable for spinning up the Axum router in integration tests.
+/// Build a test `AppState` with an externally supplied `cache`.
 ///
-/// Uses `InMemoryCache` (no Redis) and `MockStorage` (no S3).
-/// The task-queue runner future is dropped immediately — tasks submitted during
-/// tests will never execute, which is fine for contract tests.
-pub fn test_app_state(db: PgPool, config: &Config) -> AppState {
-    let cache: Arc<dyn Cache> = Arc::new(InMemoryCache::new());
+/// Useful when the test needs to inspect or pre-seed the cache before and after
+/// requests (e.g., federation contract tests where backend URLs are pre-seeded
+/// so WebFinger calls are bypassed).
+pub fn test_app_state_with_cache(db: PgPool, config: &Config, cache: Arc<dyn Cache>) -> AppState {
     let storage: Arc<dyn Storage> = Arc::new(MockStorage);
     let jwt = JwtService::new(&config.jwt_secret, &config.back_domain);
     let worker_jwt = JwtService::new(&config.worker_jwt_secret, &config.back_domain);
@@ -123,7 +124,6 @@ pub fn test_app_state(db: PgPool, config: &Config) -> AppState {
     let resolver = ResolverClient::new(reqwest::Client::new(), config.clone(), resolver_jwt);
 
     let (task_queue, _runner) = tasks::create(db.clone(), 1);
-    // _runner is dropped; tasks submitted during tests are silently ignored.
 
     AppState::new(
         config.clone(),
@@ -136,6 +136,15 @@ pub fn test_app_state(db: PgPool, config: &Config) -> AppState {
         resolver,
         task_queue,
     )
+}
+
+/// Build a test `AppState` with a fresh `InMemoryCache`.
+///
+/// Uses `MockStorage` (no S3). The task-queue runner is dropped immediately —
+/// tasks submitted during tests are silently ignored.
+pub fn test_app_state(db: PgPool, config: &Config) -> AppState {
+    let cache: Arc<dyn Cache> = Arc::new(InMemoryCache::new());
+    test_app_state_with_cache(db, config, cache)
 }
 
 // ── DB helpers ────────────────────────────────────────────────────────────────
