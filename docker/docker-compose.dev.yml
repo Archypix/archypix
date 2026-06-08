@@ -15,17 +15,17 @@
 #   b1.archypix.test   → backend1:80
 #   b2.archypix.test   → backend2:80
 #   solo.archypix.test → backend3:80
-# Before starting the stack, add ./hosts entries to /etc/hosts on your machine:
-#   sudo tee -a /etc/hosts < hosts
+# Before starting the stack, add docker/hosts entries to /etc/hosts on your machine:
+#   sudo tee -a /etc/hosts < docker/hosts
 #
 # Source code is mounted directly — restart a container to recompile:
-#   docker compose -f docker-compose.dev.yml restart backend1 worker1
+#   docker compose -f docker/docker-compose.dev.yml restart backend1 worker1
 #
 # If you change Cargo.toml/Cargo.lock, rebuild the image:
-#   docker compose -f docker-compose.dev.yml build backend1 worker1
+#   docker compose -f docker/docker-compose.dev.yml build backend1 worker1
 #
 # Usage:
-#   docker compose -f docker-compose.dev.yml up --build
+#   docker compose -f docker/docker-compose.dev.yml up --build
 #   Frontend: open front-test/index.html — set backend to http://b1.archypix.test,
 #             http://b2.archypix.test, or http://solo.archypix.test
 
@@ -35,25 +35,22 @@
 # it avoids duplicate compilation of common dependencies.
 x-workspace-volumes: &workspace-volumes
   # Back source + SQLx metadata
-  - ./back/.sqlx:/workspace/back/.sqlx
-  - ./back/migrations:/workspace/back/migrations
-  - ./back/src:/workspace/back/src
-  - ./back/Cargo.toml:/workspace/back/Cargo.toml
+  - ../back/.sqlx:/workspace/back/.sqlx
+  - ../back/migrations:/workspace/back/migrations
+  - ../back/src:/workspace/back/src
+  - ../back/Cargo.toml:/workspace/back/Cargo.toml
   # Worker source
-  - ./worker/src:/workspace/worker/src
-  - ./worker/Cargo.toml:/workspace/worker/Cargo.toml
+  - ../worker/src:/workspace/worker/src
+  - ../worker/Cargo.toml:/workspace/worker/Cargo.toml
   # Common source
-  - ./common/src:/workspace/common/src
-  - ./common/Cargo.toml:/workspace/common/Cargo.toml
+  - ../common/src:/workspace/common/src
+  - ../common/Cargo.toml:/workspace/common/Cargo.toml
   # Resolver source
-  - ./resolver/src:/workspace/resolver/src
-  - ./resolver/Cargo.toml:/workspace/resolver/Cargo.toml
-  # Fed test source
-  - ./fed-test/src:/workspace/fed-test/src
-  - ./fed-test/Cargo.toml:/workspace/fed-test/Cargo.toml
+  - ../resolver/src:/workspace/resolver/src
+  - ../resolver/Cargo.toml:/workspace/resolver/Cargo.toml
   # Workspace root
-  - ./Cargo.toml:/workspace/Cargo.toml
-  - ./Cargo.lock:/workspace/Cargo.lock
+  - ../Cargo.toml:/workspace/Cargo.toml
+  - ../Cargo.lock:/workspace/Cargo.lock
   # Shared build cache
   - workspace_target:/workspace/target
 
@@ -86,7 +83,7 @@ services:
 
   resolver:
     build:
-      context: ./resolver
+      context: ../resolver
       target: dev
     container_name: archypix-resolver
     environment:
@@ -99,9 +96,9 @@ services:
       CORS_ORIGINS: "*"
       RUST_LOG: info,archypix_resolver=trace
     volumes:
-      - ./resolver/Cargo.toml:/app/Cargo.toml
-      - ./resolver/Cargo.lock:/app/Cargo.lock
-      - ./resolver/src:/app/src
+      - ../resolver/Cargo.toml:/app/Cargo.toml
+      - ../resolver/Cargo.lock:/app/Cargo.lock
+      - ../resolver/src:/app/src
       - resolver_target:/app/target
     networks:
       - archypix
@@ -116,7 +113,7 @@ services:
 
   backend1:
     build:
-      context: .
+      context: ..
       dockerfile: back/Dockerfile
       target: dev
     image: archypix-back:dev
@@ -250,7 +247,7 @@ services:
 
   worker1:
     build:
-      context: .
+      context: ..
       dockerfile: worker/Dockerfile
       target: dev
     image: archypix-worker:dev
@@ -317,7 +314,7 @@ services:
       POSTGRES_PASSWORD: archypix
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./docker/postgres-init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./postgres-init.sql:/docker-entrypoint-initdb.d/init.sql
     networks:
       - archypix
     healthcheck:

@@ -1,6 +1,3 @@
-> **Maintenance notice** — Do not add more details on the work you did compared to the existing documentation. The same level of precision and depth
-> must be maintained in this document.
-
 # Backend Architecture
 
 ## A) Technology stack
@@ -249,82 +246,13 @@ via WebFinger and cached.
 Auth: `Authorization: Bearer <worker_jwt>` — short-lived JWT (HS256, 300 s TTL) signed with `WORKER_JWT_SECRET` (`token_type: worker`). Workers cache
 the token and refresh 30 s before expiry.
 
-| Method | Path                             | Description                                                                                                                                                                     |
-|--------|----------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `GET`  | `/api/worker/jobs/next`          | Atomically claim next pending job (`SELECT FOR UPDATE SKIP LOCKED`). Returns the job + presigned S3 URLs + a one-time `claim_token`, or `null`. Query: `types=gen_thumbnail,…`. |
-| `POST` | `/api/worker/jobs/{id}/complete` | Report job success. Body: `CompleteJobRequest` (see below). Backend applies picture updates and marks job `completed` in one transaction.                                       |
-| `POST` | `/api/worker/jobs/{id}/fail`     | Report job failure. Body: `FailJobRequest` (see below). Backend auto-retries up to `max_retries` (default 3) unless `permanent: true`.                                          |
+| Method | Path                             | Description                                                                                                           |
+|--------|----------------------------------|-----------------------------------------------------------------------------------------------------------------------|
+| `GET`  | `/api/worker/jobs/next`          | Atomically claim next pending job. Returns job + presigned S3 URLs + `claim_token`, or `null`. Query: `types=…`.      |
+| `POST` | `/api/worker/jobs/{id}/complete` | Report success. Backend applies picture updates and marks job `completed` in one transaction. Requires `claim_token`. |
+| `POST` | `/api/worker/jobs/{id}/fail`     | Report failure. Auto-retries up to `max_retries` (default 3) unless `permanent: true`. Requires `claim_token`.        |
 
-**`GET /api/worker/jobs/next` response shape**
-
-```json
-{
-   "job_id": "uuid",
-   "job_type": "gen_thumbnail",
-   "picture_id": "uuid",
-   "mime_type": "image/jpeg",
-   "claim_token": "uuid",
-   "config": {
-      "type": "gen_thumbnail",
-      "picture_id": "uuid",
-      "is_initial": true
-   },
-   "presigned_read": "https://minio/…",
-   "presigned_writes": {
-      "small": "https://minio/…",
-      "medium": "https://minio/…",
-      "large": "https://minio/…"
-   }
-}
-```
-
-`presigned_writes` keys by job type:
-
-| Job type                   | `presigned_writes` fields            |
-|----------------------------|--------------------------------------|
-| `gen_thumbnail`            | `small`, `medium`, `large`           |
-| `edit_picture` (EXIF only) | `output`                             |
-| `edit_picture` (visual)    | `output`, `small`, `medium`, `large` |
-| ML types                   | _(none)_                             |
-
-**`POST /api/worker/jobs/{id}/complete` request body (`CompleteJobRequest`)**
-
-```json
-{
-   "claim_token": "uuid",
-   "exif": {
-      "width": 4000,
-      "height": 3000,
-      "captured_at": "2024:08:03 14:22:00"
-      …
-   },
-   "blurhash": "LKO2?U%2Tw=w]~RBVZRi};RPxuwH",
-   "thumbnails_generated": true,
-   "file_size": 8473621,
-   "file_hash": "e3b0c44298fc1c149afb…"
-}
-```
-
-| Field                  | Required when                           | Description                                                                        |
-|------------------------|-----------------------------------------|------------------------------------------------------------------------------------|
-| `claim_token`          | Always                                  | Must match the token issued at claim. Backend rejects mismatches (409).            |
-| `exif`                 | `gen_thumbnail` with `is_initial: true` | EXIF extracted from the original file.                                             |
-| `blurhash`             | Optional                                | BlurHash computed from the original or modified file.                              |
-| `thumbnails_generated` | Always                                  | `true` when small/medium/large were generated and uploaded.                        |
-| `file_size`            | Always when available                   | Byte count of the file as stored in S3 after any EXIF writes or visual transforms. |
-| `file_hash`            | Always when available                   | SHA-256 hex digest of the stored file. Used as WebDAV ETag.                        |
-
-**`POST /api/worker/jobs/{id}/fail` request body (`FailJobRequest`)**
-
-```json
-{
-   "claim_token": "uuid",
-   "error": "unsupported MIME type: image/gif",
-   "permanent": true
-}
-```
-
-`claim_token` must match the issued token. `permanent: true` skips the retry counter and marks the job `failed` immediately.
+Wire shapes are defined in `archypix-common/transfer.rs`. See `04_WORKER_ARCHITECTURE.md` for the claim-token protocol and job loop.
 
 ## 6) Key flows
 
@@ -332,21 +260,13 @@ the token and refresh 30 s before expiry.
 
 1. Client → `POST /uploads` → gets `{ picture_id, presigned_url }` (staging bucket).
 2. Client → MinIO: `PUT` binary to presigned URL.
-3. Client → `POST /uploads/{id}/complete` → backend:
-   - S3: copies staging → pictures bucket, deletes staging object.
-   - S3 (if versioning enabled): copies pictures → versions bucket using a pre-generated `version_id`.
-   - **Single DB transaction**: creates `pictures` row, creates `picture_versions` row (id = `version_id`, matching the S3 key), enqueues
-     `gen_thumbnail` job.
-4. Worker polls `GET /api/worker/jobs/next`, claims the job, receives `claim_token` + presigned URLs.
-5. Worker downloads the original (streaming, no full-memory buffer). Extracts EXIF (rexiv2), generates WebP thumbnails (ImageMagick), computes
-   BlurHash, hashes the file (SHA-256).
-6. Worker uploads thumbnails via presigned PUT URLs.
-7. Worker → `POST /api/worker/jobs/{id}/complete` with `{ claim_token, exif, blurhash, thumbnails_generated, file_size, file_hash }`.
-8. Backend (single DB transaction): updates `pictures` row (width, height, captured_at, gps_*, blurhash, exif_data, thumbnails_generated_at,
-   file_size, file_hash), marks job `completed`. Rejects if `claim_token` mismatch or job no longer in `processing` state (409).
+3. Client → `POST /uploads/{id}/complete` → backend: copies staging → pictures bucket (+ versions bucket if versioning enabled); **single DB
+   transaction** creates `pictures` row, `picture_versions` row, and `gen_thumbnail` job.
+4. Worker claims job, processes the original (EXIF, thumbnails, BlurHash, SHA-256), and calls `POST /api/worker/jobs/{id}/complete`. Backend updates
+   the picture row and marks the job done in one transaction; rejects on `claim_token` mismatch (409).
 
 S3 keys: `{user_id}/{picture_id}` for originals/thumbnails; `{user_id}/{picture_id}/{version_id}` for versions. Keys are never stored — derived on
-demand. Workers never hold S3 credentials; all access is via presigned URLs.
+demand.
 
 ### Federation handshake
 

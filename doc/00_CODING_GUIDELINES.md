@@ -1,6 +1,3 @@
-> **Maintenance notice** — Do not add more details on the work you did compared to the existing documentation. The same level of precision and depth
-> must be maintained in this document.
-
 # Coding Guidelines
 
 ## Database migrations
@@ -11,5 +8,14 @@ When editing the database schema, migrate the database with `cd back && cargo sq
 
 ## Rust guidelines
 
-Follow Rust best practices.
-Always favor refactoring over sticking to existing legacy functions.
+Follow Rust best practices. Always favor refactoring over sticking to existing legacy functions.
+
+For modules with sub-files, use a `module_name.rs` file alongside the `module_name/` directory instead of placing a `mod.rs` inside the directory.
+
+# Agents
+
+When making changes to the codebase:
+
+- Keep documentation up to date. Match the level of detail already present — do not add overly specific descriptions of what was changed beyond what
+  the rest of the doc covers.
+- Keep tests up to date. New features and modified behaviour should be reflected in the test suite.

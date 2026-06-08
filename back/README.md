@@ -72,6 +72,31 @@ The `.sqlx/` directory contains cached query metadata for offline builds (CI wit
 cargo sqlx prepare
 ```
 
+## Testing
+
+Tests require a live PostgreSQL database (SQLx spins up an isolated schema per test via `#[sqlx::test]`). Set `DATABASE_URL` before running:
+
+```bash
+DATABASE_URL="postgres://archypix:archypix@localhost/archypix_back1" cargo test -p archypix-back
+
+cargo test -p archypix-back --lib          # no-DB unit tests only
+cargo test --test federation               # full federation suite
+cargo test --test federation contract      # end-to-end two-server flows only
+```
+
+| Location                                   | Kind                | What it covers                                                       |
+|--------------------------------------------|---------------------|----------------------------------------------------------------------|
+| `src/domain/` (inline)                     | Unit                | Tag manipulation, ltree rules, pipeline evaluator                    |
+| `src/repository/` (inline `#[sqlx::test]`) | DB integration      | Repository functions against a real schema                           |
+| `tests/services_*.rs`                      | Service integration | Multi-step workflows: auth, users, tags, jobs, shares                |
+| `tests/worker_contract.rs`                 | HTTP contract       | Worker claim → complete/fail cycle                                   |
+| `tests/federation/contract.rs`             | Federation e2e      | Two real Axum servers on ephemeral ports; real TCP between instances |
+| `tests/federation/rejection.rs`            | Security            | Malformed/unauthorised requests into a single in-process router      |
+| `tests/federation/presign.rs`              | Presign             | `POST /api/federation/pictures/presign` authorised by `share_token`  |
+
+Shared test helpers live in `tests/common/` (app state, seeds, in-memory cache/storage) and `tests/common/federation.rs` (server spawn, JWT helpers,
+cache seeding).
+
 ## Code structure
 
 - `domain/` — pure business types and rules, no I/O

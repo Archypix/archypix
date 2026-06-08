@@ -1,5 +1,4 @@
-> **Maintenance notice** — Do not add more details on the work you did compared to the existing documentation. The same level of precision and depth
-> must be maintained in this document.
+# Infrastructure Design
 
 - Resolver (Rust service)
     - Purpose: map username → owning backend domain (implements WebFinger). Enables multiple backends to share one global identity domain.
