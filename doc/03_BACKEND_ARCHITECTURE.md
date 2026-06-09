@@ -59,7 +59,7 @@ services/
 
 api/
   middleware/auth_user.rs / auth_admin.rs / auth_resolver.rs / auth_federation.rs / auth_worker.rs
-  user/auth.rs / users.rs / pictures.rs / settings.rs / shares.rs / tags.rs / jobs.rs
+  user/auth.rs / users.rs / pictures.rs / settings.rs / shares.rs / tags.rs / jobs.rs / tagging_services.rs
   admin/handlers.rs + models.rs
   federation/handlers.rs + models.rs
   resolver/handlers.rs + models.rs
@@ -217,6 +217,22 @@ via WebFinger and cached.
 |---------|---------------------------|------------------------------------------------------------------------------------------------------------------------|
 | `GET`   | `/api/authenticated/tags` | List all tag paths used by this user.                                                                                  |
 | `PATCH` | `/api/authenticated/tags` | Batch edit tags. Body: `{ picture_ids, add_tags, remove_tags }`. Applies add/remove atomically to all listed pictures. |
+
+**Tagging pipeline**
+
+| Method   | Path                                                      | Description                                                                                                           |
+|----------|-----------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------|
+| `GET`    | `/api/authenticated/tagging-services`                     | List all tagging services with their embedded rules.                                                                  |
+| `POST`   | `/api/authenticated/tagging-services`                     | Create a tagging service. Body: `{ service_type, requires?, excludes? }`.                                             |
+| `GET`    | `/api/authenticated/tagging-services/{id}`                | Get a specific service with its rules.                                                                                |
+| `PATCH`  | `/api/authenticated/tagging-services/{id}`                | Update a service. Body: `{ enabled?, requires?, excludes? }`. Omitted fields are unchanged.                           |
+| `DELETE` | `/api/authenticated/tagging-services/{id}`                | Delete a service (cascades to all its rules).                                                                         |
+| `POST`   | `/api/authenticated/tagging-services/{id}/mappings`       | Add a mapping rule (shared\_tag\_mapping only). Body: `{ incoming_share_id, assign_tag }`.                            |
+| `DELETE` | `/api/authenticated/tagging-services/{id}/mappings/{rid}` | Delete a mapping rule.                                                                                                |
+| `POST`   | `/api/authenticated/tagging-services/{id}/rules`          | Add a predicate rule (rule type only). Body: `{ predicate, assign_tag }`.                                             |
+| `DELETE` | `/api/authenticated/tagging-services/{id}/rules/{rid}`    | Delete a predicate rule.                                                                                              |
+| `POST`   | `/api/authenticated/tagging-services/{id}/segments`       | Add a date-range segment (segmentation only). Body: `{ name, date_start, date_end, assign_tag, parent_segment_id? }`. |
+| `DELETE` | `/api/authenticated/tagging-services/{id}/segments/{sid}` | Delete a segment (cascades to child segments).                                                                        |
 
 **Sharing**
 

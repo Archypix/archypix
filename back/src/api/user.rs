@@ -3,12 +3,13 @@ mod jobs;
 mod pictures;
 mod settings;
 mod shares;
+mod tagging_services;
 mod tags;
 mod users;
 
 use crate::state::AppState;
 use axum::Router;
-use axum::routing::{get, patch, post};
+use axum::routing::{delete, get, patch, post};
 
 pub fn auth_routes() -> Router<AppState> {
     Router::new()
@@ -58,4 +59,38 @@ pub fn authenticated_routes() -> Router<AppState> {
         .route("/jobs/{id}", get(jobs::get_job))
         .route("/pictures/{id}/jobs", get(jobs::list_picture_jobs))
         .route("/pictures/{id}/edit", post(jobs::enqueue_edit))
+        .route(
+            "/tagging-services",
+            get(tagging_services::list_services).post(tagging_services::create_service),
+        )
+        .route(
+            "/tagging-services/{id}",
+            get(tagging_services::get_service)
+                .patch(tagging_services::update_service)
+                .delete(tagging_services::delete_service),
+        )
+        .route(
+            "/tagging-services/{id}/mappings",
+            post(tagging_services::add_mapping),
+        )
+        .route(
+            "/tagging-services/{id}/mappings/{rule_id}",
+            delete(tagging_services::delete_mapping),
+        )
+        .route(
+            "/tagging-services/{id}/rules",
+            post(tagging_services::add_rule),
+        )
+        .route(
+            "/tagging-services/{id}/rules/{rule_id}",
+            delete(tagging_services::delete_rule),
+        )
+        .route(
+            "/tagging-services/{id}/segments",
+            post(tagging_services::add_segment),
+        )
+        .route(
+            "/tagging-services/{id}/segments/{segment_id}",
+            delete(tagging_services::delete_segment),
+        )
 }

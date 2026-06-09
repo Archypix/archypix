@@ -17,7 +17,7 @@
 
 ## To-do for the PoC
 
-- [ ] **Tagging pipeline CRUD** — API to define tagging services (rules and segmentation).
+- [x] **Tagging pipeline CRUD** — API to define tagging services (rules and segmentation).
 - [ ] **Tagging pipeline execution** — wire `services/tagging.rs` to run the domain pipeline evaluator on ingest/edit/share events; connect the
   in-process `TaskQueue::RunTaggingPipeline` variant.
 - [ ] **Exif edition** — exif update api endpoint, triggering a worker job editing the s3 picture metadata.

@@ -1,0 +1,521 @@
+use crate::api::middleware::auth_user::AuthUser;
+use crate::domain::tagging::{
+    RuleTaggingRule, SegmentationRule, ServiceType, SharedTagMappingRule, TaggingService,
+};
+use crate::infra::error::AppError;
+use crate::repository::tagging::{
+    RuleTaggingRuleRepository, SegmentationRuleRepository, SharedTagMappingRuleRepository,
+    TaggingServiceRepository,
+};
+use crate::state::AppState;
+use axum::Json;
+use axum::extract::{Path, State};
+use chrono::NaiveDateTime;
+use serde::{Deserialize, Serialize};
+use tracing::debug;
+use uuid::Uuid;
+
+// ─── Response types ────────────────────────────────────────────────────────────
+
+/// Flat service response (no rules) — used by create and update.
+#[derive(Debug, Serialize)]
+pub struct ServiceResponse {
+    pub id: Uuid,
+    pub service_type: ServiceType,
+    pub requires: Vec<String>,
+    pub excludes: Vec<String>,
+    pub enabled: bool,
+    pub created_at: NaiveDateTime,
+    pub updated_at: NaiveDateTime,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct SharedTagMappingRuleResponse {
+    pub id: Uuid,
+    pub incoming_share_id: Uuid,
+    pub assign_tag: String,
+    pub is_broken: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct RuleTaggingRuleResponse {
+    pub id: Uuid,
+    pub predicate: String,
+    pub assign_tag: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct SegmentationRuleResponse {
+    pub id: Uuid,
+    pub name: String,
+    pub date_start: NaiveDateTime,
+    pub date_end: NaiveDateTime,
+    pub assign_tag: String,
+    pub parent_segment_id: Option<Uuid>,
+}
+
+/// Tagged-enum response for a service with its rules.
+///
+/// A service has exactly one rule type; the `service_type` discriminator tells
+/// the caller which field is present.
+#[derive(Debug, Serialize)]
+#[serde(tag = "service_type", rename_all = "snake_case")]
+pub enum ServiceDetailResponse {
+    SharedTagMapping {
+        id: Uuid,
+        requires: Vec<String>,
+        excludes: Vec<String>,
+        enabled: bool,
+        created_at: NaiveDateTime,
+        updated_at: NaiveDateTime,
+        mappings: Vec<SharedTagMappingRuleResponse>,
+    },
+    Rule {
+        id: Uuid,
+        requires: Vec<String>,
+        excludes: Vec<String>,
+        enabled: bool,
+        created_at: NaiveDateTime,
+        updated_at: NaiveDateTime,
+        rules: Vec<RuleTaggingRuleResponse>,
+    },
+    Segmentation {
+        id: Uuid,
+        requires: Vec<String>,
+        excludes: Vec<String>,
+        enabled: bool,
+        created_at: NaiveDateTime,
+        updated_at: NaiveDateTime,
+        segments: Vec<SegmentationRuleResponse>,
+    },
+}
+
+// ─── Converters ────────────────────────────────────────────────────────────────
+
+fn service_to_response(s: TaggingService) -> ServiceResponse {
+    ServiceResponse {
+        id: s.id,
+        service_type: s.service_type,
+        requires: s.requires,
+        excludes: s.excludes,
+        enabled: s.enabled,
+        created_at: s.created_at,
+        updated_at: s.updated_at,
+    }
+}
+
+fn mapping_to_response(r: SharedTagMappingRule) -> SharedTagMappingRuleResponse {
+    SharedTagMappingRuleResponse {
+        id: r.id,
+        incoming_share_id: r.incoming_share_id,
+        assign_tag: r.assign_tag,
+        is_broken: r.is_broken,
+    }
+}
+
+fn rule_to_response(r: RuleTaggingRule) -> RuleTaggingRuleResponse {
+    RuleTaggingRuleResponse {
+        id: r.id,
+        predicate: r.predicate,
+        assign_tag: r.assign_tag,
+    }
+}
+
+fn segment_to_response(r: SegmentationRule) -> SegmentationRuleResponse {
+    SegmentationRuleResponse {
+        id: r.id,
+        name: r.name,
+        date_start: r.date_start,
+        date_end: r.date_end,
+        assign_tag: r.assign_tag,
+        parent_segment_id: r.parent_segment_id,
+    }
+}
+
+// ─── Service CRUD ──────────────────────────────────────────────────────────────
+
+/// GET /pipeline — list all services for the user with their rules.
+///
+/// Groups service IDs by type and queries only the relevant rule table for
+/// each group — no cross-type fetches.
+pub async fn list_services(
+    auth: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<ServiceDetailResponse>>, AppError> {
+    debug!(user = %auth.claims.sub, token_type = auth.token_type(), "list_pipeline_services");
+    let user_id = auth.user_id()?;
+    let services = TaggingServiceRepository::list_by_owner(&state.db, user_id).await?;
+
+    // Partition IDs by type so we only query the tables we need.
+    let mut mapping_ids: Vec<Uuid> = vec![];
+    let mut rule_ids: Vec<Uuid> = vec![];
+    let mut segment_ids: Vec<Uuid> = vec![];
+    for svc in &services {
+        match svc.service_type {
+            ServiceType::SharedTagMapping => mapping_ids.push(svc.id),
+            ServiceType::Rule => rule_ids.push(svc.id),
+            ServiceType::Segmentation => segment_ids.push(svc.id),
+        }
+    }
+
+    let (all_mappings, all_rules, all_segments) = tokio::try_join!(
+        SharedTagMappingRuleRepository::list_for_services(&state.db, &mapping_ids),
+        RuleTaggingRuleRepository::list_for_services(&state.db, &rule_ids),
+        SegmentationRuleRepository::list_for_services(&state.db, &segment_ids),
+    )?;
+
+    let responses = services
+        .into_iter()
+        .map(|svc| {
+            let id = svc.id;
+            let (requires, excludes, enabled, created_at, updated_at) = (
+                svc.requires.clone(),
+                svc.excludes.clone(),
+                svc.enabled,
+                svc.created_at,
+                svc.updated_at,
+            );
+            match svc.service_type {
+                ServiceType::SharedTagMapping => ServiceDetailResponse::SharedTagMapping {
+                    id,
+                    requires,
+                    excludes,
+                    enabled,
+                    created_at,
+                    updated_at,
+                    mappings: all_mappings
+                        .iter()
+                        .filter(|r| r.service_id == id)
+                        .cloned()
+                        .map(mapping_to_response)
+                        .collect(),
+                },
+                ServiceType::Rule => ServiceDetailResponse::Rule {
+                    id,
+                    requires,
+                    excludes,
+                    enabled,
+                    created_at,
+                    updated_at,
+                    rules: all_rules
+                        .iter()
+                        .filter(|r| r.service_id == id)
+                        .cloned()
+                        .map(rule_to_response)
+                        .collect(),
+                },
+                ServiceType::Segmentation => ServiceDetailResponse::Segmentation {
+                    id,
+                    requires,
+                    excludes,
+                    enabled,
+                    created_at,
+                    updated_at,
+                    segments: all_segments
+                        .iter()
+                        .filter(|r| r.service_id == id)
+                        .cloned()
+                        .map(segment_to_response)
+                        .collect(),
+                },
+            }
+        })
+        .collect();
+
+    Ok(Json(responses))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateServiceRequest {
+    pub service_type: ServiceType,
+    #[serde(default)]
+    pub requires: Vec<String>,
+    #[serde(default)]
+    pub excludes: Vec<String>,
+}
+
+/// POST /pipeline — create a new tagging service.
+pub async fn create_service(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Json(payload): Json<CreateServiceRequest>,
+) -> Result<Json<ServiceResponse>, AppError> {
+    debug!(
+        user = %auth.claims.sub,
+        token_type = auth.token_type(),
+        service_type = ?payload.service_type,
+        "create_pipeline_service"
+    );
+    let user_id = auth.user_id()?;
+    let service = TaggingServiceRepository::create(
+        &state.db,
+        user_id,
+        payload.service_type,
+        &payload.requires,
+        &payload.excludes,
+    )
+    .await?;
+    Ok(Json(service_to_response(service)))
+}
+
+/// GET /pipeline/{id} — get a service with its rules.
+pub async fn get_service(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(service_id): Path<Uuid>,
+) -> Result<Json<ServiceDetailResponse>, AppError> {
+    debug!(user = %auth.claims.sub, token_type = auth.token_type(), %service_id, "get_pipeline_service");
+    let user_id = auth.user_id()?;
+    let svc = TaggingServiceRepository::get_by_owner_and_id(&state.db, user_id, service_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    let detail = match svc.service_type {
+        ServiceType::SharedTagMapping => {
+            let mappings =
+                SharedTagMappingRuleRepository::list_for_services(&state.db, &[svc.id]).await?;
+            ServiceDetailResponse::SharedTagMapping {
+                id: svc.id,
+                requires: svc.requires,
+                excludes: svc.excludes,
+                enabled: svc.enabled,
+                created_at: svc.created_at,
+                updated_at: svc.updated_at,
+                mappings: mappings.into_iter().map(mapping_to_response).collect(),
+            }
+        }
+        ServiceType::Rule => {
+            let rules = RuleTaggingRuleRepository::list_for_services(&state.db, &[svc.id]).await?;
+            ServiceDetailResponse::Rule {
+                id: svc.id,
+                requires: svc.requires,
+                excludes: svc.excludes,
+                enabled: svc.enabled,
+                created_at: svc.created_at,
+                updated_at: svc.updated_at,
+                rules: rules.into_iter().map(rule_to_response).collect(),
+            }
+        }
+        ServiceType::Segmentation => {
+            let segments =
+                SegmentationRuleRepository::list_for_services(&state.db, &[svc.id]).await?;
+            ServiceDetailResponse::Segmentation {
+                id: svc.id,
+                requires: svc.requires,
+                excludes: svc.excludes,
+                enabled: svc.enabled,
+                created_at: svc.created_at,
+                updated_at: svc.updated_at,
+                segments: segments.into_iter().map(segment_to_response).collect(),
+            }
+        }
+    };
+
+    Ok(Json(detail))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateServiceRequest {
+    pub enabled: Option<bool>,
+    pub requires: Option<Vec<String>>,
+    pub excludes: Option<Vec<String>>,
+}
+
+/// PATCH /pipeline/{id} — update a service.
+pub async fn update_service(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(service_id): Path<Uuid>,
+    Json(payload): Json<UpdateServiceRequest>,
+) -> Result<Json<ServiceResponse>, AppError> {
+    debug!(user = %auth.claims.sub, token_type = auth.token_type(), %service_id, "update_pipeline_service");
+    let user_id = auth.user_id()?;
+    let service = TaggingServiceRepository::update(
+        &state.db,
+        user_id,
+        service_id,
+        payload.enabled,
+        payload.requires.as_deref(),
+        payload.excludes.as_deref(),
+    )
+    .await?
+    .ok_or(AppError::NotFound)?;
+    Ok(Json(service_to_response(service)))
+}
+
+/// DELETE /pipeline/{id} — delete a service (cascades to all its rules).
+pub async fn delete_service(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(service_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    debug!(user = %auth.claims.sub, token_type = auth.token_type(), %service_id, "delete_pipeline_service");
+    let user_id = auth.user_id()?;
+    let deleted = TaggingServiceRepository::delete(&state.db, user_id, service_id).await?;
+    if !deleted {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(serde_json::json!({ "deleted": true })))
+}
+
+// ─── Mapping rules (shared_tag_mapping services) ───────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct AddMappingRequest {
+    pub incoming_share_id: Uuid,
+    pub assign_tag: String,
+}
+
+/// POST /pipeline/{id}/mappings — add a mapping rule to a SharedTagMapping service.
+pub async fn add_mapping(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(service_id): Path<Uuid>,
+    Json(payload): Json<AddMappingRequest>,
+) -> Result<Json<SharedTagMappingRuleResponse>, AppError> {
+    debug!(user = %auth.claims.sub, token_type = auth.token_type(), %service_id, "add_mapping_rule");
+    let user_id = auth.user_id()?;
+    let svc = TaggingServiceRepository::get_by_owner_and_id(&state.db, user_id, service_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if svc.service_type != ServiceType::SharedTagMapping {
+        return Err(AppError::BadRequest(
+            "service is not a shared_tag_mapping type".into(),
+        ));
+    }
+    let rule = SharedTagMappingRuleRepository::create(
+        &state.db,
+        service_id,
+        payload.incoming_share_id,
+        &payload.assign_tag,
+    )
+    .await?;
+    Ok(Json(mapping_to_response(rule)))
+}
+
+/// DELETE /pipeline/{id}/mappings/{rule_id} — remove a mapping rule.
+pub async fn delete_mapping(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path((service_id, rule_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    debug!(user = %auth.claims.sub, token_type = auth.token_type(), %service_id, %rule_id, "delete_mapping_rule");
+    let user_id = auth.user_id()?;
+    let deleted =
+        SharedTagMappingRuleRepository::delete(&state.db, user_id, service_id, rule_id).await?;
+    if !deleted {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(serde_json::json!({ "deleted": true })))
+}
+
+// ─── Rule tagging rules ────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct AddRuleRequest {
+    pub predicate: String,
+    pub assign_tag: String,
+}
+
+/// POST /pipeline/{id}/rules — add a rule to a Rule tagging service.
+pub async fn add_rule(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(service_id): Path<Uuid>,
+    Json(payload): Json<AddRuleRequest>,
+) -> Result<Json<RuleTaggingRuleResponse>, AppError> {
+    debug!(user = %auth.claims.sub, token_type = auth.token_type(), %service_id, "add_tagging_rule");
+    let user_id = auth.user_id()?;
+    let svc = TaggingServiceRepository::get_by_owner_and_id(&state.db, user_id, service_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if svc.service_type != ServiceType::Rule {
+        return Err(AppError::BadRequest("service is not a rule type".into()));
+    }
+    let rule = RuleTaggingRuleRepository::create(
+        &state.db,
+        service_id,
+        &payload.predicate,
+        &payload.assign_tag,
+    )
+    .await?;
+    Ok(Json(rule_to_response(rule)))
+}
+
+/// DELETE /pipeline/{id}/rules/{rule_id} — remove a rule.
+pub async fn delete_rule(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path((service_id, rule_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    debug!(user = %auth.claims.sub, token_type = auth.token_type(), %service_id, %rule_id, "delete_tagging_rule");
+    let user_id = auth.user_id()?;
+    let deleted =
+        RuleTaggingRuleRepository::delete(&state.db, user_id, service_id, rule_id).await?;
+    if !deleted {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(serde_json::json!({ "deleted": true })))
+}
+
+// ─── Segmentation rules ────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct AddSegmentRequest {
+    pub name: String,
+    pub date_start: NaiveDateTime,
+    pub date_end: NaiveDateTime,
+    pub assign_tag: String,
+    pub parent_segment_id: Option<Uuid>,
+}
+
+/// POST /pipeline/{id}/segments — add a segment to a Segmentation service.
+pub async fn add_segment(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path(service_id): Path<Uuid>,
+    Json(payload): Json<AddSegmentRequest>,
+) -> Result<Json<SegmentationRuleResponse>, AppError> {
+    debug!(user = %auth.claims.sub, token_type = auth.token_type(), %service_id, "add_segment");
+    let user_id = auth.user_id()?;
+    let svc = TaggingServiceRepository::get_by_owner_and_id(&state.db, user_id, service_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    if svc.service_type != ServiceType::Segmentation {
+        return Err(AppError::BadRequest(
+            "service is not a segmentation type".into(),
+        ));
+    }
+    if payload.date_end <= payload.date_start {
+        return Err(AppError::BadRequest(
+            "date_end must be after date_start".into(),
+        ));
+    }
+    let segment = SegmentationRuleRepository::create(
+        &state.db,
+        service_id,
+        &payload.name,
+        payload.date_start,
+        payload.date_end,
+        &payload.assign_tag,
+        payload.parent_segment_id,
+    )
+    .await?;
+    Ok(Json(segment_to_response(segment)))
+}
+
+/// DELETE /pipeline/{id}/segments/{segment_id} — remove a segment.
+pub async fn delete_segment(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Path((service_id, segment_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    debug!(user = %auth.claims.sub, token_type = auth.token_type(), %service_id, %segment_id, "delete_segment");
+    let user_id = auth.user_id()?;
+    let deleted =
+        SegmentationRuleRepository::delete(&state.db, user_id, service_id, segment_id).await?;
+    if !deleted {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(serde_json::json!({ "deleted": true })))
+}

@@ -1,0 +1,377 @@
+use crate::domain::tagging::{
+    RuleTaggingRule, SegmentationRule, ServiceType, SharedTagMappingRule, TaggingService,
+};
+use crate::infra::error::{AppError, map_sqlx_error};
+use chrono::NaiveDateTime;
+use sqlx::{Executor, Postgres};
+use uuid::Uuid;
+
+// Non-macro query_as is used throughout because requires/excludes are LTREE[] columns that need
+// runtime casting (::text[]) and the compile-time database lacks the ltree extension setup.
+
+pub struct TaggingServiceRepository;
+
+impl TaggingServiceRepository {
+    pub async fn list_by_owner<'e, E>(
+        ex: E,
+        owner_id: Uuid,
+    ) -> Result<Vec<TaggingService>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query_as(
+            r#"SELECT id, owner_id, service_type,
+                      requires::text[] as requires, excludes::text[] as excludes,
+                      enabled, created_at, updated_at
+               FROM tagging_services
+               WHERE owner_id = $1
+               ORDER BY CASE service_type
+                   WHEN 'shared_tag_mapping' THEN 1
+                   WHEN 'rule' THEN 2
+                   WHEN 'segmentation' THEN 3
+               END, created_at"#,
+        )
+        .bind(owner_id)
+        .fetch_all(ex)
+        .await
+        .map_err(map_sqlx_error)
+    }
+
+    pub async fn get_by_owner_and_id<'e, E>(
+        ex: E,
+        owner_id: Uuid,
+        service_id: Uuid,
+    ) -> Result<Option<TaggingService>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query_as(
+            r#"SELECT id, owner_id, service_type,
+                      requires::text[] as requires, excludes::text[] as excludes,
+                      enabled, created_at, updated_at
+               FROM tagging_services
+               WHERE id = $1 AND owner_id = $2"#,
+        )
+        .bind(service_id)
+        .bind(owner_id)
+        .fetch_optional(ex)
+        .await
+        .map_err(map_sqlx_error)
+    }
+
+    pub async fn create<'e, E>(
+        ex: E,
+        owner_id: Uuid,
+        service_type: ServiceType,
+        requires: &[String],
+        excludes: &[String],
+    ) -> Result<TaggingService, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query_as(
+            r#"INSERT INTO tagging_services (owner_id, service_type, requires, excludes)
+               VALUES ($1, $2, $3::ltree[], $4::ltree[])
+               RETURNING id, owner_id, service_type,
+                         requires::text[] as requires, excludes::text[] as excludes,
+                         enabled, created_at, updated_at"#,
+        )
+        .bind(owner_id)
+        .bind(service_type)
+        .bind(requires)
+        .bind(excludes)
+        .fetch_one(ex)
+        .await
+        .map_err(map_sqlx_error)
+    }
+
+    /// Update optional fields; pass `None` to leave a field unchanged.
+    pub async fn update<'e, E>(
+        ex: E,
+        owner_id: Uuid,
+        service_id: Uuid,
+        enabled: Option<bool>,
+        requires: Option<&[String]>,
+        excludes: Option<&[String]>,
+    ) -> Result<Option<TaggingService>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query_as(
+            r#"UPDATE tagging_services
+               SET enabled    = COALESCE($3, enabled),
+                   requires   = COALESCE($4::ltree[], requires),
+                   excludes   = COALESCE($5::ltree[], excludes),
+                   updated_at = now() AT TIME ZONE 'utc'
+               WHERE id = $1 AND owner_id = $2
+               RETURNING id, owner_id, service_type,
+                         requires::text[] as requires, excludes::text[] as excludes,
+                         enabled, created_at, updated_at"#,
+        )
+        .bind(service_id)
+        .bind(owner_id)
+        .bind(enabled)
+        .bind(requires)
+        .bind(excludes)
+        .fetch_optional(ex)
+        .await
+        .map_err(map_sqlx_error)
+    }
+
+    pub async fn delete<'e, E>(ex: E, owner_id: Uuid, service_id: Uuid) -> Result<bool, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        let result = sqlx::query("DELETE FROM tagging_services WHERE id = $1 AND owner_id = $2")
+            .bind(service_id)
+            .bind(owner_id)
+            .execute(ex)
+            .await
+            .map_err(map_sqlx_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+}
+
+// ─── SharedTagMapping rules ────────────────────────────────────────────────────
+
+pub struct SharedTagMappingRuleRepository;
+
+impl SharedTagMappingRuleRepository {
+    pub async fn list_for_services<'e, E>(
+        ex: E,
+        service_ids: &[Uuid],
+    ) -> Result<Vec<SharedTagMappingRule>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        if service_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        sqlx::query_as(
+            r#"SELECT id, service_id, incoming_share_id,
+                      assign_tag::text as assign_tag, is_broken
+               FROM shared_tag_mapping_services
+               WHERE service_id = ANY($1::uuid[])"#,
+        )
+        .bind(service_ids)
+        .fetch_all(ex)
+        .await
+        .map_err(map_sqlx_error)
+    }
+
+    pub async fn create<'e, E>(
+        ex: E,
+        service_id: Uuid,
+        incoming_share_id: Uuid,
+        assign_tag: &str,
+    ) -> Result<SharedTagMappingRule, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query_as(
+            r#"INSERT INTO shared_tag_mapping_services (service_id, incoming_share_id, assign_tag)
+               VALUES ($1, $2, $3::ltree)
+               RETURNING id, service_id, incoming_share_id,
+                         assign_tag::text as assign_tag, is_broken"#,
+        )
+        .bind(service_id)
+        .bind(incoming_share_id)
+        .bind(assign_tag)
+        .fetch_one(ex)
+        .await
+        .map_err(map_sqlx_error)
+    }
+
+    /// Deletes a mapping rule. Verifies ownership via the parent tagging_service.
+    pub async fn delete<'e, E>(
+        ex: E,
+        owner_id: Uuid,
+        service_id: Uuid,
+        rule_id: Uuid,
+    ) -> Result<bool, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        let result = sqlx::query(
+            r#"DELETE FROM shared_tag_mapping_services stms
+               USING tagging_services ts
+               WHERE stms.id = $1
+                 AND stms.service_id = $2
+                 AND ts.id = $2
+                 AND ts.owner_id = $3"#,
+        )
+        .bind(rule_id)
+        .bind(service_id)
+        .bind(owner_id)
+        .execute(ex)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+}
+
+// ─── Rule tagging rules ────────────────────────────────────────────────────────
+
+pub struct RuleTaggingRuleRepository;
+
+impl RuleTaggingRuleRepository {
+    pub async fn list_for_services<'e, E>(
+        ex: E,
+        service_ids: &[Uuid],
+    ) -> Result<Vec<RuleTaggingRule>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        if service_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        sqlx::query_as(
+            r#"SELECT id, service_id, predicate, assign_tag::text as assign_tag
+               FROM rule_tagging_services
+               WHERE service_id = ANY($1::uuid[])"#,
+        )
+        .bind(service_ids)
+        .fetch_all(ex)
+        .await
+        .map_err(map_sqlx_error)
+    }
+
+    pub async fn create<'e, E>(
+        ex: E,
+        service_id: Uuid,
+        predicate: &str,
+        assign_tag: &str,
+    ) -> Result<RuleTaggingRule, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query_as(
+            r#"INSERT INTO rule_tagging_services (service_id, predicate, assign_tag)
+               VALUES ($1, $2, $3::ltree)
+               RETURNING id, service_id, predicate, assign_tag::text as assign_tag"#,
+        )
+        .bind(service_id)
+        .bind(predicate)
+        .bind(assign_tag)
+        .fetch_one(ex)
+        .await
+        .map_err(map_sqlx_error)
+    }
+
+    pub async fn delete<'e, E>(
+        ex: E,
+        owner_id: Uuid,
+        service_id: Uuid,
+        rule_id: Uuid,
+    ) -> Result<bool, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        let result = sqlx::query(
+            r#"DELETE FROM rule_tagging_services rts
+               USING tagging_services ts
+               WHERE rts.id = $1
+                 AND rts.service_id = $2
+                 AND ts.id = $2
+                 AND ts.owner_id = $3"#,
+        )
+        .bind(rule_id)
+        .bind(service_id)
+        .bind(owner_id)
+        .execute(ex)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+}
+
+// ─── Segmentation rules ────────────────────────────────────────────────────────
+
+pub struct SegmentationRuleRepository;
+
+impl SegmentationRuleRepository {
+    pub async fn list_for_services<'e, E>(
+        ex: E,
+        service_ids: &[Uuid],
+    ) -> Result<Vec<SegmentationRule>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        if service_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        sqlx::query_as(
+            r#"SELECT id, service_id, name,
+                      lower(date_range) AT TIME ZONE 'UTC' as date_start,
+                      upper(date_range) AT TIME ZONE 'UTC' as date_end,
+                      assign_tag::text as assign_tag,
+                      parent_segment_id
+               FROM segmentation_tagging_services
+               WHERE service_id = ANY($1::uuid[])
+               ORDER BY lower(date_range)"#,
+        )
+        .bind(service_ids)
+        .fetch_all(ex)
+        .await
+        .map_err(map_sqlx_error)
+    }
+
+    pub async fn create<'e, E>(
+        ex: E,
+        service_id: Uuid,
+        name: &str,
+        date_start: NaiveDateTime,
+        date_end: NaiveDateTime,
+        assign_tag: &str,
+        parent_segment_id: Option<Uuid>,
+    ) -> Result<SegmentationRule, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query_as(
+            r#"INSERT INTO segmentation_tagging_services
+                   (service_id, name, date_range, assign_tag, parent_segment_id)
+               VALUES ($1, $2, tstzrange($3 AT TIME ZONE 'UTC', $4 AT TIME ZONE 'UTC', '[)'), $5::ltree, $6)
+               RETURNING id, service_id, name,
+                         lower(date_range) AT TIME ZONE 'UTC' as date_start,
+                         upper(date_range) AT TIME ZONE 'UTC' as date_end,
+                         assign_tag::text as assign_tag,
+                         parent_segment_id"#,
+        )
+            .bind(service_id)
+            .bind(name)
+            .bind(date_start)
+            .bind(date_end)
+            .bind(assign_tag)
+            .bind(parent_segment_id)
+            .fetch_one(ex)
+            .await
+            .map_err(map_sqlx_error)
+    }
+
+    pub async fn delete<'e, E>(
+        ex: E,
+        owner_id: Uuid,
+        service_id: Uuid,
+        segment_id: Uuid,
+    ) -> Result<bool, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        let result = sqlx::query(
+            r#"DELETE FROM segmentation_tagging_services sts
+               USING tagging_services ts
+               WHERE sts.id = $1
+                 AND sts.service_id = $2
+                 AND ts.id = $2
+                 AND ts.owner_id = $3"#,
+        )
+        .bind(segment_id)
+        .bind(service_id)
+        .bind(owner_id)
+        .execute(ex)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+}

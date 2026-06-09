@@ -4,6 +4,5 @@ members = [
     "worker",
     "common",
     "resolver",
-    "fed-test",
 ]
 resolver = "2"
