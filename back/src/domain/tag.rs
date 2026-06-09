@@ -91,6 +91,14 @@ impl TagPath {
         }
     }
 
+    /// Returns true if `self` is a proper ancestor of `other` in the LTREE hierarchy.
+    ///
+    /// `Photos.Travel`.is_ancestor_of(`Photos.Travel.Alps`) → `true`
+    /// `Photos.Travel`.is_ancestor_of(`Photos.Travel`) → `false` (not *proper*)
+    pub fn is_ancestor_of(&self, other: &TagPath) -> bool {
+        other.0.starts_with(&format!("{}.", self.0))
+    }
+
     /// All ancestor paths, from root down to (but not including) self.
     pub fn ancestors(&self) -> Vec<TagPath> {
         let parts: Vec<&str> = self.0.split('.').collect();

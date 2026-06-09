@@ -184,8 +184,24 @@ impl PipelineRepository {
         let source_ids: Vec<Uuid> = assignments.iter().map(|a| a.source_id).collect();
 
         let source_id_strs: Vec<String> = source_ids.iter().map(|u| u.to_string()).collect();
+        // The CTE removes stale pipeline-assigned ancestor tags before inserting descendants.
+        // e.g. if a previous run stored Photos.Travel (rule) and we now add Photos.Travel.Alps,
+        // the ancestor row is deleted so the DB stays in its minimal canonical form.
+        // Only pipeline sources (rule/segment/share_mapping) are touched — manual and
+        // incoming_share tags are left intact.
         sqlx::query!(
-            r#"INSERT INTO tags (picture_id, tag_path, source, source_id)
+            r#"WITH cleanup AS (
+                 DELETE FROM tags
+                 WHERE picture_id = $1
+                   AND tag_path @> ANY($2::ltree[])
+                   AND NOT (tag_path = ANY($2::ltree[]))
+                   AND source IN (
+                     'rule'::tag_source,
+                     'segment'::tag_source,
+                     'share_mapping'::tag_source
+                   )
+               )
+               INSERT INTO tags (picture_id, tag_path, source, source_id)
                SELECT $1, t.tag::ltree, t.src::tag_source, t.sid::uuid
                FROM unnest($2::text[], $3::text[], $4::text[]) AS t(tag, src, sid)
                ON CONFLICT (picture_id, tag_path) DO NOTHING"#,

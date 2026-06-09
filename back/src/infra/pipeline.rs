@@ -209,14 +209,23 @@ async fn run_for_user(db: &PgPool, user_id: Uuid) -> Result<(), anyhow::Error> {
                 };
 
                 for tag in result.tags_to_add {
-                    if !current_tags.contains(&tag) {
-                        current_tags.push(tag.clone()); // visible to next service
-                        assignments.push(PipelineTagAssignment {
-                            tag_path: tag.as_ltree().to_string(),
-                            source: source_str.to_string(),
-                            source_id: service.id,
-                        });
+                    // Skip if an equal or more-specific tag is already present.
+                    // e.g. don't add Photos.Travel when Photos.Travel.Alps is already there.
+                    if current_tags
+                        .iter()
+                        .any(|t| t == &tag || tag.is_ancestor_of(t))
+                    {
+                        continue;
                     }
+                    // Drop ancestors that are now redundant (replaced by this deeper tag).
+                    // e.g. remove Photos.Travel when adding Photos.Travel.Alps.
+                    current_tags.retain(|t| !t.is_ancestor_of(&tag));
+                    current_tags.push(tag.clone());
+                    assignments.push(PipelineTagAssignment {
+                        tag_path: tag.as_ltree().to_string(),
+                        source: source_str.to_string(),
+                        source_id: service.id,
+                    });
                 }
             }
 
@@ -229,6 +238,15 @@ async fn run_for_user(db: &PgPool, user_id: Uuid) -> Result<(), anyhow::Error> {
                 );
                 continue; // do not mark this picture as run
             }
+
+            // TODO: to support tag removal, we should tag that a test of a non-manual source
+            //  is in none of the result.tags_to_add, and that its source_id has removal_enabled=true.
+            //  This requires keeping track of result.tags_to_add, and matching the tag source with
+            //  the service to get removal_enabled. If one of the services created an ancestor tag,
+            //  the ancestor should be added after the removed one is removed.
+            //  Other option : add source_id to the PK of tags, allowing to keep track of all tags
+            //  individually, and to clean up the non-relevant tags automatically in sql by adding
+            //  a condition in `WITH cleanup AS` on source_id.
 
             success_ids.push(picture.id);
         }
