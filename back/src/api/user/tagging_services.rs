@@ -1,4 +1,5 @@
 use crate::api::middleware::auth_user::AuthUser;
+use crate::domain::tag::TagPath;
 use crate::domain::tagging::{
     RuleTaggingRule, SegmentationRule, ServiceType, SharedTagMappingRule, TaggingService,
 };
@@ -14,6 +15,16 @@ use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 use uuid::Uuid;
+
+fn parse_tag(raw: &str) -> Result<String, AppError> {
+    TagPath::parse(raw)
+        .map(|p| p.as_ltree().to_string())
+        .map_err(AppError::BadRequest)
+}
+
+fn parse_tags(paths: &[String]) -> Result<Vec<String>, AppError> {
+    paths.iter().map(|p| parse_tag(p)).collect()
+}
 
 // ─── Response types ────────────────────────────────────────────────────────────
 
@@ -247,12 +258,14 @@ pub async fn create_service(
         "create_pipeline_service"
     );
     let user_id = auth.user_id()?;
+    let requires = parse_tags(&payload.requires)?;
+    let excludes = parse_tags(&payload.excludes)?;
     let service = TaggingServiceRepository::create(
         &state.db,
         user_id,
         payload.service_type,
-        &payload.requires,
-        &payload.excludes,
+        &requires,
+        &excludes,
     )
     .await?;
     Ok(Json(service_to_response(service)))
@@ -330,13 +343,15 @@ pub async fn update_service(
 ) -> Result<Json<ServiceResponse>, AppError> {
     debug!(user = %auth.claims.sub, token_type = auth.token_type(), %service_id, "update_pipeline_service");
     let user_id = auth.user_id()?;
+    let requires = payload.requires.as_deref().map(parse_tags).transpose()?;
+    let excludes = payload.excludes.as_deref().map(parse_tags).transpose()?;
     let service = TaggingServiceRepository::update(
         &state.db,
         user_id,
         service_id,
         payload.enabled,
-        payload.requires.as_deref(),
-        payload.excludes.as_deref(),
+        requires.as_deref(),
+        excludes.as_deref(),
     )
     .await?
     .ok_or(AppError::NotFound)?;
@@ -383,11 +398,12 @@ pub async fn add_mapping(
             "service is not a shared_tag_mapping type".into(),
         ));
     }
+    let assign_tag = parse_tag(&payload.assign_tag)?;
     let rule = SharedTagMappingRuleRepository::create(
         &state.db,
         service_id,
         payload.incoming_share_id,
-        &payload.assign_tag,
+        &assign_tag,
     )
     .await?;
     Ok(Json(mapping_to_response(rule)))
@@ -432,13 +448,10 @@ pub async fn add_rule(
     if svc.service_type != ServiceType::Rule {
         return Err(AppError::BadRequest("service is not a rule type".into()));
     }
-    let rule = RuleTaggingRuleRepository::create(
-        &state.db,
-        service_id,
-        &payload.predicate,
-        &payload.assign_tag,
-    )
-    .await?;
+    let assign_tag = parse_tag(&payload.assign_tag)?;
+    let rule =
+        RuleTaggingRuleRepository::create(&state.db, service_id, &payload.predicate, &assign_tag)
+            .await?;
     Ok(Json(rule_to_response(rule)))
 }
 
@@ -491,13 +504,14 @@ pub async fn add_segment(
             "date_end must be after date_start".into(),
         ));
     }
+    let assign_tag = parse_tag(&payload.assign_tag)?;
     let segment = SegmentationRuleRepository::create(
         &state.db,
         service_id,
         &payload.name,
         payload.date_start,
         payload.date_end,
-        &payload.assign_tag,
+        &assign_tag,
         payload.parent_segment_id,
     )
     .await?;

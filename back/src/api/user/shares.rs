@@ -1,5 +1,6 @@
 use crate::api::middleware::auth_user::AuthUser;
 use crate::domain::share::ShareStatus;
+use crate::domain::tag::TagPath;
 use crate::infra::error::AppError;
 use crate::repository::share::{IncomingShareRepository, OutgoingShareRepository};
 use crate::services;
@@ -49,6 +50,7 @@ pub async fn create_outgoing(
         recipient = %payload.recipient_username,
         "create_outgoing_share"
     );
+    let tag_path = TagPath::parse(&payload.tag_path).map_err(AppError::BadRequest)?;
     let share = services::shares::create_outgoing_share(
         &state.db,
         state.cache.as_ref(),
@@ -56,7 +58,7 @@ pub async fn create_outgoing(
         &state.config,
         auth.user_id()?,
         &auth.claims.sub,
-        &payload.tag_path,
+        tag_path.as_ltree(),
         &payload.recipient_username,
         &payload.recipient_instance,
         payload.allow_share_back.unwrap_or(true),

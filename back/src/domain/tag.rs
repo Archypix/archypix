@@ -32,7 +32,37 @@ pub struct Tag {
 pub struct TagPath(String);
 
 impl TagPath {
+    /// Parse and validate a user-supplied tag path in slash-separated form.
+    ///
+    /// - Strips leading whitespace and a leading `/` (silently).
+    /// - Splits on `/`; each segment must be non-empty and contain only `[A-Za-z0-9_]`.
+    /// - Returns the normalized ltree form (dot-separated).
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        let stripped = raw.trim().trim_start_matches('/');
+        if stripped.is_empty() {
+            return Err("tag path must not be empty".to_string());
+        }
+        for segment in stripped.split('/') {
+            if segment.is_empty() {
+                return Err(
+                    "tag path must not contain empty segments (no trailing or double slashes)"
+                        .to_string(),
+                );
+            }
+            if !segment
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
+                return Err(format!(
+                    "tag segment {segment:?} contains invalid characters — only letters, digits, and underscores [A-Za-z0-9_] are allowed"
+                ));
+            }
+        }
+        Ok(TagPath(stripped.replace('/', ".")))
+    }
+
     /// Parse from the human-readable slash-separated form (`/Photos/Travel/Alps`).
+    /// For internal use with trusted paths — does not validate characters.
     pub fn from_slash(raw: &str) -> Self {
         let normalized = raw.trim().trim_start_matches('/').replace('/', ".");
         TagPath(normalized)
@@ -145,6 +175,59 @@ mod tests {
     fn ancestors_empty_path_is_empty() {
         let t = TagPath::from_ltree("");
         assert_eq!(t.ancestors(), vec![]);
+    }
+
+    // ── TagPath::parse ────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_strips_leading_slash() {
+        let t = TagPath::parse("/Photos/Travel/Alps").unwrap();
+        assert_eq!(t.as_ltree(), "Photos.Travel.Alps");
+    }
+
+    #[test]
+    fn parse_no_leading_slash() {
+        let t = TagPath::parse("Photos/Travel").unwrap();
+        assert_eq!(t.as_ltree(), "Photos.Travel");
+    }
+
+    #[test]
+    fn parse_single_segment() {
+        let t = TagPath::parse("Photos").unwrap();
+        assert_eq!(t.as_ltree(), "Photos");
+    }
+
+    #[test]
+    fn parse_rejects_empty() {
+        assert!(TagPath::parse("").is_err());
+        assert!(TagPath::parse("/").is_err());
+        assert!(TagPath::parse("   ").is_err());
+    }
+
+    #[test]
+    fn parse_rejects_double_slash() {
+        assert!(TagPath::parse("Photos//Travel").is_err());
+    }
+
+    #[test]
+    fn parse_rejects_trailing_slash() {
+        assert!(TagPath::parse("Photos/Travel/").is_err());
+    }
+
+    #[test]
+    fn parse_rejects_hyphen() {
+        assert!(TagPath::parse("My-Photos").is_err());
+    }
+
+    #[test]
+    fn parse_rejects_space() {
+        assert!(TagPath::parse("My Photos").is_err());
+    }
+
+    #[test]
+    fn parse_accepts_underscore_and_digits() {
+        let t = TagPath::parse("/Photos_2024/Trip_01").unwrap();
+        assert_eq!(t.as_ltree(), "Photos_2024.Trip_01");
     }
 
     // ── TagPath::from_slash ───────────────────────────────────────────────────

@@ -68,6 +68,7 @@
     <pictures-tab :state="sharedState" @update="onStateUpdate" v-if="activeTab === 'pictures'"></pictures-tab>
     <tags-tab :state="sharedState" @update="onStateUpdate" v-if="activeTab === 'tags'"></tags-tab>
     <sharing-tab :state="sharedState" @update="onStateUpdate" v-if="activeTab === 'sharing'"></sharing-tab>
+    <tagging-services-tab :state="sharedState" @update="onStateUpdate" v-if="activeTab === 'tagging-services'"></tagging-services-tab>
     <settings-tab :state="sharedState" @update="onStateUpdate" v-if="activeTab === 'settings'"></settings-tab>
     <federation-tab :state="sharedState" @update="onStateUpdate" v-if="activeTab === 'federation'"></federation-tab>
     <admin-tab :state="sharedState" @update="onStateUpdate" v-if="activeTab === 'admin'"></admin-tab>
@@ -77,6 +78,7 @@
 <script src="tab-pictures.js"></script>
 <script src="tab-tags.js"></script>
 <script src="tab-sharing.js"></script>
+<script src="tab-tagging-services.js"></script>
 <script src="tab-settings.js"></script>
 <script src="tab-federation.js"></script>
 <script src="tab-admin.js"></script>
@@ -90,6 +92,7 @@
             'pictures-tab': PicturesTab,
             'tags-tab': TagsTab,
             'sharing-tab': SharingTab,
+            'tagging-services-tab': TaggingServicesTab,
             'settings-tab': SettingsTab,
             'federation-tab': FederationTab,
             'admin-tab': AdminTab,
@@ -109,6 +112,7 @@
                     {id: 'pictures', label: '🖼 Pictures'},
                     {id: 'tags', label: '🏷 Tags'},
                     {id: 'sharing', label: '📤 Sharing'},
+                    {id: 'tagging-services', label: '🔖 Tagging'},
                     {id: 'settings', label: '⚙️ Settings'},
                     {id: 'federation', label: '🌐 Federation'},
                     {id: 'admin', label: '🛠 Admin'},

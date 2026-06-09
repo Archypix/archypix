@@ -1,8 +1,20 @@
 use crate::api::middleware::auth_user::AuthUser;
+use crate::domain::tag::TagPath;
 use crate::infra::error::AppError;
 use crate::repository::tag::TagRepository;
 use crate::services;
 use crate::state::AppState;
+
+fn parse_tag_paths(paths: &[String]) -> Result<Vec<String>, AppError> {
+    paths
+        .iter()
+        .map(|p| {
+            TagPath::parse(p)
+                .map(|t| t.as_ltree().to_string())
+                .map_err(AppError::BadRequest)
+        })
+        .collect()
+}
 use axum::Json;
 use axum::extract::{Query, State};
 use serde::Deserialize;
@@ -52,12 +64,14 @@ pub async fn edit(
         picture_count = payload.picture_ids.len(),
         "edit_picture_tags"
     );
+    let add_tags = parse_tag_paths(&payload.add_tags)?;
+    let remove_tags = parse_tag_paths(&payload.remove_tags)?;
     services::tags::edit_picture_tags(
         &state.db,
         auth.user_id()?,
         &payload.picture_ids,
-        &payload.add_tags,
-        &payload.remove_tags,
+        &add_tags,
+        &remove_tags,
     )
     .await?;
     Ok(Json(serde_json::json!({ "ok": true })))
