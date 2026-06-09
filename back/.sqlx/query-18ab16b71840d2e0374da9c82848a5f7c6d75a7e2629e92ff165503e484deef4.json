@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO tags (picture_id, tag_path, source, source_id)\n               VALUES ($1, $2::text::ltree, 'incoming_share'::tag_source, $3)\n               ON CONFLICT (picture_id, tag_path) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "18ab16b71840d2e0374da9c82848a5f7c6d75a7e2629e92ff165503e484deef4"
+}

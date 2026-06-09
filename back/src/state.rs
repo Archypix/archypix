@@ -7,6 +7,7 @@ use crate::infra::s3::Storage;
 use crate::infra::tasks::TaskQueue;
 use sqlx::PgPool;
 use std::sync::Arc;
+use tokio::sync::Notify;
 
 /// Application state injected into every Axum handler via `State<AppState>`.
 #[derive(Clone)]
@@ -22,8 +23,11 @@ pub struct AppState {
     pub storage: Arc<dyn Storage>,
     pub federation: FederationClient,
     pub resolver: ResolverClient,
-    /// In-process background task queue (tag rename, tagging pipeline).
+    /// In-process background task queue (tag rename).
     pub task_queue: TaskQueue,
+    /// Wake signal for the tagging pipeline loop. Call `notify_one()` after any event
+    /// that creates dirty pictures (ingest, tag edit, service config change, share accept).
+    pub pipeline_notify: Arc<Notify>,
 }
 
 impl AppState {
@@ -37,6 +41,7 @@ impl AppState {
         federation: FederationClient,
         resolver: ResolverClient,
         task_queue: TaskQueue,
+        pipeline_notify: Arc<Notify>,
     ) -> Self {
         Self {
             config,
@@ -48,6 +53,7 @@ impl AppState {
             federation,
             resolver,
             task_queue,
+            pipeline_notify,
         }
     }
 }

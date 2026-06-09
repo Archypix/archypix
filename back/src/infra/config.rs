@@ -57,13 +57,17 @@ pub struct Config {
     /// Shared JWT secret between this backend and all worker instances.
     pub worker_jwt_secret: String,
     /// Maximum number of in-process background tasks running concurrently
-    /// (tag-rename, tagging-pipeline, etc.). Does not affect external workers.
+    /// (tag-rename, etc.). Does not affect external workers.
     pub task_queue_concurrency: usize,
     /// How long (seconds) a job may stay in `processing` state before the
     /// watchdog considers the worker dead and resets it to `pending`.
     pub job_processing_timeout_secs: i64,
     /// How often (seconds) the watchdog runs its stale-job scan.
     pub job_watchdog_interval_secs: u64,
+    /// How often (seconds) the tagging pipeline loop runs a recovery sweep,
+    /// catching pictures missed due to restarts. Event-driven wakes happen immediately.
+    /// Default: 3600 (1 hour).
+    pub pipeline_poll_interval_secs: u64,
 
     // ── S3 / Object storage ───────────────────────────────────────────────────
     pub s3_endpoint: String,
@@ -148,6 +152,7 @@ impl Config {
             task_queue_concurrency: env_usize("TASK_QUEUE_CONCURRENCY", 4)?,
             job_processing_timeout_secs: env_i64("JOB_PROCESSING_TIMEOUT_SECS", 600)?,
             job_watchdog_interval_secs: env_u64("JOB_WATCHDOG_INTERVAL_SECS", 60)?,
+            pipeline_poll_interval_secs: env_u64("PIPELINE_POLL_INTERVAL_SECS", 3600)?,
 
             s3_public_endpoint: env("S3_PUBLIC_ENDPOINT", s3_endpoint.clone()),
             s3_workers_endpoint: env("S3_WORKERS_ENDPOINT", s3_endpoint.clone()),
@@ -279,6 +284,7 @@ impl Config {
             task_queue_concurrency: 1,
             job_processing_timeout_secs: 600,
             job_watchdog_interval_secs: 60,
+            pipeline_poll_interval_secs: 3600,
             s3_endpoint: "http://localhost:9000".to_string(),
             s3_public_endpoint: "http://localhost:9000".to_string(),
             s3_workers_endpoint: "http://localhost:9000".to_string(),

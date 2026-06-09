@@ -1,6 +1,7 @@
 use crate::api::middleware::auth_user::AuthUser;
 use crate::domain::tag::TagPath;
 use crate::infra::error::AppError;
+use crate::repository::pipeline::PipelineRepository;
 use crate::repository::tag::TagRepository;
 use crate::services;
 use crate::state::AppState;
@@ -74,5 +75,11 @@ pub async fn edit(
         &remove_tags,
     )
     .await?;
+    // Manual tag changes invalidate these pictures so the pipeline re-evaluates
+    // requires/excludes conditions that may now be satisfied or violated.
+    if let Err(e) = PipelineRepository::invalidate(&state.db, &payload.picture_ids).await {
+        tracing::error!(error = ?e, "failed to invalidate pipeline for edited pictures");
+    }
+    state.pipeline_notify.notify_one();
     Ok(Json(serde_json::json!({ "ok": true })))
 }

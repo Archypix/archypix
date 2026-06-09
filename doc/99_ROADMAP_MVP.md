@@ -18,14 +18,17 @@
 ## To-do for the PoC
 
 - [x] **Tagging pipeline CRUD** — API to define tagging services (rules and segmentation).
-- [ ] **Tagging pipeline execution** — wire `services/tagging.rs` to run the domain pipeline evaluator on ingest/edit/share events; connect the
+- [x] **Tagging pipeline execution** — wire `services/tagging.rs` to run the domain pipeline evaluator on ingest/edit/share events; connect the
   in-process `TaskQueue::RunTaggingPipeline` variant.
+- [ ] **Tagging pipeline tags removal** — if the service enabled this feature (new service boolean column), the service would be able to remove a tag
+  from a picture if this tag has the same `source` as the service's rule and that no other service has assigned to it that tag
+- [ ] **Better sharing support** — create a tagging rule to associate tags with an incoming share, share back support, announce/unannounce on shared
+  tag add/remove or on picture edit/remove. Test transitive
+  sharing.
 - [ ] **Exif edition** — exif update api endpoint, triggering a worker job editing the s3 picture metadata.
 - [ ] **Admin endpoints** — user list/suspend/delete, job status, instance metrics.
 - [ ] **Full frontend** — v1 of a user-friendly frontend, with super simple code for a PoC, but with a realistic user experience that could give an
   idea of what the MVP could look like.
-- [ ] **Better sharing support** — share back support, announce/unannounce on shared tag add/remove or on picture edit/remove. Test transitive
-  sharing.
 - [ ] **Hierarchies** — CRUD operations for managing hierarchies.
 - [ ] **WebDAV** — virtual directory tree over tags; full-res/thumbnail reads via presigned redirect or back proxy; staging-pattern writes; versioning
   on overwrite. Use `pictures.file_hash` as the WebDAV ETag.

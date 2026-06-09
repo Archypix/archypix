@@ -14,6 +14,8 @@ use crate::infra::tasks;
 use crate::state::AppState;
 use reqwest::Client as HttpClient;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Notify;
 use tracing::info;
 
 #[tokio::main]
@@ -49,14 +51,14 @@ async fn main() -> anyhow::Result<()> {
         http.clone(),
         config.clone(),
         jwt.clone(),
-        std::sync::Arc::new(redis.clone()),
+        Arc::new(redis.clone()),
     );
     let resolver = ResolverClient::new(http, config.clone(), resolver_jwt);
 
     // Register with the resolver so it can route user registrations to this backend.
     resolver.self_register().await?;
 
-    // Start the in-process background task queue.
+    // Start the in-process background task queue (tag rename).
     let (task_queue, task_runner) = tasks::create(db.clone(), config.task_queue_concurrency);
     tokio::spawn(task_runner);
 
@@ -65,6 +67,14 @@ async fn main() -> anyhow::Result<()> {
         db.clone(),
         config.job_processing_timeout_secs,
         config.job_watchdog_interval_secs,
+    ));
+
+    // Start the tagging pipeline loop.
+    let pipeline_notify = Arc::new(Notify::new());
+    tokio::spawn(infra::pipeline::create(
+        db.clone(),
+        pipeline_notify.clone(),
+        Duration::from_secs(config.pipeline_poll_interval_secs),
     ));
 
     let state = AppState::new(
@@ -77,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
         federation,
         resolver,
         task_queue,
+        pipeline_notify,
     );
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;

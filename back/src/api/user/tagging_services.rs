@@ -1,4 +1,5 @@
 use crate::api::middleware::auth_user::AuthUser;
+use crate::domain::pipeline::Predicate;
 use crate::domain::tag::TagPath;
 use crate::domain::tagging::{
     RuleTaggingRule, SegmentationRule, ServiceType, SharedTagMappingRule, TaggingService,
@@ -268,6 +269,8 @@ pub async fn create_service(
         &excludes,
     )
     .await?;
+    // New service: last_invalidated_at = NOW() by default, so all existing pictures are dirty.
+    state.pipeline_notify.notify_one();
     Ok(Json(service_to_response(service)))
 }
 
@@ -355,6 +358,8 @@ pub async fn update_service(
     )
     .await?
     .ok_or(AppError::NotFound)?;
+    TaggingServiceRepository::touch_invalidated(&state.db, service_id).await?;
+    state.pipeline_notify.notify_one();
     Ok(Json(service_to_response(service)))
 }
 
@@ -406,6 +411,8 @@ pub async fn add_mapping(
         &assign_tag,
     )
     .await?;
+    TaggingServiceRepository::touch_invalidated(&state.db, service_id).await?;
+    state.pipeline_notify.notify_one();
     Ok(Json(mapping_to_response(rule)))
 }
 
@@ -422,6 +429,8 @@ pub async fn delete_mapping(
     if !deleted {
         return Err(AppError::NotFound);
     }
+    TaggingServiceRepository::touch_invalidated(&state.db, service_id).await?;
+    state.pipeline_notify.notify_one();
     Ok(Json(serde_json::json!({ "deleted": true })))
 }
 
@@ -449,9 +458,13 @@ pub async fn add_rule(
         return Err(AppError::BadRequest("service is not a rule type".into()));
     }
     let assign_tag = parse_tag(&payload.assign_tag)?;
+    // Validate predicate syntax before persisting.
+    Predicate::parse(&payload.predicate).map_err(AppError::BadRequest)?;
     let rule =
         RuleTaggingRuleRepository::create(&state.db, service_id, &payload.predicate, &assign_tag)
             .await?;
+    TaggingServiceRepository::touch_invalidated(&state.db, service_id).await?;
+    state.pipeline_notify.notify_one();
     Ok(Json(rule_to_response(rule)))
 }
 
@@ -468,6 +481,8 @@ pub async fn delete_rule(
     if !deleted {
         return Err(AppError::NotFound);
     }
+    TaggingServiceRepository::touch_invalidated(&state.db, service_id).await?;
+    state.pipeline_notify.notify_one();
     Ok(Json(serde_json::json!({ "deleted": true })))
 }
 
@@ -515,6 +530,8 @@ pub async fn add_segment(
         payload.parent_segment_id,
     )
     .await?;
+    TaggingServiceRepository::touch_invalidated(&state.db, service_id).await?;
+    state.pipeline_notify.notify_one();
     Ok(Json(segment_to_response(segment)))
 }
 
@@ -531,5 +548,7 @@ pub async fn delete_segment(
     if !deleted {
         return Err(AppError::NotFound);
     }
+    TaggingServiceRepository::touch_invalidated(&state.db, service_id).await?;
+    state.pipeline_notify.notify_one();
     Ok(Json(serde_json::json!({ "deleted": true })))
 }

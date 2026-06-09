@@ -2,6 +2,7 @@ pub mod auth;
 pub mod job;
 pub mod picture;
 pub mod picture_version;
+pub mod pipeline;
 pub mod share;
 pub mod tag;
 pub mod tagging;

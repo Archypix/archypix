@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM tagging_services WHERE id = $1 AND owner_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "50d34d4de627e9ba1163dd1db8a714f575856d2656feba194afb6fee80a2616a"
+}

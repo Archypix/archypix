@@ -102,7 +102,8 @@ impl PictureRepository {
     where
         E: Executor<'e, Database = Postgres>,
     {
-        sqlx::query_as(
+        sqlx::query_as!(
+            Picture,
             r#"INSERT INTO pictures
                    (local_user_id, remote_picture_id, owner_username, owner_instance_domain,
                     filename, mime_type, file_size, width, height, exif_data, metadata, captured_at)
@@ -118,21 +119,21 @@ impl PictureRepository {
                    captured_at = COALESCE(EXCLUDED.captured_at, pictures.captured_at)
                RETURNING id, local_user_id, remote_picture_id, owner_username, owner_instance_domain,
                          filename, mime_type, file_size, width, height,
-                         exif_data, metadata,
+                         exif_data as "exif_data: _", metadata as "metadata: _",
                          deleted_at, captured_at, ingested_at, updated_at,
                          blurhash, gps_lat, gps_lng, gps_alt, orientation, thumbnails_generated_at,
                          file_hash"#,
+            recipient_id,
+            remote_picture_id,
+            owner_username,
+            owner_instance_domain,
+            filename,
+            mime_type,
+            file_size,
+            width,
+            height,
+            captured_at,
         )
-            .bind(recipient_id)
-            .bind(remote_picture_id)
-            .bind(owner_username)
-            .bind(owner_instance_domain)
-            .bind(filename)
-            .bind(mime_type)
-            .bind(file_size)
-            .bind(width)
-            .bind(height)
-            .bind(captured_at)
             .fetch_one(ex)
             .await
             .map_err(map_sqlx_error)
@@ -161,7 +162,7 @@ impl PictureRepository {
     where
         E: Executor<'e, Database = Postgres>,
     {
-        let result = sqlx::query(
+        let result = sqlx::query!(
             r#"DELETE FROM pictures
                WHERE local_user_id = $1
                  AND owner_username = $2
@@ -172,10 +173,10 @@ impl PictureRepository {
                      WHERE tags.picture_id = pictures.id
                        AND tags.source = 'incoming_share'::tag_source
                  )"#,
+            recipient_id,
+            sender_username,
+            sender_instance,
         )
-        .bind(recipient_id)
-        .bind(sender_username)
-        .bind(sender_instance)
         .execute(ex)
         .await
         .map_err(map_sqlx_error)?;
@@ -193,10 +194,11 @@ impl PictureRepository {
     where
         E: Executor<'e, Database = Postgres>,
     {
-        sqlx::query_as(
+        sqlx::query_as!(
+            Picture,
             r#"SELECT DISTINCT p.id, p.local_user_id, p.remote_picture_id, p.owner_username,
                       p.owner_instance_domain, p.filename, p.mime_type, p.file_size,
-                      p.width, p.height, p.exif_data, p.metadata,
+                      p.width, p.height, p.exif_data as "exif_data: _", p.metadata as "metadata: _",
                       p.deleted_at, p.captured_at, p.ingested_at, p.updated_at,
                       p.blurhash, p.gps_lat, p.gps_lng, p.gps_alt, p.orientation,
                       p.thumbnails_generated_at, p.file_hash
@@ -205,10 +207,10 @@ impl PictureRepository {
                WHERE p.local_user_id = $1
                  AND p.remote_picture_id IS NULL
                  AND p.deleted_at IS NULL
-                 AND t.tag_path <@ $2::ltree"#,
+                 AND t.tag_path <@ $2::text::ltree"#,
+            owner_id,
+            tag_path_ltree,
         )
-        .bind(owner_id)
-        .bind(tag_path_ltree)
         .fetch_all(ex)
         .await
         .map_err(map_sqlx_error)

@@ -59,6 +59,8 @@ pub async fn complete_upload(
         meta,
     )
     .await?;
+    // New picture: last_pipeline_run_at = NULL by default → wake the pipeline loop.
+    state.pipeline_notify.notify_one();
     Ok(Json(serde_json::json!({ "id": picture.id })))
 }
 

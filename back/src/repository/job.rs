@@ -45,12 +45,12 @@ impl JobRepository {
             .map_err(map_sqlx_error)?
         } else {
             let type_strs: Vec<String> = job_types.iter().map(|t| t.to_string()).collect();
-            sqlx::query_scalar(
+            sqlx::query_scalar!(
                 "SELECT id FROM jobs WHERE status = 'pending' \
                  AND job_type::text = ANY($1) \
                  ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED",
+                &type_strs as &[String],
             )
-            .bind(&type_strs)
             .fetch_optional(&mut *tx)
             .await
             .map_err(map_sqlx_error)?

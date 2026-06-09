@@ -1,5 +1,3 @@
-pub mod pipeline;
-
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -33,6 +31,12 @@ pub struct TaggingService {
     /// Tags where ANY present will suppress this service (ltree[] as text[]).
     pub excludes: Vec<String>,
     pub enabled: bool,
+    /// Bumped on every configuration change. Pictures with `last_pipeline_run_at` older
+    /// than this value are considered dirty and will be re-evaluated.
+    pub last_invalidated_at: NaiveDateTime,
+    /// Set when the pipeline fails to evaluate this service; cleared on next success.
+    pub last_error_at: Option<NaiveDateTime>,
+    pub last_error_msg: Option<String>,
     pub created_at: NaiveDateTime,
     pub updated_at: NaiveDateTime,
 }

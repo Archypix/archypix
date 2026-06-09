@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE tagging_services\n                   SET last_error_at  = now() AT TIME ZONE 'utc',\n                       last_error_msg = $2\n                   WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3ea6da48f4e2487a4083d6216c23b33534e068ed1b82afd6fa907874d2b0a3a1"
+}

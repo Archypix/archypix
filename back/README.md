@@ -77,9 +77,10 @@ cargo sqlx prepare
 Tests require a live PostgreSQL database (SQLx spins up an isolated schema per test via `#[sqlx::test]`). Set `DATABASE_URL` before running:
 
 ```bash
-DATABASE_URL="postgres://archypix:archypix@localhost/archypix_back1" cargo test -p archypix-back
+DATABASE_URL="postgres://archypix:archypix@localhost/archypix_back"
+(cd back && cargo sqlx migrate run)
 
-cargo test -p archypix-back --lib          # no-DB unit tests only
+cargo test -p archypix-back --lib          # unit tests only
 cargo test --test federation               # full federation suite
 cargo test --test federation contract      # end-to-end two-server flows only
 ```

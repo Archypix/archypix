@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE pictures SET last_pipeline_run_at = $2 WHERE id = ANY($1::uuid[])",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Timestamp"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a4bed2e08d574610f0e7bfd734ff6fc6ebad225aad3a08ae797df6bc6334f997"
+}

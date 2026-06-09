@@ -1,0 +1,148 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, recipient_id, sender_username, sender_instance, outgoing_share_id,\n                      local_mapping_service_id,\n                      status as \"status: ShareStatus\",\n                      origin_share_token, created_at, revoked_at\n               FROM incoming_shares WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "incoming_shares",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "recipient_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "incoming_shares",
+            "name": "recipient_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "sender_username",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "incoming_shares",
+            "name": "sender_username"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "sender_instance",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "incoming_shares",
+            "name": "sender_instance"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "outgoing_share_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "incoming_shares",
+            "name": "outgoing_share_id"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "local_mapping_service_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "incoming_shares",
+            "name": "local_mapping_service_id"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "status: ShareStatus",
+        "type_info": {
+          "Custom": {
+            "name": "share_status",
+            "kind": {
+              "Enum": [
+                "pending",
+                "active",
+                "revoked",
+                "tombstoned"
+              ]
+            }
+          }
+        },
+        "origin": {
+          "Table": {
+            "table": "incoming_shares",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "origin_share_token",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "incoming_shares",
+            "name": "origin_share_token"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "created_at",
+        "type_info": "Timestamp",
+        "origin": {
+          "Table": {
+            "table": "incoming_shares",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "revoked_at",
+        "type_info": "Timestamp",
+        "origin": {
+          "Table": {
+            "table": "incoming_shares",
+            "name": "revoked_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "799c7e3b90aaae77b4f97c946b48a6c26344377aeca8d397f49e73c165b39860"
+}

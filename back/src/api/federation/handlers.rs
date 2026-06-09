@@ -216,6 +216,10 @@ pub async fn announce_pictures(
         registered,
         "federation: pictures registered"
     );
+    // Newly received pictures start with last_pipeline_run_at = NULL → wake the pipeline.
+    if registered > 0 {
+        state.pipeline_notify.notify_one();
+    }
     Ok(Json(serde_json::json!({ "registered": registered })))
 }
 

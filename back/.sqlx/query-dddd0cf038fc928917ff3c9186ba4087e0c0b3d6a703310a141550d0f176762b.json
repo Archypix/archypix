@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM pictures\n               WHERE local_user_id = $1\n                 AND owner_username = $2\n                 AND owner_instance_domain = $3\n                 AND remote_picture_id IS NOT NULL\n                 AND NOT EXISTS (\n                     SELECT 1 FROM tags\n                     WHERE tags.picture_id = pictures.id\n                       AND tags.source = 'incoming_share'::tag_source\n                 )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dddd0cf038fc928917ff3c9186ba4087e0c0b3d6a703310a141550d0f176762b"
+}

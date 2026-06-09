@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id FROM jobs WHERE status = 'pending' AND job_type::text = ANY($1) ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b59400f350c0135783e5fecb1fac717ad4afded51bf5bc7606361e68570b6a90"
+}

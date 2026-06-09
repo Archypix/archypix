@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE tagging_services\n                   SET last_error_at  = NULL,\n                       last_error_msg = NULL\n                   WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f07fd3ca2e206144cee9885ff55c7ba32ba0057ce0ac3f60e3d796d1624eb94f"
+}

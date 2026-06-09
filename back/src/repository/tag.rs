@@ -50,6 +50,28 @@ impl TagRepository {
         .map_err(map_sqlx_error)
     }
 
+    /// Load tags for a batch of pictures. Used by the pipeline loop to load current tags
+    /// for all dirty pictures in one query rather than N per-picture queries.
+    pub async fn list_for_pictures<'e, E>(ex: E, picture_ids: &[Uuid]) -> Result<Vec<Tag>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        if picture_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        sqlx::query_as!(
+            Tag,
+            r#"SELECT id, picture_id, tag_path::text as "tag_path!",
+                      source as "source!: TagSource", source_id, assigned_at
+               FROM tags
+               WHERE picture_id = ANY($1::uuid[])"#,
+            picture_ids as &[Uuid],
+        )
+        .fetch_all(ex)
+        .await
+        .map_err(map_sqlx_error)
+    }
+
     /// Add tags to all pictures in the batch. All pictures must belong to `local_user_id`.
     ///
     /// Runs as a single data-modifying CTE:
@@ -75,7 +97,7 @@ impl TagRepository {
         // Data-modifying CTE: cleanup (remove proper ancestors) + insert (only deepest).
         // `tag_path @> t AND tag_path <> t` = strict ancestor of t → remove it (redundant).
         // NOT EXISTS (deeper descendant) = this tag is the deepest in the input list.
-        sqlx::query(
+        sqlx::query!(
             r#"WITH cleanup AS (
                  DELETE FROM tags
                  WHERE picture_id = ANY($1::uuid[])
@@ -100,10 +122,10 @@ impl TagRepository {
                  )
                ) AS filtered
                ON CONFLICT (picture_id, tag_path) DO NOTHING"#,
+            picture_ids as &[Uuid],
+            local_user_id,
+            tags as &[String],
         )
-        .bind(picture_ids)
-        .bind(local_user_id)
-        .bind(tags)
         .execute(ex)
         .await
         .map_err(map_sqlx_error)?;
@@ -127,7 +149,7 @@ impl TagRepository {
         if tags.is_empty() || picture_ids.is_empty() {
             return Ok(());
         }
-        sqlx::query(
+        sqlx::query!(
             r#"DELETE FROM tags
                WHERE picture_id = ANY($1::uuid[])
                  AND tag_path <@ ANY($2::ltree[])
@@ -135,10 +157,10 @@ impl TagRepository {
                  AND picture_id IN (
                    SELECT id FROM pictures WHERE local_user_id = $3 AND deleted_at IS NULL
                  )"#,
+            picture_ids as &[Uuid],
+            tags as &[String],
+            local_user_id,
         )
-        .bind(picture_ids)
-        .bind(tags)
-        .bind(local_user_id)
         .execute(ex)
         .await
         .map_err(map_sqlx_error)?;
@@ -158,14 +180,14 @@ impl TagRepository {
     where
         E: Executor<'e, Database = Postgres>,
     {
-        sqlx::query(
+        sqlx::query!(
             r#"INSERT INTO tags (picture_id, tag_path, source, source_id)
-               VALUES ($1, $2::ltree, 'incoming_share'::tag_source, $3)
+               VALUES ($1, $2::text::ltree, 'incoming_share'::tag_source, $3)
                ON CONFLICT (picture_id, tag_path) DO NOTHING"#,
+            picture_id,
+            tag_path_ltree,
+            incoming_share_id,
         )
-        .bind(picture_id)
-        .bind(tag_path_ltree)
-        .bind(incoming_share_id)
         .execute(ex)
         .await
         .map_err(map_sqlx_error)?;
@@ -181,10 +203,10 @@ impl TagRepository {
     where
         E: Executor<'e, Database = Postgres>,
     {
-        sqlx::query(
+        sqlx::query!(
             r#"DELETE FROM tags WHERE source = 'incoming_share'::tag_source AND source_id = $1"#,
+            incoming_share_id,
         )
-        .bind(incoming_share_id)
         .execute(ex)
         .await
         .map_err(map_sqlx_error)?;

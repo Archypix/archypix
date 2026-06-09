@@ -127,7 +127,11 @@ CREATE TABLE pictures
     thumbnails_generated_at TIMESTAMP,
     -- SHA-256 hex digest of the stored file; computed by workers.
     -- Serves as the WebDAV ETag (future WebDAV implementation).
-    file_hash               TEXT
+    file_hash            TEXT,
+
+    -- Tagging pipeline: NULL means the picture has never been processed (dirty by default).
+    -- Set to NOW() after a successful pipeline run; reset to NULL on manual tag changes.
+    last_pipeline_run_at TIMESTAMP
 );
 
 CREATE INDEX idx_pictures_local_user ON pictures (local_user_id);
@@ -262,15 +266,17 @@ CREATE TABLE tagging_services
     -- Status
     enabled      BOOLEAN      NOT NULL DEFAULT TRUE,
 
+    -- Pipeline tracking: bumped on any configuration change; pictures with
+    -- last_pipeline_run_at < last_invalidated_at are considered dirty.
+    last_invalidated_at TIMESTAMP NOT NULL DEFAULT (now() at time zone 'utc'),
+    -- Last pipeline error for this service (cleared on next successful run).
+    last_error_at       TIMESTAMP,
+    last_error_msg      TEXT,
+
     -- Timestamps
     created_at   TIMESTAMP    NOT NULL DEFAULT (now() at time zone 'utc'),
     updated_at   TIMESTAMP    NOT NULL DEFAULT (now() at time zone 'utc')
 );
-
--- Pipeline order and trigger labels are hardcoded based on service_type:
--- shared_tag_mapping: order=1, triggers=[incoming_share]
--- rule: order=2, triggers=[incoming_share, ingest, metadata, manual_tag, rule_edit]
--- segmentation: order=3, triggers=[incoming_share, ingest, metadata, manual_tag, rule_edit, segmentation_edit]
 
 CREATE INDEX idx_tagging_services_owner ON tagging_services (owner_id);
 CREATE INDEX idx_tagging_services_type ON tagging_services (service_type);
@@ -448,6 +454,8 @@ CREATE INDEX idx_jobs_pending_claim ON jobs (job_type, created_at) WHERE status 
 CREATE INDEX idx_jobs_picture ON jobs (picture_id) WHERE picture_id IS NOT NULL;
 -- Index for GPS bbox queries (used by rule-based tagging)
 CREATE INDEX idx_pictures_gps ON pictures (gps_lat, gps_lng) WHERE gps_lat IS NOT NULL;
+-- Index for efficient dirty-picture queries (pipeline loop)
+CREATE INDEX idx_pictures_pipeline ON pictures (local_user_id, last_pipeline_run_at);
 
 -- Config JSONB structure examples:
 -- gen_thumbnail: {"picture_ids": ["uuid1", "uuid2"], "sizes": ["thumb", "medium"]}
@@ -618,11 +626,6 @@ COMMENT ON TABLE federation_messages IS 'Federation message log; payload JSONB h
 
 COMMENT ON FUNCTION picture_has_tag IS 'Checks if a picture has a tag including virtual ancestors';
 COMMENT ON FUNCTION get_pictures_under_tag IS 'Returns all non-deleted pictures under a tag prefix';
-
--- Pipeline order and trigger labels (hardcoded, not stored):
--- shared_tag_mapping: order=1, triggers=[incoming_share]
--- rule: order=2, triggers=[incoming_share, ingest, metadata, manual_tag, rule_edit]
--- segmentation: order=3, triggers=[incoming_share, ingest, metadata, manual_tag, rule_edit, segmentation_edit]
 
 -- ============================================================================
 -- VERSIONING MODE

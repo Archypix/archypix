@@ -131,6 +131,7 @@ pub async fn accept_incoming(
         share_id,
     )
     .await?;
+    // For federation shares, pictures arrive later via announce_pictures → pipeline woken there.
     Ok(Json(
         serde_json::json!({ "accepted": true, "pictures_registered": registered }),
     ))

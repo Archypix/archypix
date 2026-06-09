@@ -40,11 +40,12 @@ domain/
   share.rs          # OutgoingShare, IncomingShare
   federation.rs     # FederationMessage, BackendMapping
   job.rs            # Job (includes claim_token), re-exports from archypix-common
-  tagging.rs / tagging/pipeline.rs   # pipeline config types + pure evaluator
+  tagging.rs / pipeline.rs   # pipeline config types + pure evaluator
 
 repository/
   user.rs / picture.rs / picture_version.rs / user_settings.rs
-  tag.rs / share.rs / auth.rs / job.rs
+  tag.rs / share.rs / auth.rs / job.rs / tagging.rs
+  pipeline.rs     # dirty-picture queries, pipeline tag assignment
 
 clients/
   federation/
@@ -67,8 +68,9 @@ api/
 
 infra/
   config.rs / error.rs / redis.rs / crypto.rs / db.rs / s3.rs
-  tasks.rs       # in-process Tokio task queue (tag rename, tagging pipeline)
-  job_watchdog.rs  # periodic reset of stale processing jobs
+  tasks.rs        # in-process Tokio task queue (tag rename)
+  pipeline.rs     # tagging pipeline background loop
+  job_watchdog.rs # periodic reset of stale processing jobs
 ```
 
 ## D) AppState
@@ -79,13 +81,47 @@ pub struct AppState {
     pub db: PgPool,
     pub redis: RedisClient,
     pub jwt: JwtService,
-   pub worker_jwt: JwtService,   // verifies inbound worker tokens
+    pub worker_jwt: JwtService,      // verifies inbound worker tokens
     pub storage: StorageClient,
     pub federation: FederationClient,
     pub resolver: ResolverClient,
-   pub task_queue: TaskQueue,    // in-process lightweight task queue
+    pub task_queue: TaskQueue,       // in-process task queue (tag rename)
+    pub pipeline_notify: Arc<Notify>, // wakes the tagging pipeline loop
 }
 ```
+
+## E) Tagging pipeline
+
+The pipeline runs as a background Tokio task (`infra/pipeline.rs`). It evaluates all enabled tagging services against dirty pictures and applies the
+resulting tag assignments.
+
+**Dirty picture detection** — two schema columns drive this:
+
+- `pictures.last_pipeline_run_at` — `NULL` on new/invalidated pictures, set to `NOW()` after a successful run.
+- `tagging_services.last_invalidated_at` — bumped on any configuration change (rule/segment/mapping add or remove, enable/disable).
+
+A picture is dirty when `last_pipeline_run_at IS NULL OR last_pipeline_run_at < last_invalidated_at` for any of its user's enabled services.
+
+**Wake model** — the loop uses a `tokio::sync::Notify` for immediate event-driven wakes, with a configurable polling interval as a recovery fallback (
+`PIPELINE_POLL_INTERVAL_SECS`, default 1 hour). Callsites call `pipeline_notify.notify_one()` after:
+
+- Ingest (new picture → `last_pipeline_run_at = NULL` by default)
+- Manual tag edit (pictures explicitly re-invalidated)
+- Service config change (service's `last_invalidated_at` bumped)
+- Inbound share announcement (new received pictures → `NULL` by default)
+
+**Evaluation order** — `SharedTagMapping → Rule → Segmentation`. Each service sees tags added by earlier ones (in-memory accumulation per picture), so
+downstream services can use upstream results via `requires`.
+
+**Rule predicates** — the `rule` service type supports a simple predicate DSL stored in `rule_tagging_services.predicate`. Supported forms:
+`gps_within_bbox(lat_min, lat_max, lon_min, lon_max)`, `capture_year(YYYY)`, `capture_month(M)`, `filename_contains("string")`. Predicates are
+validated at rule creation time.
+
+**Tag assignment** — pipeline-assigned tags use `source = rule | segment | share_mapping` (not `manual`), so user tag-remove operations never touch
+them. Assignment is idempotent (`ON CONFLICT DO NOTHING`).
+
+**Tag removal** (TODO) — if the service enabled this feature, the service would be able to remove a tag from a picture if this tag has the same
+`source` as the service's rule and that no other service has assigned to it that tag (TODO).
 
 # Backend REST API
 

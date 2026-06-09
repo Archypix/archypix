@@ -4,7 +4,9 @@
 //! worker processes via the `/api/worker/*` endpoints. This queue handles
 //! tasks that need direct database access and are not worth externalising:
 //! - Tag-rename cascades (updates every affected row in the `tags` table)
-//! - Tagging-pipeline evaluation (runs the pipeline evaluator on picture events)
+//!
+//! The tagging pipeline runs as a separate loop (`infra::pipeline`) with a
+//! `Notify`-based wake model and configurable recovery polling interval.
 //!
 //! # Design
 //! An unbounded `mpsc` channel decouples enqueue from execution.
@@ -26,13 +28,6 @@ pub enum InternalTask {
         user_id: Uuid,
         old_tag: String,
         new_tag: String,
-    },
-    /// Re-run the tagging pipeline for the given pictures in response to an event.
-    RunTaggingPipeline {
-        user_id: Uuid,
-        /// Pipeline event labels that triggered the run (e.g. `["ingest"]`).
-        event_labels: Vec<String>,
-        picture_ids: Vec<Uuid>,
     },
 }
 
@@ -128,19 +123,6 @@ async fn execute_task(db: PgPool, task: InternalTask) {
                     "tag rename task failed"
                 );
             }
-        }
-        InternalTask::RunTaggingPipeline {
-            user_id,
-            ref event_labels,
-            ref picture_ids,
-        } => {
-            tracing::debug!(
-                user_id = %user_id,
-                labels = ?event_labels,
-                pictures = picture_ids.len(),
-                "in-process task: tagging pipeline (not yet implemented)"
-            );
-            // TODO: wire the domain pipeline evaluator here (roadmap item).
         }
     }
 }
