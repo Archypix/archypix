@@ -121,7 +121,7 @@ impl TagRepository {
                    WHERE deeper <> t AND deeper::ltree <@ t::ltree
                  )
                ) AS filtered
-               ON CONFLICT (picture_id, tag_path) DO NOTHING"#,
+               ON CONFLICT (picture_id, tag_path) WHERE source = 'manual' DO NOTHING"#,
             picture_ids as &[Uuid],
             local_user_id,
             tags as &[String],
@@ -183,7 +183,7 @@ impl TagRepository {
         sqlx::query!(
             r#"INSERT INTO tags (picture_id, tag_path, source, source_id)
                VALUES ($1, $2::text::ltree, 'incoming_share'::tag_source, $3)
-               ON CONFLICT (picture_id, tag_path) DO NOTHING"#,
+               ON CONFLICT (picture_id, tag_path, source, source_id) WHERE source <> 'manual' DO NOTHING"#,
             picture_id,
             tag_path_ltree,
             incoming_share_id,
@@ -210,6 +210,93 @@ impl TagRepository {
         .execute(ex)
         .await
         .map_err(map_sqlx_error)?;
+        Ok(())
+    }
+
+    /// Remove every pipeline tag (`rule`/`segment`/`share_mapping`) produced by a service.
+    /// Called when a service is disabled — its tags are no longer live.
+    pub async fn remove_service_tags<'e, E>(ex: E, service_id: Uuid) -> Result<(), AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query!(
+            r#"DELETE FROM tags
+               WHERE source_id = $1
+                 AND source IN ('rule'::tag_source, 'segment'::tag_source, 'share_mapping'::tag_source)"#,
+            service_id,
+        )
+            .execute(ex)
+            .await
+            .map_err(map_sqlx_error)?;
+        Ok(())
+    }
+
+    /// Promote a service's pipeline tags to `manual`, preserving the user's curation when
+    /// the service is deleted. The result keeps manual tags in minimal (deepest-only) form,
+    /// mirroring [`batch_assign`](Self::batch_assign):
+    ///
+    /// - A pipeline tag whose **exact** path is already a manual tag is dropped (the manual
+    ///   row wins).
+    /// - An existing manual tag that is a strict **ancestor** of a tag being promoted is
+    ///   pruned (the deeper promoted tag makes it redundant).
+    /// - The remaining pipeline rows are converted in place.
+    ///
+    /// Done as one statement: the data-modifying CTEs delete the colliding rows and the
+    /// redundant ancestors, and the outer UPDATE converts the disjoint remainder — no row is
+    /// touched twice and the manual uniqueness index is never violated.
+    pub async fn promote_service_tags_to_manual<'e, E>(
+        ex: E,
+        service_id: Uuid,
+    ) -> Result<(), AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query!(
+            r#"WITH to_promote AS (
+                 SELECT t.id, t.picture_id, t.tag_path
+                 FROM tags t
+                 WHERE t.source_id = $1
+                   AND t.source IN ('rule'::tag_source, 'segment'::tag_source, 'share_mapping'::tag_source)
+               ),
+               -- Pipeline row whose exact path is already held manually → manual wins, drop it.
+               drop_collide AS (
+                 DELETE FROM tags t
+                 USING to_promote tp
+                 WHERE t.id = tp.id
+                   AND EXISTS (
+                     SELECT 1 FROM tags m
+                     WHERE m.picture_id = tp.picture_id
+                       AND m.tag_path = tp.tag_path
+                       AND m.source = 'manual'::tag_source
+                   )
+                 RETURNING t.id
+               ),
+               -- Existing manual ancestor made redundant by a deeper tag we are about to promote.
+               prune_ancestors AS (
+                 DELETE FROM tags m
+                 USING to_promote tp
+                 WHERE m.source = 'manual'::tag_source
+                   AND m.picture_id = tp.picture_id
+                   AND m.tag_path @> tp.tag_path
+                   AND m.tag_path <> tp.tag_path
+                   AND tp.id NOT IN (SELECT id FROM drop_collide)
+                 RETURNING m.id
+               )
+               UPDATE tags t
+               SET source = 'manual'::tag_source, source_id = NULL
+               WHERE t.source_id = $1
+                 AND t.source IN ('rule'::tag_source, 'segment'::tag_source, 'share_mapping'::tag_source)
+                 AND NOT EXISTS (
+                   SELECT 1 FROM tags m
+                   WHERE m.picture_id = t.picture_id
+                     AND m.tag_path = t.tag_path
+                     AND m.source = 'manual'::tag_source
+                 )"#,
+            service_id,
+        )
+            .execute(ex)
+            .await
+            .map_err(map_sqlx_error)?;
         Ok(())
     }
 }
@@ -248,6 +335,21 @@ mod tests {
         .await
         .unwrap();
         id
+    }
+
+    /// Insert a pipeline tag directly (bypassing the pipeline) for tests setup.
+    async fn seed_pipeline_tag(db: &PgPool, pic: Uuid, path: &str, source: &str, source_id: Uuid) {
+        sqlx::query(
+            "INSERT INTO tags (picture_id, tag_path, source, source_id) \
+             VALUES ($1, $2::text::ltree, $3::text::tag_source, $4)",
+        )
+        .bind(pic)
+        .bind(path)
+        .bind(source)
+        .bind(source_id)
+        .execute(db)
+        .await
+        .unwrap();
     }
 
     // ── batch_assign ──────────────────────────────────────────────────────────
@@ -420,5 +522,145 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(tags.len(), 1);
+    }
+
+    // ── per-source storage / lifecycle ────────────────────────────────────────
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn manual_and_pipeline_tags_coexist_for_same_path(db: PgPool) {
+        let user = seed_user(&db).await;
+        let pic = seed_picture(&db, user).await;
+        let svc = Uuid::new_v4();
+
+        TagRepository::batch_assign(&db, user, &[pic], &["Photos.Travel".to_string()])
+            .await
+            .unwrap();
+        seed_pipeline_tag(&db, pic, "Photos.Travel", "rule", svc).await;
+
+        // Same path, two sources → two rows (different partial unique indexes).
+        let stored = TagRepository::list_for_picture(&db, user, pic)
+            .await
+            .unwrap();
+        assert_eq!(
+            stored
+                .iter()
+                .filter(|t| t.tag_path == "Photos.Travel")
+                .count(),
+            2,
+        );
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn remove_service_tags_drops_only_that_service(db: PgPool) {
+        let user = seed_user(&db).await;
+        let pic = seed_picture(&db, user).await;
+        let svc_a = Uuid::new_v4();
+        let svc_b = Uuid::new_v4();
+
+        seed_pipeline_tag(&db, pic, "A.Tag", "rule", svc_a).await;
+        seed_pipeline_tag(&db, pic, "B.Tag", "segment", svc_b).await;
+        TagRepository::batch_assign(&db, user, &[pic], &["Manual.Tag".to_string()])
+            .await
+            .unwrap();
+
+        TagRepository::remove_service_tags(&db, svc_a)
+            .await
+            .unwrap();
+
+        let stored = TagRepository::list_for_picture(&db, user, pic)
+            .await
+            .unwrap();
+        assert!(
+            !stored.iter().any(|t| t.tag_path == "A.Tag"),
+            "svc_a tag gone"
+        );
+        assert!(
+            stored.iter().any(|t| t.tag_path == "B.Tag"),
+            "svc_b tag kept"
+        );
+        assert!(
+            stored.iter().any(|t| t.tag_path == "Manual.Tag"),
+            "manual tag untouched"
+        );
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn promote_service_tags_converts_to_manual(db: PgPool) {
+        let user = seed_user(&db).await;
+        let pic = seed_picture(&db, user).await;
+        let svc = Uuid::new_v4();
+
+        seed_pipeline_tag(&db, pic, "Photos.Alps", "segment", svc).await;
+        TagRepository::promote_service_tags_to_manual(&db, svc)
+            .await
+            .unwrap();
+
+        let stored = TagRepository::list_for_picture(&db, user, pic)
+            .await
+            .unwrap();
+        let tag = stored
+            .iter()
+            .find(|t| t.tag_path == "Photos.Alps")
+            .expect("tag still present");
+        assert_eq!(tag.source, TagSource::Manual);
+        assert!(tag.source_id.is_none());
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn promote_service_tags_drops_row_colliding_with_existing_manual(db: PgPool) {
+        let user = seed_user(&db).await;
+        let pic = seed_picture(&db, user).await;
+        let svc = Uuid::new_v4();
+
+        // A manual tag already holds the path the service also produced.
+        TagRepository::batch_assign(&db, user, &[pic], &["Photos.Alps".to_string()])
+            .await
+            .unwrap();
+        seed_pipeline_tag(&db, pic, "Photos.Alps.Test", "segment", svc).await;
+
+        TagRepository::promote_service_tags_to_manual(&db, svc)
+            .await
+            .unwrap();
+
+        // The manual row wins; the colliding pipeline row is dropped — exactly one row remains.
+        let stored = TagRepository::list_for_picture(&db, user, pic)
+            .await
+            .unwrap();
+        let matching: Vec<_> = stored
+            .iter()
+            .filter(|t| t.tag_path == "Photos.Alps.Test")
+            .collect();
+        assert_eq!(matching.len(), 1, "Matching len is not 1");
+        assert_eq!(
+            matching[0].source,
+            TagSource::Manual,
+            "Matching source is not Manual"
+        );
+        assert_eq!(stored.len(), 1, "More than 1 remaining tag");
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn promote_service_tags_drops_row_with_exact_manual_twin(db: PgPool) {
+        let user = seed_user(&db).await;
+        let pic = seed_picture(&db, user).await;
+        let svc = Uuid::new_v4();
+
+        // Manual tag holds the exact path the service also produced.
+        TagRepository::batch_assign(&db, user, &[pic], &["Photos.Alps".to_string()])
+            .await
+            .unwrap();
+        seed_pipeline_tag(&db, pic, "Photos.Alps", "segment", svc).await;
+
+        TagRepository::promote_service_tags_to_manual(&db, svc)
+            .await
+            .unwrap();
+
+        // Exact twin → the manual row wins, the pipeline row is dropped: one manual row remains.
+        let stored = TagRepository::list_for_picture(&db, user, pic)
+            .await
+            .unwrap();
+        assert_eq!(stored.len(), 1, "exactly one row remains");
+        assert_eq!(stored[0].tag_path, "Photos.Alps");
+        assert_eq!(stored[0].source, TagSource::Manual);
     }
 }

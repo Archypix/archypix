@@ -32,20 +32,22 @@ pub struct Tag {
 pub struct TagPath(String);
 
 impl TagPath {
-    /// Parse and validate a user-supplied tag path in slash-separated form.
+    /// Parse and validate a user-supplied tag path in dot-separated `ltree` form
+    /// (`Photos.Travel.Alps`) — the same form the API returns, so responses can be fed
+    /// straight back into requests.
     ///
-    /// - Strips leading whitespace and a leading `/` (silently).
-    /// - Splits on `/`; each segment must be non-empty and contain only `[A-Za-z0-9_]`.
-    /// - Returns the normalized ltree form (dot-separated).
+    /// - Trims surrounding whitespace.
+    /// - Splits on `.`; each label must be non-empty and contain only `[A-Za-z0-9_]`.
+    /// - Returns the validated path unchanged.
     pub fn parse(raw: &str) -> Result<Self, String> {
-        let stripped = raw.trim().trim_start_matches('/');
+        let stripped = raw.trim();
         if stripped.is_empty() {
             return Err("tag path must not be empty".to_string());
         }
-        for segment in stripped.split('/') {
+        for segment in stripped.split('.') {
             if segment.is_empty() {
                 return Err(
-                    "tag path must not contain empty segments (no trailing or double slashes)"
+                    "tag path must not contain empty segments (no leading, trailing, or doubled dots)"
                         .to_string(),
                 );
             }
@@ -58,7 +60,7 @@ impl TagPath {
                 ));
             }
         }
-        Ok(TagPath(stripped.replace('/', ".")))
+        Ok(TagPath(stripped.to_string()))
     }
 
     /// Parse from the human-readable slash-separated form (`/Photos/Travel/Alps`).
@@ -109,6 +111,26 @@ impl TagPath {
 
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// Reduce a collection of paths to its "deepest" form: drop exact duplicates and
+    /// any path that is a proper ancestor of another path in the set.
+    ///
+    /// Ancestors are virtual, so the surviving deepest paths fully represent the set.
+    /// Used both to keep a single source's output minimal and to fold the per-source
+    /// rows of a picture into a display set. Order of the input is preserved.
+    pub fn fold_deepest(paths: impl IntoIterator<Item = TagPath>) -> Vec<TagPath> {
+        let mut unique: Vec<TagPath> = Vec::new();
+        for p in paths {
+            if !unique.contains(&p) {
+                unique.push(p);
+            }
+        }
+        unique
+            .iter()
+            .filter(|p| !unique.iter().any(|other| p.is_ancestor_of(other)))
+            .cloned()
+            .collect()
     }
 }
 
@@ -188,14 +210,14 @@ mod tests {
     // ── TagPath::parse ────────────────────────────────────────────────────────
 
     #[test]
-    fn parse_strips_leading_slash() {
-        let t = TagPath::parse("/Photos/Travel/Alps").unwrap();
+    fn parse_dot_path_roundtrips() {
+        let t = TagPath::parse("Photos.Travel.Alps").unwrap();
         assert_eq!(t.as_ltree(), "Photos.Travel.Alps");
     }
 
     #[test]
-    fn parse_no_leading_slash() {
-        let t = TagPath::parse("Photos/Travel").unwrap();
+    fn parse_trims_whitespace() {
+        let t = TagPath::parse("  Photos.Travel  ").unwrap();
         assert_eq!(t.as_ltree(), "Photos.Travel");
     }
 
@@ -208,18 +230,25 @@ mod tests {
     #[test]
     fn parse_rejects_empty() {
         assert!(TagPath::parse("").is_err());
-        assert!(TagPath::parse("/").is_err());
+        assert!(TagPath::parse(".").is_err());
         assert!(TagPath::parse("   ").is_err());
     }
 
     #[test]
-    fn parse_rejects_double_slash() {
-        assert!(TagPath::parse("Photos//Travel").is_err());
+    fn parse_rejects_double_dot() {
+        assert!(TagPath::parse("Photos..Travel").is_err());
     }
 
     #[test]
-    fn parse_rejects_trailing_slash() {
-        assert!(TagPath::parse("Photos/Travel/").is_err());
+    fn parse_rejects_leading_and_trailing_dot() {
+        assert!(TagPath::parse(".Photos").is_err());
+        assert!(TagPath::parse("Photos.Travel.").is_err());
+    }
+
+    #[test]
+    fn parse_rejects_slash() {
+        // The slash is no longer a separator — it is just an invalid character.
+        assert!(TagPath::parse("Photos/Travel").is_err());
     }
 
     #[test]
@@ -234,7 +263,7 @@ mod tests {
 
     #[test]
     fn parse_accepts_underscore_and_digits() {
-        let t = TagPath::parse("/Photos_2024/Trip_01").unwrap();
+        let t = TagPath::parse("Photos_2024.Trip_01").unwrap();
         assert_eq!(t.as_ltree(), "Photos_2024.Trip_01");
     }
 
@@ -306,5 +335,37 @@ mod tests {
         let required = TagPath::from_ltree("Photos");
         let satisfied = stored == required || stored.ancestors().contains(&required);
         assert!(satisfied);
+    }
+
+    // ── TagPath::fold_deepest ─────────────────────────────────────────────────
+
+    fn paths(items: &[&str]) -> Vec<TagPath> {
+        items.iter().map(|s| TagPath::from_ltree(*s)).collect()
+    }
+
+    #[test]
+    fn fold_deepest_drops_ancestors() {
+        let folded =
+            TagPath::fold_deepest(paths(&["Photos", "Photos.Travel", "Photos.Travel.Alps"]));
+        assert_eq!(folded, paths(&["Photos.Travel.Alps"]));
+    }
+
+    #[test]
+    fn fold_deepest_dedups_exact() {
+        let folded = TagPath::fold_deepest(paths(&["Photos.Travel", "Photos.Travel"]));
+        assert_eq!(folded, paths(&["Photos.Travel"]));
+    }
+
+    #[test]
+    fn fold_deepest_keeps_disjoint_branches() {
+        let folded = TagPath::fold_deepest(paths(&["Photos.Travel", "Images.Icons"]));
+        assert_eq!(folded, paths(&["Photos.Travel", "Images.Icons"]));
+    }
+
+    #[test]
+    fn fold_deepest_keeps_siblings() {
+        // Siblings under a common parent are both deepest — neither is an ancestor of the other.
+        let folded = TagPath::fold_deepest(paths(&["Photos.Travel.Alps", "Photos.Travel.Jura"]));
+        assert_eq!(folded, paths(&["Photos.Travel.Alps", "Photos.Travel.Jura"]));
     }
 }

@@ -5,13 +5,15 @@ use crate::domain::tagging::{
     RuleTaggingRule, SegmentationRule, ServiceType, SharedTagMappingRule, TaggingService,
 };
 use crate::infra::error::AppError;
+use crate::repository::tag::TagRepository;
 use crate::repository::tagging::{
     RuleTaggingRuleRepository, SegmentationRuleRepository, SharedTagMappingRuleRepository,
     TaggingServiceRepository,
 };
+use crate::services;
 use crate::state::AppState;
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
@@ -358,20 +360,35 @@ pub async fn update_service(
     )
     .await?
     .ok_or(AppError::NotFound)?;
+    // Disabling a service makes its tags no longer live — drop them now. Re-enabling and any
+    // other config change re-derives tags on the next pipeline run (via touch_invalidated).
+    if payload.enabled == Some(false) {
+        TagRepository::remove_service_tags(&state.db, service_id).await?;
+    }
     TaggingServiceRepository::touch_invalidated(&state.db, service_id).await?;
     state.pipeline_notify.notify_one();
     Ok(Json(service_to_response(service)))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct DeleteServiceQuery {
+    pub promote_tags: bool,
+}
+
 /// DELETE /pipeline/{id} — delete a service (cascades to all its rules).
+///
+/// The tags this service assigned are promoted to `manual` so the user keeps them.
 pub async fn delete_service(
     auth: AuthUser,
     State(state): State<AppState>,
     Path(service_id): Path<Uuid>,
+    Query(query): Query<DeleteServiceQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    debug!(user = %auth.claims.sub, token_type = auth.token_type(), %service_id, "delete_pipeline_service");
+    debug!(user = %auth.claims.sub, token_type = auth.token_type(), promote_tags = query.promote_tags, %service_id, "delete_pipeline_service");
     let user_id = auth.user_id()?;
-    let deleted = TaggingServiceRepository::delete(&state.db, user_id, service_id).await?;
+    let deleted =
+        services::tagging::delete_service(&state.db, user_id, service_id, query.promote_tags)
+            .await?;
     if !deleted {
         return Err(AppError::NotFound);
     }

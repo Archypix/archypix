@@ -44,8 +44,9 @@ domain/
 
 repository/
   user.rs / picture.rs / picture_version.rs / user_settings.rs
-  tag.rs / share.rs / auth.rs / job.rs / tagging.rs
-  pipeline.rs     # dirty-picture queries, pipeline tag assignment
+  tag.rs          # per-source tag CRUD, service-tag promotion/removal helpers
+  share.rs / auth.rs / job.rs / tagging.rs
+  pipeline.rs     # dirty-picture queries, atomic per-source pipeline tag reconcile
 
 clients/
   federation/
@@ -110,18 +111,32 @@ A picture is dirty when `last_pipeline_run_at IS NULL OR last_pipeline_run_at < 
 - Service config change (service's `last_invalidated_at` bumped)
 - Inbound share announcement (new received pictures → `NULL` by default)
 
-**Evaluation order** — `SharedTagMapping → Rule → Segmentation`. Each service sees tags added by earlier ones (in-memory accumulation per picture), so
-downstream services can use upstream results via `requires`.
+**Evaluation order** — `SharedTagMapping → Rule → Segmentation`. Gating starts from the picture's `manual` + `incoming_share` tags and accumulates the
+tags produced by earlier services in the same run (in-memory, per picture), so downstream services can use upstream results via `requires`. Prior-run
+pipeline tags are **not** carried into gating — pipeline tags are re-derived from scratch each run, so a stale tag can never keep a service firing.
 
 **Rule predicates** — the `rule` service type supports a simple predicate DSL stored in `rule_tagging_services.predicate`. Supported forms:
 `gps_within_bbox(lat_min, lat_max, lon_min, lon_max)`, `capture_year(YYYY)`, `capture_month(M)`, `filename_contains("string")`. Predicates are
 validated at rule creation time.
 
-**Tag assignment** — pipeline-assigned tags use `source = rule | segment | share_mapping` (not `manual`), so user tag-remove operations never touch
-them. Assignment is idempotent (`ON CONFLICT DO NOTHING`).
+**Tag storage (per-source)** — tags are keyed per-source, not per-path: the same `tag_path` may be asserted independently by several sources on one
+picture (e.g. a `manual` tag and a `rule` that also matches). Two partial unique indexes enforce this — `(picture_id, tag_path) WHERE source='manual'`
+and `(picture_id, tag_path, source, source_id) WHERE source<>'manual'` — and double as the `ON CONFLICT` arbiters for all tag writers. `source_id` is
+polymorphic with no FK: the `tagging_services.id` for pipeline sources (`rule`/`segment`/`share_mapping`), or the `incoming_shares.id` for
+`incoming_share` tags; `NULL` for `manual`.
 
-**Tag removal** (TODO) — if the service enabled this feature, the service would be able to remove a tag from a picture if this tag has the same
-`source` as the service's rule and that no other service has assigned to it that tag (TODO).
+**Tag assignment & removal (always-on)** — pipeline tags are live. On each run the reconcile (`PipelineRepository::reconcile_pipeline_tags`, one
+atomic
+CTE per picture) inserts the run's produced tags and deletes every stored `rule`/`segment`/`share_mapping` row that is no longer produced. `manual`
+and
+`incoming_share` tags are never touched. Because rows are per-source, removing one source's tag never disturbs another source's ancestor tag, so no
+ancestor re-derivation is needed.
+
+**Service lifecycle** — the dirty-picture sweep cannot reach pictures whose only relevant service was just disabled or deleted (a disabled service no
+longer marks pictures dirty; a deleted service leaves `source_id` dangling), so these transitions clean tags explicitly and transactionally:
+**disabling** a service deletes its tags (`TagRepository::remove_service_tags`); **deleting** a service either promotes its tags to `manual`
+(`promote_service_tags_to_manual`, preserving the curation — a pre-existing manual tag on the same path wins and the redundant row is dropped) or
+removes them, selected by the `promote_tags` flag.
 
 # Backend REST API
 
@@ -249,26 +264,29 @@ via WebFinger and cached.
 
 **Tags**
 
-| Method  | Path                      | Description                                                                                                            |
-|---------|---------------------------|------------------------------------------------------------------------------------------------------------------------|
-| `GET`   | `/api/authenticated/tags` | List all tag paths used by this user.                                                                                  |
-| `PATCH` | `/api/authenticated/tags` | Batch edit tags. Body: `{ picture_ids, add_tags, remove_tags }`. Applies add/remove atomically to all listed pictures. |
+Tag paths are dot-separated `ltree` form (`Photos.Travel.Alps`) on the wire — the same form the API returns, so responses feed straight back into
+requests. Allowed label characters are `[A-Za-z0-9_]`.
+
+| Method  | Path                      | Description                                                                                                                                                                                                                                         |
+|---------|---------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `GET`   | `/api/authenticated/tags` | List tags. No params: all distinct tag paths for the user. `?picture_id=` : that picture's tags folded to the deepest distinct paths; add `&with_sources=true` to get each path with the list of `{ source, source_id }` asserting it (provenance). |
+| `PATCH` | `/api/authenticated/tags` | Batch edit tags. Body: `{ picture_ids, add_tags, remove_tags }`. Applies add/remove atomically to all listed pictures. Only `manual` tags are removed.                                                                                              |
 
 **Tagging pipeline**
 
-| Method   | Path                                                      | Description                                                                                                           |
-|----------|-----------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------|
-| `GET`    | `/api/authenticated/tagging-services`                     | List all tagging services with their embedded rules.                                                                  |
-| `POST`   | `/api/authenticated/tagging-services`                     | Create a tagging service. Body: `{ service_type, requires?, excludes? }`.                                             |
-| `GET`    | `/api/authenticated/tagging-services/{id}`                | Get a specific service with its rules.                                                                                |
-| `PATCH`  | `/api/authenticated/tagging-services/{id}`                | Update a service. Body: `{ enabled?, requires?, excludes? }`. Omitted fields are unchanged.                           |
-| `DELETE` | `/api/authenticated/tagging-services/{id}`                | Delete a service (cascades to all its rules).                                                                         |
-| `POST`   | `/api/authenticated/tagging-services/{id}/mappings`       | Add a mapping rule (shared\_tag\_mapping only). Body: `{ incoming_share_id, assign_tag }`.                            |
-| `DELETE` | `/api/authenticated/tagging-services/{id}/mappings/{rid}` | Delete a mapping rule.                                                                                                |
-| `POST`   | `/api/authenticated/tagging-services/{id}/rules`          | Add a predicate rule (rule type only). Body: `{ predicate, assign_tag }`.                                             |
-| `DELETE` | `/api/authenticated/tagging-services/{id}/rules/{rid}`    | Delete a predicate rule.                                                                                              |
-| `POST`   | `/api/authenticated/tagging-services/{id}/segments`       | Add a date-range segment (segmentation only). Body: `{ name, date_start, date_end, assign_tag, parent_segment_id? }`. |
-| `DELETE` | `/api/authenticated/tagging-services/{id}/segments/{sid}` | Delete a segment (cascades to child segments).                                                                        |
+| Method   | Path                                                      | Description                                                                                                                                  |
+|----------|-----------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------|
+| `GET`    | `/api/authenticated/tagging-services`                     | List all tagging services with their embedded rules.                                                                                         |
+| `POST`   | `/api/authenticated/tagging-services`                     | Create a tagging service. Body: `{ service_type, requires?, excludes? }`.                                                                    |
+| `GET`    | `/api/authenticated/tagging-services/{id}`                | Get a specific service with its rules.                                                                                                       |
+| `PATCH`  | `/api/authenticated/tagging-services/{id}`                | Update a service. Body: `{ enabled?, requires?, excludes? }`. Omitted fields are unchanged.                                                  |
+| `DELETE` | `/api/authenticated/tagging-services/{id}`                | Delete a service (cascades to all its rules). Query: `promote_tags` (required) — `true` promotes its tags to `manual`, `false` removes them. |
+| `POST`   | `/api/authenticated/tagging-services/{id}/mappings`       | Add a mapping rule (shared\_tag\_mapping only). Body: `{ incoming_share_id, assign_tag }`.                                                   |
+| `DELETE` | `/api/authenticated/tagging-services/{id}/mappings/{rid}` | Delete a mapping rule.                                                                                                                       |
+| `POST`   | `/api/authenticated/tagging-services/{id}/rules`          | Add a predicate rule (rule type only). Body: `{ predicate, assign_tag }`.                                                                    |
+| `DELETE` | `/api/authenticated/tagging-services/{id}/rules/{rid}`    | Delete a predicate rule.                                                                                                                     |
+| `POST`   | `/api/authenticated/tagging-services/{id}/segments`       | Add a date-range segment (segmentation only). Body: `{ name, date_start, date_end, assign_tag, parent_segment_id? }`.                        |
+| `DELETE` | `/api/authenticated/tagging-services/{id}/segments/{sid}` | Delete a segment (cascades to child segments).                                                                                               |
 
 **Sharing**
 

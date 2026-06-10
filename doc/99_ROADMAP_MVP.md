@@ -20,8 +20,9 @@
 - [x] **Tagging pipeline CRUD** — API to define tagging services (rules and segmentation).
 - [x] **Tagging pipeline execution** — wire `services/tagging.rs` to run the domain pipeline evaluator on ingest/edit/share events; connect the
   in-process `TaskQueue::RunTaggingPipeline` variant.
-- [ ] **Tagging pipeline tags removal** — new db column `tagging_services.removal_enabled`. If `true`, remove tags from pictures if this tag has the
-  same `source_id`. Read the todo in `infra/pipeline.rs` for more details.
+- [x] **Tagging pipeline tags removal** — tags are stored per-source; pipeline tags are live and re-derived each run, with stale `rule`/`segment`/
+  `share_mapping` tags removed atomically. Disabling a service drops its tags; deleting one promotes them to `manual` if `promoting=true`. Provenance
+  is exposed per tag.
 - [ ] **Better sharing support** — create a tagging rule to associate tags with an incoming share, share back support, announce/unannounce on shared
   tag add/remove or on picture edit/remove. Test transitive
   sharing.

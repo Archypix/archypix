@@ -9,6 +9,11 @@ const PicturesTab = {
             picGrid: [],
             picId: '',
             picUrl: {id: '', variant: 'original', imgSrc: null},
+            // Inline tag pane for the selected picture.
+            tagPane: {
+                pictureId: '', filename: '', tags: [], sources: null,
+                showSources: false, newTag: '', busy: false, msg: '', err: false,
+            },
             out: {
                 upload: {text: '', err: false}, list: {text: '', err: false},
                 detail: {text: '', err: false}, picUrl: {text: '', err: false}
@@ -114,7 +119,86 @@ const PicturesTab = {
         selectPicture(id){
             this.picId = id;
             this.picUrl.id = id;
+            const pic = this.picGrid.find(p => p.id === id);
+            this.openTagPane(id, pic ? pic.filename : '');
             this.doGetPicture();
+        },
+
+        // ── Inline tag pane ──────────────────────────────────────────────────
+        openTagPane(id, filename){
+            this.tagPane.pictureId = id;
+            this.tagPane.filename = filename || '';
+            this.tagPane.showSources = false;
+            this.tagPane.sources = null;
+            this.tagPane.newTag = '';
+            this.tagPane.msg = '';
+            this.tagPane.err = false;
+            this.loadPaneTags();
+        },
+
+        async loadPaneTags(){
+            const id = this.tagPane.pictureId;
+            if(!id) return;
+            const r = await this.api(`/api/authenticated/tags?picture_id=${encodeURIComponent(id)}`);
+            this.tagPane.tags = (r.ok && r.data.tags) ? r.data.tags : [];
+            if(this.tagPane.showSources) await this.loadPaneSources();
+        },
+
+        async toggleSources(){
+            this.tagPane.showSources = !this.tagPane.showSources;
+            if(this.tagPane.showSources && !this.tagPane.sources) await this.loadPaneSources();
+        },
+
+        async loadPaneSources(){
+            const id = this.tagPane.pictureId;
+            const r = await this.api(`/api/authenticated/tags?picture_id=${encodeURIComponent(id)}&with_sources=true`);
+            this.tagPane.sources = (r.ok && r.data.tags) ? r.data.tags : [];
+        },
+
+        async addManualTag(){
+            const tag = this.tagPane.newTag.trim();
+            if(!tag) return;
+            await this.editPaneTags([tag], []);
+            this.tagPane.newTag = '';
+        },
+
+        async removePaneTag(path){
+            await this.editPaneTags([], [path]);
+        },
+
+        async editPaneTags(add_tags, remove_tags){
+            this.tagPane.busy = true;
+            this.tagPane.msg = '';
+            this.tagPane.err = false;
+            const r = await this.api('/api/authenticated/tags', {
+                method: 'PATCH',
+                body: JSON.stringify({picture_ids: [this.tagPane.pictureId], add_tags, remove_tags}),
+            });
+            this.tagPane.busy = false;
+            if(!r.ok){
+                this.tagPane.err = true;
+                this.tagPane.msg = `❌ ${typeof r.data === 'string' ? r.data : JSON.stringify(r.data)}`;
+                return;
+            }
+            // Manual edits apply immediately; pipeline-derived tags may lag a moment.
+            this.tagPane.msg = '✅ Saved (pipeline tags refresh shortly).';
+            this.tagPane.sources = null;
+            await this.loadPaneTags();
+        },
+
+        sourceLabel(s){
+            const id = s.source_id ? ` · ${String(s.source_id).slice(0, 8)}` : '';
+            return `${s.source}${id}`;
+        },
+
+        sourceColor(source){
+            return {
+                manual: 'bg-blue-100 text-blue-700',
+                rule: 'bg-green-100 text-green-700',
+                segment: 'bg-purple-100 text-purple-700',
+                share_mapping: 'bg-amber-100 text-amber-700',
+                incoming_share: 'bg-pink-100 text-pink-700',
+            }[source] || 'bg-gray-100 text-gray-600';
         },
 
         async doGetPicture(){
@@ -160,6 +244,7 @@ const PicturesTab = {
             <pre :class="{'text-red-600': out.list.err}" class="out mb-2">{{ out.list.text }}</pre>
             <div class="grid grid-cols-3 md:grid-cols-6 gap-2">
                 <div :key="pic.id" @click="selectPicture(pic.id)"
+                     :class="tagPane.pictureId === pic.id ? 'ring-2 ring-blue-500' : ''"
                      class="border rounded overflow-hidden cursor-pointer hover:shadow-md"
                      v-for="pic in picGrid">
                     <img :src="pic.thumbnail_url" class="w-full h-20 object-cover bg-gray-200" v-if="pic.thumbnail_url"/>
@@ -167,6 +252,55 @@ const PicturesTab = {
                     <div class="p-1 text-xs truncate text-gray-700">{{ pic.filename }}</div>
                 </div>
             </div>
+        </div>
+
+        <!-- Inline tag pane: opens when a picture is selected -->
+        <div class="card" v-if="tagPane.pictureId">
+            <div class="flex items-center justify-between border-b pb-2 mb-3">
+                <h2 class="font-bold text-base">
+                    🏷 Tags
+                    <span class="text-gray-400 font-normal text-xs">— {{ tagPane.filename || tagPane.pictureId.slice(0, 8) }}</span>
+                </h2>
+                <div class="flex gap-2">
+                    <button @click="toggleSources"
+                            :class="tagPane.showSources ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'"
+                            class="btn">{{ tagPane.showSources ? 'Hide sources' : 'Show sources' }}</button>
+                    <button @click="loadPaneTags" class="btn bg-gray-100 text-gray-700 hover:bg-gray-200">↻</button>
+                </div>
+            </div>
+
+            <!-- Folded view: tag chips with manual remove -->
+            <div v-if="!tagPane.showSources">
+                <div class="flex flex-wrap gap-2 mb-3">
+                    <span :key="t" class="inline-flex items-center gap-1 bg-gray-100 rounded-full pl-3 pr-1 py-1 text-xs"
+                          v-for="t in tagPane.tags">
+                        {{ t }}
+                        <button @click="removePaneTag(t)" title="Remove manual tag"
+                                class="w-4 h-4 rounded-full bg-gray-300 hover:bg-red-400 hover:text-white text-gray-600 leading-none">×</button>
+                    </span>
+                    <span class="text-xs text-gray-400 italic" v-if="!tagPane.tags.length">No tags yet.</span>
+                </div>
+            </div>
+
+            <!-- Provenance view: each path with the sources asserting it -->
+            <div v-else class="mb-3 space-y-2">
+                <div :key="row.path" class="flex flex-wrap items-center gap-2" v-for="row in tagPane.sources">
+                    <span class="font-mono text-xs text-gray-800">{{ row.path }}</span>
+                    <span :key="i" :class="sourceColor(s.source)" class="rounded px-1.5 py-0.5 text-[10px] font-medium"
+                          v-for="(s, i) in row.sources">{{ sourceLabel(s) }}</span>
+                </div>
+                <div class="text-xs text-gray-400 italic" v-if="!tagPane.sources || !tagPane.sources.length">No tags yet.</div>
+            </div>
+
+            <!-- Manual tagging -->
+            <div class="flex gap-2 items-center border-t pt-3">
+                <input class="input flex-1" placeholder="Tag manually, e.g. Photos.Travel.Alps"
+                       @keyup.enter="addManualTag" v-model="tagPane.newTag"/>
+                <button @click="addManualTag" :disabled="tagPane.busy"
+                        class="btn bg-green-600 hover:bg-green-700 text-white disabled:opacity-50">Add tag</button>
+            </div>
+            <p :class="tagPane.err ? 'text-red-600' : 'text-green-700'" class="text-xs mt-2" v-if="tagPane.msg">{{ tagPane.msg }}</p>
+            <p class="text-[11px] text-gray-400 mt-1">× removes manual tags only — pipeline tags reappear unless their rule/segment is changed.</p>
         </div>
 
         <div class="card">

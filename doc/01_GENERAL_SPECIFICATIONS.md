@@ -12,9 +12,12 @@ Tags are hierarchical paths. A picture can carry any number of tags.
 
 **Rules:**
 
-- Tag paths are case-insensitive and slash-delimited.
+- Tag paths are case-sensitive and slash-delimited. Authorized characters are `[A-Za-z0-9_]` and `/` as a delimiter.
 - A tag implicitly includes all its ancestors: assigning `/Photos/Travel/Alps` means the picture also has `/Photos/Travel` and `/Photos`. Ancestor
   tags are virtual — only the explicitly assigned tag is stored; ancestors are derived on read.
+- Each stored tag records its **source** (`manual`, `rule`, `segment`, `share_mapping`, `incoming_share`). The same path may be asserted independently
+  by several sources on one picture (e.g. a manual tag plus a rule that also matches), so storage is keyed per-source rather than per-path. Default
+  reads fold these to the deepest distinct paths; a provenance view can list every source behind a tag.
 - The global unique identifier for a picture is the composite key `(owner, picture\_id)`, where `picture\_id` is unique within an instance. This key
   is used everywhere: tag records, federation messages, WebDAV virtual entries, share announcements.
 
@@ -112,6 +115,22 @@ SegmentationTaggingService:
 - Subsegments inherit the parent's `requires`/ `excludes` and assign their tag in addition to the parent's.
 - **Overlap rule:** if a picture falls in two overlapping segments at the same depth, all matching tags are assigned. Overlapping same-depth segments
   emit a validation warning.
+
+### 3.5 Tag removal
+
+Pipeline-assigned tags are **live**: they are a pure function of the current services and picture state, re-derived on every run. When a picture is
+re-evaluated, each enabled service produces its current set of tags; any previously-stored `rule`/`segment`/`share_mapping` tag that is no longer
+produced is removed in the same atomic step. `manual` and `incoming_share` tags are never touched by the pipeline — the former are owned by the user,
+the latter by share accept/revoke.
+
+Because tags are stored per-source, removal needs no special ancestor handling: each source owns its own rows, so dropping one source's deep tag never
+disturbs another source's ancestor tag.
+
+Service lifecycle interacts with removal explicitly:
+
+- **Disabling** a service removes its tags (they are no longer live); re-enabling re-adds them on the next run.
+- **Deleting** a service **promotes** its tags to `manual`, preserving the curation work as permanent user tags (a manual tag that already exists for
+  the same path wins, and the redundant pipeline row is dropped).
 
  --- 
 

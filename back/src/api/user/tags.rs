@@ -19,12 +19,17 @@ fn parse_tag_paths(paths: &[String]) -> Result<Vec<String>, AppError> {
 use axum::Json;
 use axum::extract::{Query, State};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use tracing::debug;
 use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
 pub struct ListTagsQuery {
     pub picture_id: Option<Uuid>,
+    /// When true (and `picture_id` is set), return each tag with the list of sources that
+    /// assert it, instead of the folded display set.
+    #[serde(default)]
+    pub with_sources: bool,
 }
 
 pub async fn list(
@@ -37,7 +42,30 @@ pub async fn list(
 
     if let Some(picture_id) = query.picture_id {
         let tags = TagRepository::list_for_picture(&state.db, user_id, picture_id).await?;
-        let paths: Vec<String> = tags.into_iter().map(|t| t.tag_path).collect();
+
+        if query.with_sources {
+            // Group per path, preserving the per-source provenance. Sorted for stable output.
+            let mut by_path: BTreeMap<String, Vec<serde_json::Value>> = BTreeMap::new();
+            for tag in tags {
+                by_path
+                    .entry(tag.tag_path)
+                    .or_default()
+                    .push(serde_json::json!({ "source": tag.source, "source_id": tag.source_id }));
+            }
+            let items: Vec<serde_json::Value> = by_path
+                .into_iter()
+                .map(|(path, sources)| serde_json::json!({ "path": path, "sources": sources }))
+                .collect();
+            return Ok(Json(serde_json::json!({ "tags": items })));
+        }
+
+        // Default view: fold per-source rows to the deepest distinct paths.
+        let folded =
+            TagPath::fold_deepest(tags.into_iter().map(|t| TagPath::from_ltree(t.tag_path)));
+        let paths: Vec<String> = folded
+            .into_iter()
+            .map(|p| p.as_ltree().to_string())
+            .collect();
         return Ok(Json(serde_json::json!({ "tags": paths })));
     }
 

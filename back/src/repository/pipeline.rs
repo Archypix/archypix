@@ -163,52 +163,53 @@ impl PipelineRepository {
         Ok(map)
     }
 
-    /// Batch-insert pipeline-assigned tags for a single picture.
+    /// Reconcile the pipeline tags of a single picture to `produced` in one atomic step.
     ///
-    /// Uses `ON CONFLICT DO NOTHING` so re-running the pipeline is idempotent.
-    /// Tags that already exist (from a previous run or from manual assignment)
-    /// are silently skipped.
-    pub async fn assign_tags<'e, E>(
+    /// Pipeline tags (`rule`/`segment`/`share_mapping`) are live: this run's `produced` set is
+    /// the complete desired pipeline output for the picture. Any stored pipeline tag not in it
+    /// is removed (always-on removal — covers gating changes, edited rules, and tags left by
+    /// now-disabled or deleted services), and the produced tags are inserted idempotently.
+    ///
+    /// `manual` and `incoming_share` tags are never touched. Because tags are stored per-source,
+    /// each source owns its rows: removing one source's tag never disturbs another's, so no
+    /// ancestor re-derivation is needed.
+    ///
+    /// Passing an empty `produced` is valid and clears all pipeline tags from the picture.
+    pub async fn reconcile_pipeline_tags<'e, E>(
         ex: E,
         picture_id: Uuid,
-        assignments: &[PipelineTagAssignment],
+        produced: &[PipelineTagAssignment],
     ) -> Result<(), AppError>
     where
         E: Executor<'e, Database = Postgres>,
     {
-        if assignments.is_empty() {
-            return Ok(());
-        }
-        let tags: Vec<&str> = assignments.iter().map(|a| a.tag_path.as_str()).collect();
-        let sources: Vec<&str> = assignments.iter().map(|a| a.source.as_str()).collect();
-        let source_ids: Vec<Uuid> = assignments.iter().map(|a| a.source_id).collect();
+        let tags: Vec<&str> = produced.iter().map(|a| a.tag_path.as_str()).collect();
+        let sources: Vec<&str> = produced.iter().map(|a| a.source.as_str()).collect();
+        let source_ids: Vec<Uuid> = produced.iter().map(|a| a.source_id).collect();
 
-        let source_id_strs: Vec<String> = source_ids.iter().map(|u| u.to_string()).collect();
-        // The CTE removes stale pipeline-assigned ancestor tags before inserting descendants.
-        // e.g. if a previous run stored Photos.Travel (rule) and we now add Photos.Travel.Alps,
-        // the ancestor row is deleted so the DB stays in its minimal canonical form.
-        // Only pipeline sources (rule/segment/share_mapping) are touched — manual and
-        // incoming_share tags are left intact.
         sqlx::query!(
-            r#"WITH cleanup AS (
+            r#"WITH produced AS (
+                 SELECT t.tag::ltree AS tag_path, t.src::tag_source AS source, t.sid AS source_id
+                 FROM unnest($2::text[], $3::text[], $4::uuid[]) AS t(tag, src, sid)
+               ),
+               cleanup AS (
                  DELETE FROM tags
                  WHERE picture_id = $1
-                   AND tag_path @> ANY($2::ltree[])
-                   AND NOT (tag_path = ANY($2::ltree[]))
-                   AND source IN (
-                     'rule'::tag_source,
-                     'segment'::tag_source,
-                     'share_mapping'::tag_source
+                   AND source IN ('rule'::tag_source, 'segment'::tag_source, 'share_mapping'::tag_source)
+                   AND NOT EXISTS (
+                     SELECT 1 FROM produced p
+                     WHERE p.tag_path = tags.tag_path
+                       AND p.source = tags.source
+                       AND p.source_id = tags.source_id
                    )
                )
                INSERT INTO tags (picture_id, tag_path, source, source_id)
-               SELECT $1, t.tag::ltree, t.src::tag_source, t.sid::uuid
-               FROM unnest($2::text[], $3::text[], $4::text[]) AS t(tag, src, sid)
-               ON CONFLICT (picture_id, tag_path) DO NOTHING"#,
+               SELECT $1, p.tag_path, p.source, p.source_id FROM produced p
+               ON CONFLICT (picture_id, tag_path, source, source_id) WHERE source <> 'manual' DO NOTHING"#,
             picture_id,
             &tags as &[&str],
             &sources as &[&str],
-            &source_id_strs as &[String],
+            &source_ids as &[Uuid],
         )
         .execute(ex)
         .await

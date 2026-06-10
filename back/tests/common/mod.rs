@@ -135,6 +135,7 @@ pub fn test_app_state_with_cache(db: PgPool, config: &Config, cache: Arc<dyn Cac
         federation,
         resolver,
         task_queue,
+        Arc::new(tokio::sync::Notify::new()),
     )
 }
 

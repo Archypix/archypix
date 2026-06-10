@@ -128,9 +128,9 @@ const TaggingServicesTab = {
             if(r.ok) this.doList();
         },
 
-        async doDelete(svcId){
+        async doDelete(svcId, promote = false){
             if(!confirm('Delete this service and all its rules?')) return;
-            const r = await this.api(`/api/authenticated/tagging-services/${svcId}`, {method: 'DELETE'});
+            const r = await this.api(`/api/authenticated/tagging-services/${svcId}?promote_tags=${promote}`, {method: 'DELETE'});
             this.showSvc(svcId, r.data, !r.ok);
             if(r.ok) this.doList();
         },
@@ -232,11 +232,11 @@ const TaggingServicesTab = {
                 </div>
                 <div class="space-y-1">
                     <label class="text-xs font-medium text-gray-600">Requires (comma-separated tag paths)</label>
-                    <input class="input w-full" placeholder="/Photos, /Images" v-model="create.requires"/>
+                    <input class="input w-full" placeholder="Photos, Images" v-model="create.requires"/>
                 </div>
                 <div class="space-y-1">
                     <label class="text-xs font-medium text-gray-600">Excludes (comma-separated tag paths)</label>
-                    <input class="input w-full" placeholder="/Archive" v-model="create.excludes"/>
+                    <input class="input w-full" placeholder="Archive" v-model="create.excludes"/>
                 </div>
             </div>
             <button @click="doCreate" class="btn bg-blue-600 hover:bg-blue-700 text-white mb-2">Create</button>
@@ -268,6 +268,8 @@ const TaggingServicesTab = {
                             class="btn text-xs py-0.5 shrink-0">{{ svc.enabled ? 'Enabled' : 'Disabled' }}</button>
                     <button @click="doDelete(svc.id)"
                             class="btn bg-red-100 hover:bg-red-200 text-red-700 text-xs py-0.5 shrink-0">Delete</button>
+                    <button @click="doDelete(svc.id, true)"
+                            class="btn bg-red-100 hover:bg-red-200 text-red-700 text-xs py-0.5 shrink-0">Delete (Promote)</button>
                 </div>
 
                 <div class="p-3 space-y-3">
@@ -289,7 +291,7 @@ const TaggingServicesTab = {
                         <div v-if="addForms[svc.id]" class="flex gap-2 flex-wrap">
                             <input class="input flex-1 min-w-40" placeholder="incoming_share_id (UUID)"
                                    v-model="addForms[svc.id].incomingShareId"/>
-                            <input class="input flex-1 min-w-32" placeholder="assign_tag (/Photos/Friends/Bob)"
+                            <input class="input flex-1 min-w-32" placeholder="assign_tag (Photos.Friends.Bob)"
                                    v-model="addForms[svc.id].assignTag"/>
                             <button @click="doAddMapping(svc)"
                                     class="btn bg-blue-600 hover:bg-blue-700 text-white shrink-0">Add Mapping</button>
@@ -312,7 +314,7 @@ const TaggingServicesTab = {
                         <div v-if="addForms[svc.id]" class="flex gap-2 flex-wrap">
                             <input class="input flex-1 min-w-48" placeholder='predicate (e.g. exif.gps within bbox(...))'
                                    v-model="addForms[svc.id].predicate"/>
-                            <input class="input flex-1 min-w-32" placeholder="assign_tag (/Photos/Places/Chamonix)"
+                            <input class="input flex-1 min-w-32" placeholder="assign_tag (Photos.Places.Chamonix)"
                                    v-model="addForms[svc.id].assignTag"/>
                             <button @click="doAddRule(svc)"
                                     class="btn bg-blue-600 hover:bg-blue-700 text-white shrink-0">Add Rule</button>
@@ -341,7 +343,7 @@ const TaggingServicesTab = {
                                    v-model="addForms[svc.id].dateStart"/>
                             <input class="input" type="datetime-local"
                                    v-model="addForms[svc.id].dateEnd"/>
-                            <input class="input" placeholder="assign_tag (/Photos/Travel/Alps)"
+                            <input class="input" placeholder="assign_tag (Photos.Travel.Alps)"
                                    v-model="addForms[svc.id].assignTag"/>
                             <input class="input font-mono text-xs" placeholder="parent_segment_id (UUID, optional)"
                                    v-model="addForms[svc.id].parentSegmentId"/>

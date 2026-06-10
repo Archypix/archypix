@@ -154,21 +154,30 @@ CREATE TABLE tags
     picture_id  UUID       NOT NULL REFERENCES pictures (id) ON DELETE CASCADE,
 
     -- Tag path using ltree for hierarchy (e.g., 'Photos.Travel.Alps')
-    -- Stored without leading slash, case-insensitive; only explicit tags stored, ancestors derived on read
+    -- Stored without leading slash, case-sensitive; only explicit tags stored, ancestors derived on read
     tag_path    LTREE      NOT NULL,
 
-    -- Source of the tag assignment
+    -- Source of the tag assignment.
+    -- source_id is polymorphic (no FK): the tagging_services.id for pipeline sources
+    -- (rule/segment/share_mapping), or the incoming_shares.id for incoming_share tags;
+    -- NULL for manual tags. Lifecycle (live re-derivation by the pipeline, removal on
+    -- service disable, promotion to manual on service delete) is enforced in the app layer.
     source      tag_source NOT NULL DEFAULT 'manual',
-    source_id   UUID, -- Reference to rule/segment/share that created this
+    source_id   UUID,
 
     -- Timestamps
-    assigned_at TIMESTAMP  NOT NULL DEFAULT (now() at time zone 'utc'),
-
-    -- Prevent duplicate tags on same picture
-    CONSTRAINT uq_picture_tag UNIQUE (picture_id, tag_path)
+    assigned_at TIMESTAMP NOT NULL DEFAULT (now() at time zone 'utc')
 );
 
--- GIN index for efficient ltree operations (@>, <@, ~, @)
+-- Tags are keyed per-source: the same path may be asserted independently by several
+-- sources on one picture (e.g. a manual tag and a rule that also matches it).
+--   * manual tags    : at most one row per (picture, path); source_id is always NULL.
+--   * non-manual tags: at most one row per (picture, path, source, producing source_id).
+-- These partial unique indexes also serve as the ON CONFLICT arbiters for tag writers.
+CREATE UNIQUE INDEX uq_picture_tag_manual ON tags (picture_id, tag_path) WHERE source = 'manual';
+CREATE UNIQUE INDEX uq_picture_tag_source ON tags (picture_id, tag_path, source, source_id) WHERE source <> 'manual';
+
+-- GiST index for efficient ltree operations (@>, <@, ~, @)
 CREATE INDEX idx_tags_path ON tags USING GIST (tag_path);
 CREATE INDEX idx_tags_picture ON tags (picture_id);
 CREATE INDEX idx_tags_source ON tags (source, source_id);

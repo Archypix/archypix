@@ -16,7 +16,7 @@
 //! enabling downstream services to use upstream results via `requires`.
 
 use crate::domain::pipeline::{self, PipelineInput};
-use crate::domain::tag::TagPath;
+use crate::domain::tag::{TagPath, TagSource};
 use crate::domain::tagging::ServiceType;
 use crate::repository::pipeline::{PipelineRepository, PipelineTagAssignment};
 use crate::repository::tag::TagRepository;
@@ -42,8 +42,13 @@ pub fn create(
     db: PgPool,
     notify: Arc<Notify>,
     poll_interval: Duration,
-) -> impl std::future::Future<Output = ()> {
+) -> impl Future<Output = ()> {
     async move { run(db, notify, poll_interval).await }
+}
+
+/// Evaluate the pipeline once for a single user, synchronously. Used for testing.
+pub async fn run_once_for_user(db: &PgPool, user_id: Uuid) -> Result<(), anyhow::Error> {
+    run_for_user(db, user_id).await
 }
 
 async fn run(db: PgPool, notify: Arc<Notify>, poll_interval: Duration) {
@@ -141,37 +146,42 @@ async fn run_for_user(db: &PgPool, user_id: Uuid) -> Result<(), anyhow::Error> {
         let share_ids_by_pic =
             PipelineRepository::find_incoming_share_ids(db, &picture_ids).await?;
 
-        // Group tags by picture_id.
-        let mut tags_by_pic: HashMap<Uuid, Vec<TagPath>> = HashMap::new();
+        // Only manual and incoming_share tags form the gating base — pipeline tags are
+        // re-derived from scratch each run, so prior-run pipeline tags must not influence
+        // `requires`/`excludes` (a stale tag could otherwise keep a service firing).
+        let mut base_by_pic: HashMap<Uuid, Vec<TagPath>> = HashMap::new();
         for tag in all_tags {
-            tags_by_pic
-                .entry(tag.picture_id)
-                .or_default()
-                .push(TagPath::from_ltree(&tag.tag_path));
+            if matches!(tag.source, TagSource::Manual | TagSource::IncomingShare) {
+                base_by_pic
+                    .entry(tag.picture_id)
+                    .or_default()
+                    .push(TagPath::from_ltree(&tag.tag_path));
+            }
         }
 
         let mut success_ids: Vec<Uuid> = Vec::with_capacity(chunk.len());
 
         for picture in chunk {
-            let mut current_tags: Vec<TagPath> =
-                tags_by_pic.remove(&picture.id).unwrap_or_default();
+            // Gating tags accumulate this run's pipeline output (in service order) on top of
+            // the base, so a downstream service can `require` an upstream service's tag.
+            let mut gating_tags: Vec<TagPath> = base_by_pic.remove(&picture.id).unwrap_or_default();
             let incoming_share_ids: &[Uuid] = share_ids_by_pic
                 .get(&picture.id)
                 .map(|v| v.as_slice())
                 .unwrap_or(&[]);
 
-            let mut assignments: Vec<PipelineTagAssignment> = Vec::new();
+            // Complete desired pipeline output for this picture; the reconcile removes any
+            // stored pipeline tag absent from it.
+            let mut produced: Vec<PipelineTagAssignment> = Vec::new();
 
             for service in &services {
-                // Rebuild input with the current in-memory tag set so each service
-                // sees tags added by earlier ones in this run.
                 let input = PipelineInput {
                     picture_id: picture.id,
                     captured_at: picture.captured_at,
                     gps_lat: picture.gps_lat,
                     gps_lng: picture.gps_lng,
                     filename: picture.filename.clone(),
-                    current_tags: current_tags.clone(),
+                    current_tags: gating_tags.clone(),
                 };
 
                 if !pipeline::should_run(service, &input) {
@@ -208,20 +218,13 @@ async fn run_for_user(db: &PgPool, user_id: Uuid) -> Result<(), anyhow::Error> {
                     ServiceType::Segmentation => "segment",
                 };
 
-                for tag in result.tags_to_add {
-                    // Skip if an equal or more-specific tag is already present.
-                    // e.g. don't add Photos.Travel when Photos.Travel.Alps is already there.
-                    if current_tags
-                        .iter()
-                        .any(|t| t == &tag || tag.is_ancestor_of(t))
-                    {
-                        continue;
+                // Keep only the deepest tags this service emits (its own minimal form); a
+                // shallower tag from a *different* source is kept independently by the reconcile.
+                for tag in TagPath::fold_deepest(result.tags_to_add) {
+                    if !gating_tags.iter().any(|t| t == &tag) {
+                        gating_tags.push(tag.clone());
                     }
-                    // Drop ancestors that are now redundant (replaced by this deeper tag).
-                    // e.g. remove Photos.Travel when adding Photos.Travel.Alps.
-                    current_tags.retain(|t| !t.is_ancestor_of(&tag));
-                    current_tags.push(tag.clone());
-                    assignments.push(PipelineTagAssignment {
+                    produced.push(PipelineTagAssignment {
                         tag_path: tag.as_ltree().to_string(),
                         source: source_str.to_string(),
                         source_id: service.id,
@@ -229,24 +232,17 @@ async fn run_for_user(db: &PgPool, user_id: Uuid) -> Result<(), anyhow::Error> {
                 }
             }
 
-            // Write new tags for this picture.
-            if let Err(e) = PipelineRepository::assign_tags(db, picture.id, &assignments).await {
+            // Atomically add the produced tags and remove stale pipeline tags.
+            if let Err(e) =
+                PipelineRepository::reconcile_pipeline_tags(db, picture.id, &produced).await
+            {
                 tracing::error!(
                     picture_id = %picture.id,
                     error = ?e,
-                    "pipeline: failed to assign tags — picture will be retried"
+                    "pipeline: failed to reconcile tags — picture will be retried"
                 );
                 continue; // do not mark this picture as run
             }
-
-            // TODO: to support tag removal, we should tag that a test of a non-manual source
-            //  is in none of the result.tags_to_add, and that its source_id has removal_enabled=true.
-            //  This requires keeping track of result.tags_to_add, and matching the tag source with
-            //  the service to get removal_enabled. If one of the services created an ancestor tag,
-            //  the ancestor should be added after the removed one is removed.
-            //  Other option : add source_id to the PK of tags, allowing to keep track of all tags
-            //  individually, and to clean up the non-relevant tags automatically in sql by adding
-            //  a condition in `WITH cleanup AS` on source_id.
 
             success_ids.push(picture.id);
         }
