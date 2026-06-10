@@ -15,7 +15,7 @@
 - [x] Tests: domain unit tests, repository integration tests, service integration tests, worker HTTP contract tests, federation end-to-end and
   security tests.
 
-## To-do for the PoC
+## To-do for the MVP
 
 - [x] **Tagging pipeline CRUD** — API to define tagging services (rules and segmentation).
 - [x] **Tagging pipeline execution** — wire `services/tagging.rs` to run the domain pipeline evaluator on ingest/edit/share events; connect the
@@ -24,28 +24,24 @@
   `share_mapping` tags removed atomically. Disabling a service drops its tags; deleting one promotes them to `manual` if `promoting=true`. Provenance
   is exposed per tag.
 - [ ] **Better sharing support** — create a tagging rule to associate tags with an incoming share, share back support, announce/unannounce on shared
-  tag add/remove or on picture edit/remove. Test transitive
-  sharing.
+  tag add/remove or on picture edit/remove. Test transitive sharing.
 - [ ] **Exif edition** — exif update api endpoint, triggering a worker job editing the s3 picture metadata.
 - [ ] **Admin endpoints** — user list/suspend/delete, job status, instance metrics.
-- [ ] **Full frontend** — v1 of a user-friendly frontend, with super simple code for a PoC, but with a realistic user experience that could give an
-  idea of what the MVP could look like.
+- [ ] **Full frontend** — v1 of a user-friendly frontend, with super simple code for a MvP, but with a realistic user experience that could give an
+  idea of what the final front could look like.
 - [ ] **Hierarchies** — CRUD operations for managing hierarchies.
 - [ ] **WebDAV** — virtual directory tree over tags; full-res/thumbnail reads via presigned redirect or back proxy; staging-pattern writes; versioning
   on overwrite. Use `pictures.file_hash` as the WebDAV ETag.
   Two things from the specs have no roadmap item:
 - [ ] **Trash & restore** — pictures deletion, announcement to sharing recipients setting their `deleted_at` too. Adding an endpoint allowing to copy
   the picture physically to keep it even if the owner trashed it.
-
-## To-do for the MVP
-
 - [ ] **Tag rename cascade** — expose API endpoint that triggers the in-process `TaskQueue::TagRename` task; add cascade to outgoing shares,
   segmentation configs, and hierarchies (currently only tags table is updated).
 - [ ] **Federation robustness** — token refresh/rotation schedule, retry logic for failed announce/revoke, presigned URL caching for remote picture
   access.
 - [ ] **Rate limiting and validators** — Redis-backed limits on auth, federation, and public endpoints; session invalidation on logout. Password,
   emails, usernames validators.
-- [ ] **Full Frontend** — v2 of a user-friendly frontend, ready for production.
+- [ ] **Full Frontend** — Update the frontend
 
 ## To-do for the v1.0
 
