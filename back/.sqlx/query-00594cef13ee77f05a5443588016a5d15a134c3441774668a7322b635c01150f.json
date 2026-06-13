@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE tagging_services ts\n               SET position = ord.pos\n               FROM (\n                   SELECT unnest($1::uuid[]) AS id,\n                          unnest($3::int[])  AS pos\n               ) AS ord\n               WHERE ts.id = ord.id\n                 AND ts.owner_id = $2\n                 AND ts.service_type <> 'shared_tag_mapping'::service_type\n               RETURNING ts.id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "tagging_services",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Uuid",
+        "Int4Array"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "00594cef13ee77f05a5443588016a5d15a134c3441774668a7322b635c01150f"
+}

@@ -64,6 +64,10 @@ pub fn authenticated_routes() -> Router<AppState> {
             get(tagging_services::list_services).post(tagging_services::create_service),
         )
         .route(
+            "/tagging-services/reorder",
+            post(tagging_services::reorder_services),
+        )
+        .route(
             "/tagging-services/{id}",
             get(tagging_services::get_service)
                 .patch(tagging_services::update_service)

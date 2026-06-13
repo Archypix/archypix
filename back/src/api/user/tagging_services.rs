@@ -38,6 +38,7 @@ pub struct ServiceResponse {
     pub requires: Vec<String>,
     pub excludes: Vec<String>,
     pub enabled: bool,
+    pub position: i32,
     pub created_at: NaiveDateTime,
     pub updated_at: NaiveDateTime,
 }
@@ -79,6 +80,7 @@ pub enum ServiceDetailResponse {
         requires: Vec<String>,
         excludes: Vec<String>,
         enabled: bool,
+        position: i32,
         created_at: NaiveDateTime,
         updated_at: NaiveDateTime,
         mappings: Vec<SharedTagMappingRuleResponse>,
@@ -88,6 +90,7 @@ pub enum ServiceDetailResponse {
         requires: Vec<String>,
         excludes: Vec<String>,
         enabled: bool,
+        position: i32,
         created_at: NaiveDateTime,
         updated_at: NaiveDateTime,
         rules: Vec<RuleTaggingRuleResponse>,
@@ -97,6 +100,7 @@ pub enum ServiceDetailResponse {
         requires: Vec<String>,
         excludes: Vec<String>,
         enabled: bool,
+        position: i32,
         created_at: NaiveDateTime,
         updated_at: NaiveDateTime,
         segments: Vec<SegmentationRuleResponse>,
@@ -112,6 +116,7 @@ fn service_to_response(s: TaggingService) -> ServiceResponse {
         requires: s.requires,
         excludes: s.excludes,
         enabled: s.enabled,
+        position: s.position,
         created_at: s.created_at,
         updated_at: s.updated_at,
     }
@@ -181,10 +186,11 @@ pub async fn list_services(
         .into_iter()
         .map(|svc| {
             let id = svc.id;
-            let (requires, excludes, enabled, created_at, updated_at) = (
+            let (requires, excludes, enabled, position, created_at, updated_at) = (
                 svc.requires.clone(),
                 svc.excludes.clone(),
                 svc.enabled,
+                svc.position,
                 svc.created_at,
                 svc.updated_at,
             );
@@ -194,6 +200,7 @@ pub async fn list_services(
                     requires,
                     excludes,
                     enabled,
+                    position,
                     created_at,
                     updated_at,
                     mappings: all_mappings
@@ -208,6 +215,7 @@ pub async fn list_services(
                     requires,
                     excludes,
                     enabled,
+                    position,
                     created_at,
                     updated_at,
                     rules: all_rules
@@ -222,6 +230,7 @@ pub async fn list_services(
                     requires,
                     excludes,
                     enabled,
+                    position,
                     created_at,
                     updated_at,
                     segments: all_segments
@@ -296,6 +305,7 @@ pub async fn get_service(
                 requires: svc.requires,
                 excludes: svc.excludes,
                 enabled: svc.enabled,
+                position: svc.position,
                 created_at: svc.created_at,
                 updated_at: svc.updated_at,
                 mappings: mappings.into_iter().map(mapping_to_response).collect(),
@@ -308,6 +318,7 @@ pub async fn get_service(
                 requires: svc.requires,
                 excludes: svc.excludes,
                 enabled: svc.enabled,
+                position: svc.position,
                 created_at: svc.created_at,
                 updated_at: svc.updated_at,
                 rules: rules.into_iter().map(rule_to_response).collect(),
@@ -321,6 +332,7 @@ pub async fn get_service(
                 requires: svc.requires,
                 excludes: svc.excludes,
                 enabled: svc.enabled,
+                position: svc.position,
                 created_at: svc.created_at,
                 updated_at: svc.updated_at,
                 segments: segments.into_iter().map(segment_to_response).collect(),
@@ -575,4 +587,28 @@ pub async fn delete_segment(
     TaggingServiceRepository::touch_invalidated(&state.db, service_id).await?;
     state.pipeline_notify.notify_one();
     Ok(Json(serde_json::json!({ "deleted": true })))
+}
+
+// ─── Reorder ──────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct ReorderServicesRequest {
+    /// Ordered list of Rule and Segmentation service IDs. SharedTagMapping services are
+    /// excluded — they always run first and cannot be reordered.
+    pub ordered_ids: Vec<Uuid>,
+}
+
+/// POST /tagging-services/reorder — set the execution order of Rule and Segmentation services.
+///
+/// The caller sends the complete desired ordering as a list of service IDs. Each service
+/// gets `position = its index` in the list. SharedTagMapping services must not be included.
+pub async fn reorder_services(
+    auth: AuthUser,
+    State(state): State<AppState>,
+    Json(payload): Json<ReorderServicesRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    debug!(user = %auth.claims.sub, token_type = auth.token_type(), count = payload.ordered_ids.len(), "reorder_pipeline_services");
+    let user_id = auth.user_id()?;
+    TaggingServiceRepository::reorder_services(&state.db, user_id, &payload.ordered_ids).await?;
+    Ok(Json(serde_json::json!({ "reordered": true })))
 }

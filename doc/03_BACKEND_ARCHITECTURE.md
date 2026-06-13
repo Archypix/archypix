@@ -111,8 +111,9 @@ any config change. A picture is dirty when `last_pipeline_run_at IS NULL OR last
 **Wake model** — `tokio::sync::Notify` for event-driven wakes + configurable polling fallback (`PIPELINE_POLL_INTERVAL_SECS`, default 1 hour).
 Notified after: ingest, manual tag edit, service config change, inbound share announcement, `cleanup_incoming_share`.
 
-**Evaluation order** — `SharedTagMapping → Rule → Segmentation`. Gating accumulates tags from `manual` + `incoming_share` plus earlier services (
-in-memory, per picture); pipeline tags are re-derived from scratch each run, never carried forward.
+**Evaluation order** — `SharedTagMapping` always runs first (no user control; it only depends on incoming share IDs). Rule and Segmentation services
+are then evaluated in user-defined `position` order (interleaved freely). Gating accumulates tags from `manual` + `incoming_share` plus earlier
+services (in-memory, per picture); pipeline tags are re-derived from scratch each run, never carried forward.
 
 **Rule predicates** — stored in `rule_tagging_services.predicate`, validated at creation. Supported:
 `gps_within_bbox(lat_min, lat_max, lon_min, lon_max)`, `capture_year(YYYY)`, `capture_month(M)`, `filename_contains("string")`.
@@ -274,8 +275,9 @@ requests. Allowed label characters are `[A-Za-z0-9_]`.
 
 | Method   | Path                                                      | Description                                                                                                                                  |
 |----------|-----------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------|
-| `GET`    | `/api/authenticated/tagging-services`                     | List all tagging services with their embedded rules.                                                                                         |
-| `POST`   | `/api/authenticated/tagging-services`                     | Create a tagging service. Body: `{ service_type, requires?, excludes? }`.                                                                    |
+| `GET`    | `/api/authenticated/tagging-services`                     | List all tagging services with their embedded rules, ordered by pipeline execution order.                                                    |
+| `POST`   | `/api/authenticated/tagging-services`                     | Create a tagging service. Body: `{ service_type, requires?, excludes? }`. New service gets `position = max(position)+1`.                     |
+| `POST`   | `/api/authenticated/tagging-services/reorder`             | Set execution order of Rule and Segmentation services. Body: `{ ordered_ids: [uuid, …] }`. SharedTagMapping IDs must not be included.        |
 | `GET`    | `/api/authenticated/tagging-services/{id}`                | Get a specific service with its rules.                                                                                                       |
 | `PATCH`  | `/api/authenticated/tagging-services/{id}`                | Update a service. Body: `{ enabled?, requires?, excludes? }`. Omitted fields are unchanged.                                                  |
 | `DELETE` | `/api/authenticated/tagging-services/{id}`                | Delete a service (cascades to all its rules). Query: `promote_tags` (required) — `true` promotes its tags to `manual`, `false` removes them. |

@@ -11,9 +11,12 @@ const TaggingServicesTab = {
             out: {
                 list: {text: '', err: false},
                 create: {text: '', err: false},
+                reorder: {text: '', err: false},
             },
             // per-service output keyed by service id
             svcOut: {},
+            // drag-and-drop reorder state
+            dragIndex: null,
         };
     },
 
@@ -31,6 +34,13 @@ const TaggingServicesTab = {
                 rule: 'Rule',
                 segmentation: 'Segmentation',
             }[type] || type);
+        },
+        // Services that can be reordered (Rule and Segmentation, sorted by current position).
+        reorderableServices(){
+            return this.services
+                .filter(s => s.service_type !== 'shared_tag_mapping')
+                .slice()
+                .sort((a, b) => a.position - b.position || a.created_at.localeCompare(b.created_at));
         },
     },
 
@@ -210,6 +220,41 @@ const TaggingServicesTab = {
             if(r.ok) this.doList();
         },
 
+        // ── Reorder (drag-and-drop) ──────────────────────────────────────────
+        // Operates on a local sorted copy; sends the new order to the server.
+        onDragStart(index){
+            this.dragIndex = index;
+        },
+        onDragOver(e, index){
+            e.preventDefault();
+            if(this.dragIndex === null || this.dragIndex === index) return;
+            // Reorder local sorted list.
+            const list = this.reorderableServices.slice();
+            const [moved] = list.splice(this.dragIndex, 1);
+            list.splice(index, 0, moved);
+            // Patch positions on the local services array so Vue re-renders.
+            list.forEach((svc, i) => {
+                const s = this.services.find(x => x.id === svc.id);
+                if(s) s.position = i;
+            });
+            this.dragIndex = index;
+        },
+        onDragEnd(){
+            this.dragIndex = null;
+        },
+        async doReorder(){
+            const ids = this.reorderableServices.map(s => s.id);
+            const r = await this.api('/api/authenticated/tagging-services/reorder', {
+                method: 'POST',
+                body: JSON.stringify({ordered_ids: ids}),
+            });
+            this.out.reorder = {
+                text: r.ok ? `Order saved.` : `❌ ${JSON.stringify(r.data)}`,
+                err: !r.ok,
+            };
+            if(r.ok) this.doList();
+        },
+
         fmtDate(dt){
             return dt ? dt.replace('T', ' ').slice(0, 16) : '';
         },
@@ -243,6 +288,31 @@ const TaggingServicesTab = {
             <pre v-if="out.create.text" :class="{'text-red-600': out.create.err}" class="out">{{ out.create.text }}</pre>
         </div>
 
+        <!-- Reorder -->
+        <div class="card" v-if="reorderableServices.length > 1">
+            <h2 class="font-bold text-base mb-3 border-b pb-2">Pipeline Order
+                <span class="font-normal text-xs text-gray-400 ml-1">(SharedTagMapping always runs first — drag to reorder Rule/Segmentation)</span>
+            </h2>
+            <div class="space-y-1 mb-3">
+                <div v-for="(svc, i) in reorderableServices" :key="svc.id"
+                     draggable="true"
+                     @dragstart="onDragStart(i)"
+                     @dragover="onDragOver($event, i)"
+                     @dragend="onDragEnd"
+                     :class="dragIndex === i ? 'opacity-40' : ''"
+                     class="flex items-center gap-2 px-3 py-1.5 border rounded bg-white cursor-grab select-none">
+                    <span class="text-gray-300 text-sm">⠿</span>
+                    <span class="text-xs text-gray-400 w-5 shrink-0">{{ i + 1 }}</span>
+                    <span :class="typeBadgeClass(svc.service_type)"
+                          class="text-xs font-semibold px-2 py-0.5 rounded-full shrink-0">{{ typeLabel(svc.service_type) }}</span>
+                    <span class="font-mono text-xs text-gray-400 truncate flex-1">{{ svc.id }}</span>
+                    <span v-if="svc.requires && svc.requires.length" class="text-xs text-gray-400 shrink-0">needs: {{ svc.requires.join(', ') }}</span>
+                </div>
+            </div>
+            <button @click="doReorder" class="btn bg-indigo-600 hover:bg-indigo-700 text-white text-sm mb-2">Save Order</button>
+            <pre v-if="out.reorder.text" :class="{'text-red-600': out.reorder.err}" class="out">{{ out.reorder.text }}</pre>
+        </div>
+
         <!-- List -->
         <div class="card">
             <div class="flex items-center gap-3 mb-3 border-b pb-2">
@@ -258,6 +328,8 @@ const TaggingServicesTab = {
                 <div class="flex items-center gap-2 px-3 py-2 bg-gray-50 border-b">
                     <span :class="typeBadgeClass(svc.service_type)"
                           class="text-xs font-semibold px-2 py-0.5 rounded-full shrink-0">{{ typeLabel(svc.service_type) }}</span>
+                    <span v-if="svc.service_type !== 'shared_tag_mapping'"
+                          class="text-xs text-gray-400 shrink-0">#{{ svc.position }}</span>
                     <span class="font-mono text-xs text-gray-400 truncate flex-1">{{ svc.id }}</span>
                     <span v-if="svc.requires && svc.requires.length"
                           class="text-xs text-gray-500 shrink-0">needs: {{ svc.requires.join(', ') }}</span>

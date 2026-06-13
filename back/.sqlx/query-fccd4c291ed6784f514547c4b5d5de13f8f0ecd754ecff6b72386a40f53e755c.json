@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "UPDATE tagging_services\n               SET enabled    = COALESCE($3, enabled),\n                   requires   = COALESCE($4::ltree[], requires),\n                   excludes   = COALESCE($5::ltree[], excludes),\n                   updated_at = now() AT TIME ZONE 'utc'\n               WHERE id = $1 AND owner_id = $2\n               RETURNING id, owner_id,\n                         service_type as \"service_type: ServiceType\",\n                         requires::text[] as \"requires!\", excludes::text[] as \"excludes!\",\n                         enabled, last_invalidated_at, last_error_at, last_error_msg,\n                         created_at, updated_at",
+  "query": "SELECT id, owner_id,\n                      service_type as \"service_type: ServiceType\",\n                      requires::text[] as \"requires!\", excludes::text[] as \"excludes!\",\n                      enabled, position, last_invalidated_at, last_error_at, last_error_msg,\n                      created_at, updated_at\n               FROM tagging_services\n               WHERE id = $1 AND owner_id = $2",
   "describe": {
     "columns": [
       {
@@ -72,6 +72,17 @@
       },
       {
         "ordinal": 6,
+        "name": "position",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "tagging_services",
+            "name": "position"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
         "name": "last_invalidated_at",
         "type_info": "Timestamp",
         "origin": {
@@ -82,7 +93,7 @@
         }
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "last_error_at",
         "type_info": "Timestamp",
         "origin": {
@@ -93,7 +104,7 @@
         }
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "last_error_msg",
         "type_info": "Text",
         "origin": {
@@ -104,7 +115,7 @@
         }
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "created_at",
         "type_info": "Timestamp",
         "origin": {
@@ -115,7 +126,7 @@
         }
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "updated_at",
         "type_info": "Timestamp",
         "origin": {
@@ -129,34 +140,7 @@
     "parameters": {
       "Left": [
         "Uuid",
-        "Uuid",
-        "Bool",
-        {
-          "Custom": {
-            "name": "ltree[]",
-            "kind": {
-              "Array": {
-                "Custom": {
-                  "name": "ltree",
-                  "kind": "Simple"
-                }
-              }
-            }
-          }
-        },
-        {
-          "Custom": {
-            "name": "ltree[]",
-            "kind": {
-              "Array": {
-                "Custom": {
-                  "name": "ltree",
-                  "kind": "Simple"
-                }
-              }
-            }
-          }
-        }
+        "Uuid"
       ]
     },
     "nullable": [
@@ -167,11 +151,12 @@
       null,
       false,
       false,
+      false,
       true,
       true,
       false,
       false
     ]
   },
-  "hash": "301c5cc42616f13ba0d54af37be20413d49965bc8714d85b1f85400ae8a2967a"
+  "hash": "fccd4c291ed6784f514547c4b5d5de13f8f0ecd754ecff6b72386a40f53e755c"
 }

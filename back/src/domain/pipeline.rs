@@ -265,6 +265,7 @@ mod tests {
             requires: requires.iter().map(|s| s.to_string()).collect(),
             excludes: excludes.iter().map(|s| s.to_string()).collect(),
             enabled: true,
+            position: 0,
             last_invalidated_at: dt("2024-01-01 00:00:00"),
             last_error_at: None,
             last_error_msg: None,

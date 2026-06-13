@@ -301,6 +301,9 @@ CREATE TABLE tagging_services
     -- Status
     enabled      BOOLEAN      NOT NULL DEFAULT TRUE,
 
+    -- Execution order within Rule/Segmentation services (SharedTagMapping always runs first).
+    position INT NOT NULL DEFAULT 0,
+
     -- Pipeline tracking: bumped on any configuration change; pictures with
     -- last_pipeline_run_at < last_invalidated_at are considered dirty.
     last_invalidated_at TIMESTAMP NOT NULL DEFAULT (now() at time zone 'utc'),

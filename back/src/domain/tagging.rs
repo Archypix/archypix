@@ -31,6 +31,8 @@ pub struct TaggingService {
     /// Tags where ANY present will suppress this service (ltree[] as text[]).
     pub excludes: Vec<String>,
     pub enabled: bool,
+    /// Execution order within Rule/Segmentation services (SharedTagMapping always runs first).
+    pub position: i32,
     /// Bumped on every configuration change. Pictures with `last_pipeline_run_at` older
     /// than this value are considered dirty and will be re-evaluated.
     pub last_invalidated_at: NaiveDateTime,

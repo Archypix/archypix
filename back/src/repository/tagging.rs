@@ -21,15 +21,12 @@ impl TaggingServiceRepository {
             r#"SELECT id, owner_id,
                       service_type as "service_type: ServiceType",
                       requires::text[] as "requires!", excludes::text[] as "excludes!",
-                      enabled, last_invalidated_at, last_error_at, last_error_msg,
+                      enabled, position, last_invalidated_at, last_error_at, last_error_msg,
                       created_at, updated_at
                FROM tagging_services
                WHERE owner_id = $1
-               ORDER BY CASE service_type
-                   WHEN 'shared_tag_mapping' THEN 1
-                   WHEN 'rule' THEN 2
-                   WHEN 'segmentation' THEN 3
-               END, created_at"#,
+               ORDER BY CASE WHEN service_type = 'shared_tag_mapping' THEN 0 ELSE 1 END,
+                        position, created_at"#,
             owner_id,
         )
         .fetch_all(ex)
@@ -38,6 +35,8 @@ impl TaggingServiceRepository {
     }
 
     /// Like `list_by_owner` but returns only enabled services (used by the pipeline loop).
+    ///
+    /// Order: SharedTagMapping always first, then Rule and Segmentation interleaved by `position`.
     pub async fn list_enabled_by_owner<'e, E>(
         ex: E,
         owner_id: Uuid,
@@ -50,15 +49,12 @@ impl TaggingServiceRepository {
             r#"SELECT id, owner_id,
                       service_type as "service_type: ServiceType",
                       requires::text[] as "requires!", excludes::text[] as "excludes!",
-                      enabled, last_invalidated_at, last_error_at, last_error_msg,
+                      enabled, position, last_invalidated_at, last_error_at, last_error_msg,
                       created_at, updated_at
                FROM tagging_services
                WHERE owner_id = $1 AND enabled = true
-               ORDER BY CASE service_type
-                   WHEN 'shared_tag_mapping' THEN 1
-                   WHEN 'rule' THEN 2
-                   WHEN 'segmentation' THEN 3
-               END, created_at"#,
+               ORDER BY CASE WHEN service_type = 'shared_tag_mapping' THEN 0 ELSE 1 END,
+                        position, created_at"#,
             owner_id,
         )
         .fetch_all(ex)
@@ -79,7 +75,7 @@ impl TaggingServiceRepository {
             r#"SELECT id, owner_id,
                       service_type as "service_type: ServiceType",
                       requires::text[] as "requires!", excludes::text[] as "excludes!",
-                      enabled, last_invalidated_at, last_error_at, last_error_msg,
+                      enabled, position, last_invalidated_at, last_error_at, last_error_msg,
                       created_at, updated_at
                FROM tagging_services
                WHERE id = $1 AND owner_id = $2"#,
@@ -124,12 +120,13 @@ impl TaggingServiceRepository {
     {
         sqlx::query_as!(
             TaggingService,
-            r#"INSERT INTO tagging_services (owner_id, service_type, requires, excludes)
-               VALUES ($1, $2, $3::ltree[], $4::ltree[])
+            r#"INSERT INTO tagging_services (owner_id, service_type, requires, excludes, position)
+               VALUES ($1, $2, $3::ltree[], $4::ltree[],
+                       COALESCE((SELECT MAX(position) FROM tagging_services WHERE owner_id = $1), -1) + 1)
                RETURNING id, owner_id,
                          service_type as "service_type: ServiceType",
                          requires::text[] as "requires!", excludes::text[] as "excludes!",
-                         enabled, last_invalidated_at, last_error_at, last_error_msg,
+                         enabled, position, last_invalidated_at, last_error_at, last_error_msg,
                          created_at, updated_at"#,
             owner_id,
             service_type as ServiceType,
@@ -164,7 +161,7 @@ impl TaggingServiceRepository {
                RETURNING id, owner_id,
                          service_type as "service_type: ServiceType",
                          requires::text[] as "requires!", excludes::text[] as "excludes!",
-                         enabled, last_invalidated_at, last_error_at, last_error_msg,
+                         enabled, position, last_invalidated_at, last_error_at, last_error_msg,
                          created_at, updated_at"#,
             service_id,
             owner_id,
@@ -244,6 +241,49 @@ impl TaggingServiceRepository {
         .await
         .map_err(map_sqlx_error)?;
         Ok(result.rows_affected() > 0)
+    }
+
+    /// Atomically reassign positions for Rule and Segmentation services.
+    ///
+    /// `ordered_ids` is the complete desired order — each ID gets `position = its index`.
+    /// Returns an error if any ID does not belong to `owner_id` or is a `SharedTagMapping`.
+    pub async fn reorder_services<'e, E>(
+        ex: E,
+        owner_id: Uuid,
+        ordered_ids: &[Uuid],
+    ) -> Result<(), AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        if ordered_ids.is_empty() {
+            return Ok(());
+        }
+        let positions: Vec<i32> = (0..ordered_ids.len() as i32).collect();
+        let updated = sqlx::query_scalar!(
+            r#"UPDATE tagging_services ts
+               SET position = ord.pos
+               FROM (
+                   SELECT unnest($1::uuid[]) AS id,
+                          unnest($3::int[])  AS pos
+               ) AS ord
+               WHERE ts.id = ord.id
+                 AND ts.owner_id = $2
+                 AND ts.service_type <> 'shared_tag_mapping'::service_type
+               RETURNING ts.id"#,
+            ordered_ids as &[Uuid],
+            owner_id,
+            &positions as &[i32],
+        )
+        .fetch_all(ex)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        if updated.len() != ordered_ids.len() {
+            return Err(AppError::BadRequest(
+                "one or more service IDs not found, not owned by you, or are SharedTagMapping services".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
