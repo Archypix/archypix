@@ -102,6 +102,31 @@ pub fn make_federation(config: &Config) -> (FederationClient, Arc<InMemoryCache>
     (fed, cache)
 }
 
+/// Build a `TaskQueue` (with its runner spawned) and a shared pipeline `Notify` for tests that
+/// exercise share announce/unannounce delivery. The runner executes same-backend tasks against
+/// the DB; cross-instance tasks attempt HTTP and fail harmlessly (errors are logged).
+pub fn test_task_queue(
+    db: &PgPool,
+    config: &Config,
+) -> (tasks::TaskQueue, Arc<tokio::sync::Notify>) {
+    let (fed, _cache) = make_federation(config);
+    test_task_queue_with_federation(db, config, fed)
+}
+
+/// Like [`test_task_queue`] but uses the supplied `FederationClient` — pass one that shares a
+/// server's cache (e.g. from `federation::make_client`) so cross-instance announce/unannounce
+/// delivery can resolve the remote backend and reuse granted tokens.
+pub fn test_task_queue_with_federation(
+    db: &PgPool,
+    config: &Config,
+    federation: FederationClient,
+) -> (tasks::TaskQueue, Arc<tokio::sync::Notify>) {
+    let notify = Arc::new(tokio::sync::Notify::new());
+    let (queue, runner) = tasks::create(db.clone(), federation, config.clone(), notify.clone(), 1);
+    tokio::spawn(runner);
+    (queue, notify)
+}
+
 // ── Full AppState helper ──────────────────────────────────────────────────────
 
 /// Build a test `AppState` with an externally supplied `cache`.
@@ -123,7 +148,16 @@ pub fn test_app_state_with_cache(db: PgPool, config: &Config, cache: Arc<dyn Cac
     );
     let resolver = ResolverClient::new(reqwest::Client::new(), config.clone(), resolver_jwt);
 
-    let (task_queue, _runner) = tasks::create(db.clone(), 1);
+    let pipeline_notify = Arc::new(tokio::sync::Notify::new());
+    let (task_queue, runner) = tasks::create(
+        db.clone(),
+        federation.clone(),
+        config.clone(),
+        pipeline_notify.clone(),
+        1,
+    );
+    // Run the task runner so same-backend / cross-instance announce-unannounce tasks execute.
+    tokio::spawn(runner);
 
     AppState::new(
         config.clone(),
@@ -135,7 +169,7 @@ pub fn test_app_state_with_cache(db: PgPool, config: &Config, cache: Arc<dyn Cac
         federation,
         resolver,
         task_queue,
-        Arc::new(tokio::sync::Notify::new()),
+        pipeline_notify,
     )
 }
 

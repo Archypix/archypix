@@ -1,5 +1,4 @@
 mod handlers;
-mod models;
 
 use crate::state::AppState;
 use axum::Router;
@@ -14,5 +13,6 @@ pub fn routes() -> Router<AppState> {
         .route("/shares/reject", post(handlers::reject_share))
         .route("/shares/revoke", post(handlers::revoke_share))
         .route("/pictures/announce", post(handlers::announce_pictures))
-        .route("/pictures/presign", post(handlers::presign_picture))
+        .route("/pictures/unannounce", post(handlers::unannounce_pictures))
+        .route("/pictures/presign", post(handlers::presign_pictures))
 }

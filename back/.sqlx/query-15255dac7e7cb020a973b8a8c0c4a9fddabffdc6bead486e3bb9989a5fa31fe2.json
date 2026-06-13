@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, owner_id, tag_path::text as \"tag_path!\",\n                      recipient_username, recipient_instance,\n                      allow_share_back, future,\n                      status as \"status: ShareStatus\",\n                      share_token, created_at, revoked_at\n               FROM outgoing_shares WHERE id = $1",
+  "query": "INSERT INTO outgoing_shares\n                   (owner_id, tag_path, recipient_username, recipient_instance, allow_share_back, future)\n               VALUES ($1, $2::text::ltree, $3, $4, $5, $6)\n               RETURNING id, owner_id, tag_path::text as \"tag_path!\",\n                         recipient_username, recipient_instance,\n                         allow_share_back, future,\n                         status as \"status: ShareStatus\",\n                         created_at, revoked_at",
   "describe": {
     "columns": [
       {
@@ -84,6 +84,7 @@
             "kind": {
               "Enum": [
                 "pending",
+                "pending_first_announcement",
                 "active",
                 "revoked",
                 "tombstoned"
@@ -100,17 +101,6 @@
       },
       {
         "ordinal": 8,
-        "name": "share_token",
-        "type_info": "Uuid",
-        "origin": {
-          "Table": {
-            "table": "outgoing_shares",
-            "name": "share_token"
-          }
-        }
-      },
-      {
-        "ordinal": 9,
         "name": "created_at",
         "type_info": "Timestamp",
         "origin": {
@@ -121,7 +111,7 @@
         }
       },
       {
-        "ordinal": 10,
+        "ordinal": 9,
         "name": "revoked_at",
         "type_info": "Timestamp",
         "origin": {
@@ -134,7 +124,12 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid"
+        "Uuid",
+        "Text",
+        "Varchar",
+        "Varchar",
+        "Bool",
+        "Bool"
       ]
     },
     "nullable": [
@@ -147,9 +142,8 @@
       false,
       false,
       false,
-      false,
       true
     ]
   },
-  "hash": "b8e47717036b8f395e14d95c9435f37dbf907c766e7c945602dd2f132c1ffae4"
+  "hash": "15255dac7e7cb020a973b8a8c0c4a9fddabffdc6bead486e3bb9989a5fa31fe2"
 }

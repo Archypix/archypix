@@ -1,8 +1,8 @@
 use super::FederationClient;
+use crate::clients::federation::models::{FederationAuthGrant, FederationAuthRequest};
 use crate::domain::auth::TokenType;
 use crate::infra::error::AppError;
 use crate::infra::redis::RedisKey;
-use serde::Serialize;
 use std::time::Duration;
 use tokio::time::{sleep, timeout};
 use tracing::{debug, trace, warn};
@@ -11,6 +11,7 @@ use uuid::Uuid;
 impl FederationClient {
     /// Request a federation token from the remote instance, if not already cached.
     /// Returns `Some(token)` on cache hit, `None` when the async grant is still in flight.
+    /// `sender_username` is required so the backend B can resolve back the backend domain of A
     pub async fn ensure_federation_token(
         &self,
         sender_username: &str,
@@ -42,7 +43,7 @@ impl FederationClient {
         let request_url = format!("{}/api/federation/auth/request", backend_base_url);
         self.http
             .post(&request_url)
-            .json(&FederationTokenRequest {
+            .json(&FederationAuthRequest {
                 requester_instance: self.config.global_domain.clone(),
                 username: sender_username.to_string(),
                 scope: "federation".to_string(),
@@ -149,7 +150,7 @@ impl FederationClient {
         &self,
         username: &str,
         requester_global_domain: &str,
-        grant: &super::FederationAuthGrant,
+        grant: &FederationAuthGrant,
     ) -> Result<(), AppError> {
         let backend_base_url = self
             .resolve_backend_url(username, requester_global_domain)
@@ -179,14 +180,4 @@ impl FederationClient {
         }
         Ok(())
     }
-}
-
-// ── Internal types ────────────────────────────────────────────────────────────
-
-#[derive(Serialize)]
-struct FederationTokenRequest {
-    requester_instance: String,
-    username: String,
-    scope: String,
-    nonce: String,
 }

@@ -23,8 +23,6 @@ pub enum RedisKey<'a> {
     FederationToken(&'a str),
     /// Cached backend domain for `username@global_domain`.
     FederationBackend(&'a str, &'a str),
-    /// Cached `origin_share_token` for an active incoming share from `sender@instance` to `user_id`.
-    IncomingShareToken(Uuid, &'a str, &'a str),
     /// Cached local user UUID for a given username.
     UserByUsername(&'a str),
 }
@@ -36,9 +34,6 @@ impl<'a> RedisKey<'a> {
             Self::PictureUrl(id, variant) => format!("presign:{id}:{variant}"),
             Self::FederationToken(domain) => format!("federation:token:{domain}"),
             Self::FederationBackend(u, d) => format!("federation:backend:{u}@{d}"),
-            Self::IncomingShareToken(uid, sender, instance) => {
-                format!("share:token:{uid}:{sender}@{instance}")
-            }
             Self::UserByUsername(username) => format!("user:username:{username}"),
         }
     }

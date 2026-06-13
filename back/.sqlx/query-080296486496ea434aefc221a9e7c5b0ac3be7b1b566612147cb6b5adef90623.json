@@ -12,6 +12,7 @@
             "kind": {
               "Enum": [
                 "pending",
+                "pending_first_announcement",
                 "active",
                 "revoked",
                 "tombstoned"

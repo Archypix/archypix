@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM tags\n               WHERE source = 'incoming_share'::tag_source\n                 AND source_id = $1\n                 AND picture_id = ANY($2::uuid[])\n               RETURNING picture_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "picture_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "tags",
+            "name": "picture_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6c5754fce63c955b59a38f1edd87a03250dbae2e8d133866fb81fd9a70d938d2"
+}

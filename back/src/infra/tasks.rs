@@ -1,9 +1,4 @@
-//! In-process background task queue for lightweight DB-only jobs.
-//!
-//! Heavy compute tasks (thumbnail generation, ML inference) run in external
-//! worker processes via the `/api/worker/*` endpoints. This queue handles
-//! tasks that need direct database access and are not worth externalising:
-//! - Tag-rename cascades (updates every affected row in the `tags` table)
+//! In-process background task queue for lightweight DB-only and federation-delivery jobs.
 //!
 //! The tagging pipeline runs as a separate loop (`infra::pipeline`) with a
 //! `Notify`-based wake model and configurable recovery polling interval.
@@ -13,21 +8,47 @@
 //! A semaphore caps concurrency. Each task is spawned as a Tokio task
 //! and holds a permit for its duration.
 
+use crate::clients::federation::FederationClient;
+use crate::clients::federation::models::AnnouncedPicture;
+use crate::domain::picture::Picture;
+use crate::infra::config::Config;
+use chrono::NaiveDateTime;
 use sqlx::PgPool;
 use std::sync::Arc;
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{Notify, Semaphore, mpsc};
 use uuid::Uuid;
 
-// ── Task definitions ──────────────────────────────────────────────────────────
-
-/// Variants of work that can be submitted to the in-process task queue.
 #[derive(Debug)]
 pub enum InternalTask {
-    /// Cascade a tag rename across tags, shares, segmentation configs, and hierarchies.
+    /// Tag rename across tags, shares, segmentation configs, and hierarchies.
     TagRename {
         user_id: Uuid,
         old_tag: String,
         new_tag: String,
+    },
+
+    /// Announce (or re-announce) pictures to a share recipient.
+    /// Used both for new coverage and for token refresh.
+    AnnounceSharedPictures {
+        outgoing_share_id: Uuid,
+        sender_username: String,
+        recipient_username: String,
+        recipient_instance: String,
+        /// Sender's shared tag path (ltree); recipient builds `SharedToMe.<sender>.<tag_path>`.
+        tag_path: String,
+        pictures: Vec<AnnouncedPicture>,
+        is_same_backend: bool,
+    },
+
+    /// Unannounce specific pictures from a share recipient.
+    UnannounceSharedPictures {
+        outgoing_share_id: Uuid,
+        sender_username: String,
+        recipient_username: String,
+        recipient_instance: String,
+        /// Announce ids (recipient's `remote_picture_id`) of the pictures to remove.
+        picture_ids: Vec<String>,
+        is_same_backend: bool,
     },
 }
 
@@ -52,21 +73,20 @@ impl TaskQueue {
 
 // ── Queue constructor ─────────────────────────────────────────────────────────
 
-/// Create a `(TaskQueue, runner_future)` pair.
-///
-/// Spawn `runner_future` with `tokio::spawn` immediately after creation so that
-/// submitted tasks are actually executed. The runner runs until the `TaskQueue`
-/// (and all its clones) are dropped.
-///
-/// * `db` — a shared Postgres pool passed to each task handler.
-/// * `concurrency` — maximum number of tasks running in parallel.
+/// Returns a future that runs forever (until the process exits). Spawn it with `tokio::spawn`.
 pub fn create(
     db: PgPool,
+    federation: FederationClient,
+    config: Config,
+    pipeline_notify: Arc<Notify>,
     concurrency: usize,
-) -> (TaskQueue, impl std::future::Future<Output = ()>) {
+) -> (TaskQueue, impl Future<Output = ()>) {
     let (tx, rx) = mpsc::unbounded_channel::<InternalTask>();
     let runner = TaskRunner {
         db,
+        federation,
+        config,
+        pipeline_notify,
         rx,
         sem: Arc::new(Semaphore::new(concurrency)),
     };
@@ -77,6 +97,9 @@ pub fn create(
 
 struct TaskRunner {
     db: PgPool,
+    federation: FederationClient,
+    config: Config,
+    pipeline_notify: Arc<Notify>,
     rx: mpsc::UnboundedReceiver<InternalTask>,
     sem: Arc<Semaphore>,
 }
@@ -92,8 +115,11 @@ impl TaskRunner {
                 .await
                 .expect("semaphore closed");
             let db = self.db.clone();
+            let federation = self.federation.clone();
+            let config = self.config.clone();
+            let notify = self.pipeline_notify.clone();
             tokio::spawn(async move {
-                execute_task(db, task).await;
+                execute_task(db, federation, config, notify, task).await;
                 drop(permit);
             });
         }
@@ -101,7 +127,13 @@ impl TaskRunner {
     }
 }
 
-async fn execute_task(db: PgPool, task: InternalTask) {
+async fn execute_task(
+    db: PgPool,
+    federation: FederationClient,
+    config: Config,
+    notify: Arc<Notify>,
+    task: InternalTask,
+) {
     match task {
         InternalTask::TagRename {
             user_id,
@@ -114,61 +146,35 @@ async fn execute_task(db: PgPool, task: InternalTask) {
                 new_tag = %new_tag,
                 "in-process task: tag rename"
             );
-            if let Err(e) = run_tag_rename(&db, user_id, old_tag, new_tag).await {
-                tracing::error!(
-                    user_id = %user_id,
-                    old_tag = %old_tag,
-                    new_tag = %new_tag,
-                    error = ?e,
-                    "tag rename task failed"
-                );
+            todo!(
+                "implement tag rename across tags, shares, segmentation configs, hierarchies, ..."
+            );
+        }
+        InternalTask::AnnounceSharedPictures { .. } => {
+            if let Err(e) = crate::services::shares::deliver_announce_task(
+                &db,
+                &federation,
+                &config,
+                &notify,
+                task,
+            )
+            .await
+            {
+                tracing::error!(error = ?e, "announce task failed");
+            }
+        }
+        InternalTask::UnannounceSharedPictures { .. } => {
+            if let Err(e) = crate::services::shares::deliver_unannounce_task(
+                &db,
+                &federation,
+                &config,
+                &notify,
+                task,
+            )
+            .await
+            {
+                tracing::error!(error = ?e, "unannounce task failed");
             }
         }
     }
-}
-
-// ── Tag rename implementation ─────────────────────────────────────────────────
-
-/// Cascade a tag rename across all affected rows in the database.
-///
-/// This is intentionally a best-effort transactional update: if any step fails
-/// the error is logged and partial state may remain, which the UI surfaces to
-/// the user so they can retry.
-async fn run_tag_rename(
-    db: &PgPool,
-    user_id: Uuid,
-    old_tag: &str,
-    new_tag: &str,
-) -> Result<(), sqlx::Error> {
-    // Replace old_tag prefix with new_tag in all tags rows owned by this user.
-    // Using text replace on the ltree path for prefix substitution.
-    // Update every tag that is exactly old_tag or is a descendant (old_tag.foo.bar …).
-    // We keep $2/$3 as text throughout to avoid Postgres type-inference conflicts between
-    // replace() (needs text) and the ltree operators (needs ltree).
-    sqlx::query!(
-        r#"
-        UPDATE tags
-        SET tag_path = (replace(tags.tag_path::text, $2, $3))::ltree
-        FROM pictures p
-        WHERE tags.picture_id = p.id
-          AND p.local_user_id  = $1
-          AND (
-              tags.tag_path::text = $2
-              OR starts_with(tags.tag_path::text, $2 || '.')
-          )
-        "#,
-        user_id,
-        old_tag,
-        new_tag,
-    )
-    .execute(db)
-    .await?;
-
-    tracing::info!(
-        user_id = %user_id,
-        old_tag = %old_tag,
-        new_tag = %new_tag,
-        "tag rename cascade complete"
-    );
-    Ok(())
 }

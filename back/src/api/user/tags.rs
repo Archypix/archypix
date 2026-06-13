@@ -5,23 +5,23 @@ use crate::repository::pipeline::PipelineRepository;
 use crate::repository::tag::TagRepository;
 use crate::services;
 use crate::state::AppState;
-
-fn parse_tag_paths(paths: &[String]) -> Result<Vec<String>, AppError> {
-    paths
-        .iter()
-        .map(|p| {
-            TagPath::parse(p)
-                .map(|t| t.as_ltree().to_string())
-                .map_err(AppError::BadRequest)
-        })
-        .collect()
-}
 use axum::Json;
 use axum::extract::{Query, State};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use tracing::debug;
 use uuid::Uuid;
+
+fn parse_tag_paths(paths: &[String]) -> Result<Vec<String>, AppError> {
+    paths
+        .iter()
+        .map(|p| {
+            TagPath::parse(p, false)
+                .map(|t| t.as_ltree().to_string())
+                .map_err(AppError::BadRequest)
+        })
+        .collect()
+}
 
 #[derive(Debug, Deserialize)]
 pub struct ListTagsQuery {

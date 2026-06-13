@@ -27,6 +27,8 @@ pub struct ShareResponse {
     pub recipient_username: String,
     pub recipient_instance: String,
     pub status: ShareStatus,
+    pub allow_share_back: bool,
+    pub future: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -36,6 +38,8 @@ pub struct IncomingShareResponse {
     pub sender_instance: String,
     pub outgoing_share_id: uuid::Uuid,
     pub status: ShareStatus,
+    pub allow_share_back: bool,
+    pub local_mapping_service_id: Option<uuid::Uuid>,
 }
 
 pub async fn create_outgoing(
@@ -50,12 +54,13 @@ pub async fn create_outgoing(
         recipient = %payload.recipient_username,
         "create_outgoing_share"
     );
-    let tag_path = TagPath::parse(&payload.tag_path).map_err(AppError::BadRequest)?;
+    let tag_path = TagPath::parse(&payload.tag_path, true).map_err(AppError::BadRequest)?;
     let share = services::shares::create_outgoing_share(
         &state.db,
         state.cache.as_ref(),
         &state.federation,
         &state.config,
+        &state.pipeline_notify,
         auth.user_id()?,
         &auth.claims.sub,
         tag_path.as_ltree(),
@@ -72,6 +77,8 @@ pub async fn create_outgoing(
         recipient_username: share.recipient_username,
         recipient_instance: share.recipient_instance,
         status: share.status,
+        allow_share_back: share.allow_share_back,
+        future: share.future,
     }))
 }
 
@@ -90,6 +97,8 @@ pub async fn list_outgoing(
                 recipient_username: s.recipient_username,
                 recipient_instance: s.recipient_instance,
                 status: s.status,
+                allow_share_back: s.allow_share_back,
+                future: s.future,
             })
             .collect(),
     ))
@@ -110,6 +119,8 @@ pub async fn list_incoming(
                 sender_instance: s.sender_instance,
                 outgoing_share_id: s.outgoing_share_id,
                 status: s.status,
+                allow_share_back: s.allow_share_back,
+                local_mapping_service_id: s.local_mapping_service_id,
             })
             .collect(),
     ))
@@ -121,20 +132,20 @@ pub async fn accept_incoming(
     Path(share_id): Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     debug!(user = %auth.claims.sub, token_type = auth.token_type(), share_id = %share_id, "accept_incoming_share");
-    let registered = services::shares::accept_incoming_share(
+    services::shares::accept_incoming_share(
         &state.db,
         state.cache.as_ref(),
         &state.federation,
         &state.config,
+        &state.pipeline_notify,
         auth.user_id()?,
         &auth.claims.sub,
         share_id,
     )
     .await?;
-    // For federation shares, pictures arrive later via announce_pictures → pipeline woken there.
-    Ok(Json(
-        serde_json::json!({ "accepted": true, "pictures_registered": registered }),
-    ))
+    // Pictures are announced asynchronously: the sender's OutgoingShare moves to
+    // `pending_first_announcement` and the pipeline announces + activates it.
+    Ok(Json(serde_json::json!({ "accepted": true })))
 }
 
 pub async fn revoke_outgoing(
@@ -148,6 +159,8 @@ pub async fn revoke_outgoing(
         state.cache.as_ref(),
         &state.federation,
         &state.config,
+        &state.task_queue,
+        &state.pipeline_notify,
         auth.user_id()?,
         &auth.claims.sub,
         share_id,
@@ -167,6 +180,8 @@ pub async fn reject_incoming(
         state.cache.as_ref(),
         &state.federation,
         &state.config,
+        &state.task_queue,
+        &state.pipeline_notify,
         auth.user_id()?,
         &auth.claims.sub,
         share_id,

@@ -1,14 +1,14 @@
 use crate::clients::federation::FederationClient;
 use crate::domain::picture::{Picture, PictureVersion, UploadSession};
 use crate::infra::config::Config;
-use crate::infra::error::AppError;
+use crate::infra::error::{AppError, map_sqlx_error};
 use crate::infra::redis::{Cache, RedisKey, cache_get_json, cache_set_json_ex};
 use crate::infra::s3::{self, Storage};
 use crate::repository::picture::{
     PictureListFilter, PictureRepository, PictureSortField, SortOrder,
 };
 use crate::repository::picture_version::PictureVersionRepository;
-use crate::repository::share::IncomingShareRepository;
+use crate::repository::tag::TagRepository;
 use crate::services::users::find_local_user_id;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -114,6 +114,13 @@ pub struct PictureListItem {
     /// BlurHash string for progressive loading. `None` until the thumbnail worker runs.
     pub blurhash: Option<String>,
     pub thumbnail_url: Option<String>,
+    /// `true` when this row is a picture owned by the local user; `false` for a received
+    /// (shared) picture. Lets the client label/filter shared pictures.
+    pub owned: bool,
+    /// Original owner identity for received pictures (`@owner_username:owner_instance`); `None`
+    /// for owned pictures.
+    pub owner_username: Option<String>,
+    pub owner_instance: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -224,9 +231,7 @@ pub async fn complete_upload(
     // so no job is orphaned if the picture insert rolls back.
     crate::services::jobs::enqueue_thumbnail_job(&mut *tx, user_id, picture_id, true).await?;
 
-    tx.commit()
-        .await
-        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+    tx.commit().await.map_err(map_sqlx_error)?;
 
     // Cache cleanup is after commit — a failure here is non-fatal (session expires on its own).
     if let Err(e) = cache.del(RedisKey::UploadSession(picture_id)).await {
@@ -309,6 +314,9 @@ pub async fn list_pictures(
                 .as_ref()
                 .and_then(|m| m.get(&pic.id))
                 .cloned(),
+            owned: pic.remote_picture_id.is_none(),
+            owner_username: pic.owner_username,
+            owner_instance: pic.owner_instance_domain,
         })
         .collect();
 
@@ -333,7 +341,7 @@ async fn presign_for_picture_list(
     storage: &dyn Storage,
     config: &Config,
     federation: &FederationClient,
-    local_user_id: Uuid,
+    _local_user_id: Uuid,
     pictures: &[Picture],
     variant: PictureVariant,
 ) -> Result<HashMap<Uuid, String>, AppError> {
@@ -416,45 +424,34 @@ async fn presign_for_picture_list(
         urls.insert(pic.id, url);
     }
 
-    // Step 5: batch-presign cross-instance pictures — one HTTP call per remote owner backend
+    // Step 5: batch-presign cross-instance pictures — one HTTP call per remote owner backend.
+    // Each picture is authorised by its own per-picture token (stored on its incoming_share tag).
     for ((owner_username, owner_instance), pics) in &cross_instance_groups {
-        let share_token = cached_share_token(
-            cache,
-            db,
-            config,
-            local_user_id,
-            owner_username,
-            owner_instance,
-        )
-        .await?
-        .ok_or_else(|| {
-            AppError::Unauthorized(format!(
-                "No active incoming share token for {owner_username}@{owner_instance}"
-            ))
-        })?;
-
-        let batch: Vec<(Uuid, &str)> = pics
-            .iter()
-            .filter_map(|p| {
-                let id = p.remote_picture_id.as_deref()?.parse::<Uuid>().ok()?;
-                Some((id, variant.as_str()))
-            })
-            .collect();
+        // Resolve the per-picture token for each picture; skip any without an active token.
+        let mut token_to_pic: HashMap<Uuid, &Picture> = HashMap::new();
+        let mut batch: Vec<(Uuid, &str)> = Vec::new();
+        for pic in pics {
+            if let Some(token) = TagRepository::find_active_picture_token(db, pic.id).await? {
+                token_to_pic.insert(token, pic);
+                batch.push((token, variant.as_str()));
+            }
+        }
+        if batch.is_empty() {
+            continue;
+        }
 
         let remote_urls = federation
-            .presign_remote_pictures(owner_username, owner_instance, &batch, share_token)
+            .presign_remote_pictures(owner_username, owner_instance, &batch)
             .await?;
 
-        for pic in pics {
-            if let Some(remote_id_str) = pic.remote_picture_id.as_deref() {
-                if let Some(url) = remote_urls.get(remote_id_str) {
-                    if ttl > 0 {
-                        let _ = cache
-                            .set_str_ex(RedisKey::PictureUrl(pic.id, variant.as_str()), url, ttl)
-                            .await;
-                    }
-                    urls.insert(pic.id, url.clone());
+        for (token, url) in remote_urls {
+            if let Some(pic) = token_to_pic.get(&token) {
+                if ttl > 0 {
+                    let _ = cache
+                        .set_str_ex(RedisKey::PictureUrl(pic.id, variant.as_str()), &url, ttl)
+                        .await;
                 }
+                urls.insert(pic.id, url);
             }
         }
     }
@@ -462,23 +459,25 @@ async fn presign_for_picture_list(
     Ok(urls)
 }
 
-/// Resolve the presigned URL for a single picture at the given variant.
-///
-/// Checks the cache first. On miss: owned picture → local S3; received picture →
-/// look up owner in local DB (same-backend share) or call the owner's backend via share_token
-/// (cross-instance). Result is cached under the same key regardless of path taken.
-///
-/// Used for single-picture endpoints (e.g. `GET /pictures/{id}/url`).
-async fn presign_for_picture(
+pub async fn presign_picture_variant(
     db: &PgPool,
     cache: &dyn Cache,
     storage: &dyn Storage,
     config: &Config,
     federation: &FederationClient,
     local_user_id: Uuid,
-    pic: &Picture,
+    picture_id: Uuid,
     variant: PictureVariant,
 ) -> Result<String, AppError> {
+    trace!(user_id = %local_user_id, picture_id = %picture_id, variant = ?variant, "pictures: presign_variant");
+    let pic = PictureRepository::find_by_id(db, picture_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    if pic.local_user_id != local_user_id {
+        return Err(AppError::NotFound);
+    }
+
     // Single cache check for all picture types (owned, same-backend share, cross-instance share).
     if let Some(cached) = cache
         .get_str(RedisKey::PictureUrl(pic.id, variant.as_str()))
@@ -512,30 +511,30 @@ async fn presign_for_picture(
             let key = s3::picture_key(owner_id, remote_id);
             storage.presign_get(variant.bucket(config), &key).await?
         } else {
-            // Owner is on a different backend — authorise via share_token and call remote.
-            let share_token = cached_share_token(
-                cache,
-                db,
-                config,
-                local_user_id,
-                owner_username,
-                owner_instance,
-            )
-            .await?
-            .ok_or_else(|| {
-                AppError::Unauthorized(format!(
-                    "No active incoming share token for {owner_username}@{owner_instance}"
-                ))
-            })?;
+            // Owner is on a different backend — authorise via the picture's own token and call remote.
+            let picture_token = TagRepository::find_active_picture_token(db, pic.id)
+                .await?
+                .ok_or_else(|| {
+                    AppError::Unauthorized(format!(
+                        "No active presign token for picture {}",
+                        pic.id
+                    ))
+                })?;
             federation
-                .presign_remote_picture(
+                .presign_remote_pictures(
                     owner_username,
                     owner_instance,
-                    remote_id,
-                    variant.as_str(),
-                    share_token,
+                    &[(picture_token, variant.as_str())],
                 )
-                .await?
+                .await
+                .map(|mut urls| {
+                    urls.remove(&picture_token).ok_or_else(|| {
+                        AppError::InternalServerError(format!(
+                            "Remote backend did not return presigned URL for picture {}",
+                            pic.id
+                        ))
+                    })
+                })??
         }
     };
 
@@ -548,69 +547,4 @@ async fn presign_for_picture(
             .await?;
     }
     Ok(url)
-}
-
-/// Cache-aside lookup for the `origin_share_token` of an active incoming share
-/// from `sender_username@sender_instance` held by `local_user_id`.
-///
-/// Returns `None` when no active share token exists (caller decides whether that is
-/// an error).
-async fn cached_share_token(
-    cache: &dyn Cache,
-    db: &PgPool,
-    config: &Config,
-    local_user_id: Uuid,
-    sender_username: &str,
-    sender_instance: &str,
-) -> Result<Option<Uuid>, AppError> {
-    let key = RedisKey::IncomingShareToken(local_user_id, sender_username, sender_instance);
-
-    if let Some(tok_str) = cache.get_str(key).await.ok().flatten() {
-        return Ok(tok_str.parse::<Uuid>().ok());
-    }
-
-    let token = IncomingShareRepository::find_token_by_sender(
-        db,
-        local_user_id,
-        sender_username,
-        sender_instance,
-    )
-    .await?;
-
-    if let Some(tok) = token {
-        let _ = cache
-            .set_str_ex(
-                key,
-                &tok.to_string(),
-                config.federation_backend_cache_ttl_secs,
-            )
-            .await;
-    }
-
-    Ok(token)
-}
-
-pub async fn presign_picture_variant(
-    db: &PgPool,
-    cache: &dyn Cache,
-    storage: &dyn Storage,
-    config: &Config,
-    federation: &FederationClient,
-    user_id: Uuid,
-    picture_id: Uuid,
-    variant: PictureVariant,
-) -> Result<String, AppError> {
-    trace!(user_id = %user_id, picture_id = %picture_id, variant = ?variant, "pictures: presign_variant");
-    let picture = PictureRepository::find_by_id(db, picture_id)
-        .await?
-        .ok_or(AppError::NotFound)?;
-
-    if picture.local_user_id != user_id {
-        return Err(AppError::NotFound);
-    }
-
-    presign_for_picture(
-        db, cache, storage, config, federation, user_id, &picture, variant,
-    )
-    .await
 }

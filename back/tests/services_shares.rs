@@ -1,10 +1,13 @@
 mod common;
 
+use archypix_back::clients::federation::models::AnnouncedPicture;
 use archypix_back::domain::share::ShareStatus;
 use archypix_back::infra::config::Config;
+use archypix_back::infra::pipeline;
 use archypix_back::repository::share::{IncomingShareRepository, OutgoingShareRepository};
 use archypix_back::services::shares;
 use sqlx::PgPool;
+use std::time::Duration;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
@@ -12,6 +15,38 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 fn config() -> Config {
     Config::test_defaults()
+}
+
+/// Accept a same-backend incoming share, then drive the sender's pipeline so its pictures are
+/// announced (the initial announce is pipeline-driven: accept moves the OutgoingShare to
+/// `pending_first_announcement`, the pipeline announces its coverage and flips it to `active`,
+/// and the spawned task runner registers the received pictures).
+async fn accept_and_announce(
+    db: &PgPool,
+    config: &Config,
+    acceptor_id: uuid::Uuid,
+    acceptor_name: &str,
+    incoming_id: uuid::Uuid,
+    sender_id: uuid::Uuid,
+) {
+    let (fed, cache) = common::make_federation(config);
+    let (queue, notify) = common::test_task_queue(db, config);
+    shares::accept_incoming_share(
+        db,
+        cache.as_ref(),
+        &fed,
+        config,
+        &notify,
+        acceptor_id,
+        acceptor_name,
+        incoming_id,
+    )
+    .await
+    .unwrap();
+    pipeline::run_once_for_user(db, &queue, config, sender_id)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(250)).await;
 }
 
 /// Share Alice's `tag_path` with Bob (same backend — recipient_instance = global_domain).
@@ -22,12 +57,14 @@ async fn alice_shares_with_bob(
 ) -> archypix_back::domain::share::OutgoingShare {
     let config = config();
     let (fed, cache) = common::make_federation(&config);
+    let notify = std::sync::Arc::new(tokio::sync::Notify::new());
 
     shares::create_outgoing_share(
         db,
         cache.as_ref(),
         &fed,
         &config,
+        &notify,
         alice_id,
         "alice",
         tag_path,
@@ -82,22 +119,8 @@ async fn accept_incoming_share_registers_pictures(db: PgPool) {
         .unwrap()
         .unwrap();
 
-    let config = config();
-    let (fed, cache) = common::make_federation(&config);
+    accept_and_announce(&db, &config(), bob_id, "bob", incoming.id, alice_id).await;
 
-    let count = shares::accept_incoming_share(
-        &db,
-        cache.as_ref(),
-        &fed,
-        &config,
-        bob_id,
-        "bob",
-        incoming.id,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(count, 1, "one picture must be registered");
     assert_eq!(
         common::count_received_pictures(&db, bob_id).await,
         1,
@@ -128,12 +151,16 @@ async fn accept_incoming_share_is_idempotent(db: PgPool) {
     let config = config();
     let (fed, cache) = common::make_federation(&config);
 
-    // First accept
+    // First accept → announces the picture via the pipeline.
+    accept_and_announce(&db, &config, bob_id, "bob", incoming.id, alice_id).await;
+
+    // Second accept — must be a no-op (share already Active; no duplicate pictures).
     shares::accept_incoming_share(
         &db,
         cache.as_ref(),
         &fed,
         &config,
+        &std::sync::Arc::new(tokio::sync::Notify::new()),
         bob_id,
         "bob",
         incoming.id,
@@ -141,20 +168,6 @@ async fn accept_incoming_share_is_idempotent(db: PgPool) {
     .await
     .unwrap();
 
-    // Second accept — must be a no-op (returns 0, no duplicate pictures)
-    let second = shares::accept_incoming_share(
-        &db,
-        cache.as_ref(),
-        &fed,
-        &config,
-        bob_id,
-        "bob",
-        incoming.id,
-    )
-    .await
-    .unwrap();
-
-    assert_eq!(second, 0, "second accept must be a no-op");
     assert_eq!(
         common::count_received_pictures(&db, bob_id).await,
         1,
@@ -179,26 +192,19 @@ async fn revoke_outgoing_share_removes_shared_tags(db: PgPool) {
     let config = config();
     let (fed, cache) = common::make_federation(&config);
 
-    // Bob accepts → picture + tag appear
-    shares::accept_incoming_share(
-        &db,
-        cache.as_ref(),
-        &fed,
-        &config,
-        bob_id,
-        "bob",
-        incoming.id,
-    )
-    .await
-    .unwrap();
+    // Bob accepts → pipeline announces → picture + tag appear
+    accept_and_announce(&db, &config, bob_id, "bob", incoming.id, alice_id).await;
     assert_eq!(common::count_received_pictures(&db, bob_id).await, 1);
 
     // Alice revokes → tag removed, unreachable received picture deleted
+    let (tq, notify) = common::test_task_queue(&db, &config);
     shares::revoke_outgoing_share(
         &db,
         cache.as_ref(),
         &fed,
         &config,
+        &tq,
+        &notify,
         alice_id,
         "alice",
         share.id,
@@ -233,11 +239,14 @@ async fn revoke_outgoing_share_before_accept_leaves_no_incoming_tags(db: PgPool)
     let (fed, cache) = common::make_federation(&config);
 
     // Revoke immediately, before Bob accepts (no received pictures yet)
+    let (tq, notify) = common::test_task_queue(&db, &config);
     shares::revoke_outgoing_share(
         &db,
         cache.as_ref(),
         &fed,
         &config,
+        &tq,
+        &notify,
         alice_id,
         "alice",
         share.id,
@@ -269,11 +278,14 @@ async fn reject_incoming_share_pending_tombstones_outgoing(db: PgPool) {
     let (fed, cache) = common::make_federation(&config);
 
     // Bob rejects a pending share
+    let (tq, notify) = common::test_task_queue(&db, &config);
     shares::reject_incoming_share(
         &db,
         cache.as_ref(),
         &fed,
         &config,
+        &tq,
+        &notify,
         bob_id,
         "bob",
         incoming.id,
@@ -310,26 +322,19 @@ async fn reject_incoming_share_active_removes_tags(db: PgPool) {
     let config = config();
     let (fed, cache) = common::make_federation(&config);
 
-    // Bob accepts first
-    shares::accept_incoming_share(
-        &db,
-        cache.as_ref(),
-        &fed,
-        &config,
-        bob_id,
-        "bob",
-        incoming.id,
-    )
-    .await
-    .unwrap();
+    // Bob accepts first → pipeline announces the picture
+    accept_and_announce(&db, &config, bob_id, "bob", incoming.id, alice_id).await;
     assert_eq!(common::count_received_pictures(&db, bob_id).await, 1);
 
     // Then rejects → cleanup must run
+    let (tq, notify) = common::test_task_queue(&db, &config);
     shares::reject_incoming_share(
         &db,
         cache.as_ref(),
         &fed,
         &config,
+        &tq,
+        &notify,
         bob_id,
         "bob",
         incoming.id,
@@ -354,7 +359,7 @@ async fn reject_incoming_share_active_removes_tags(db: PgPool) {
 #[sqlx::test(migrator = "MIGRATOR")]
 async fn register_received_pictures_is_idempotent(db: PgPool) {
     use archypix_back::domain::tag::TagPath;
-    use archypix_back::services::shares::{ReceivedPictureInfo, register_received_pictures};
+    use archypix_back::services::shares::register_received_pictures;
     use uuid::Uuid;
 
     let alice_id = common::seed_user(&db, "alice", "pass").await;
@@ -367,10 +372,11 @@ async fn register_received_pictures_is_idempotent(db: PgPool) {
         .unwrap();
 
     let shared_tag = TagPath::shared_to_me("alice", "test.com", &TagPath::from_ltree("vacation"));
-    let pics = vec![ReceivedPictureInfo {
-        remote_picture_id: Uuid::new_v4().to_string(),
+    let pics = vec![AnnouncedPicture {
+        picture_id: Uuid::new_v4().to_string(),
         owner_username: "alice".to_string(),
         owner_instance_domain: "test.com".to_string(),
+        picture_token: Uuid::new_v4(),
         filename: None,
         mime_type: None,
         file_size: None,
@@ -428,6 +434,7 @@ async fn cleanup_incoming_share_deletes_unreachable_pictures_only(db: PgPool) {
 
     let config = config();
     let (fed, cache) = common::make_federation(&config);
+    let notify = std::sync::Arc::new(tokio::sync::Notify::new());
 
     // Share 2: "trip" → Bob (different tag — no unique-constraint conflict)
     let share2 = shares::create_outgoing_share(
@@ -435,6 +442,7 @@ async fn cleanup_incoming_share_deletes_unreachable_pictures_only(db: PgPool) {
         cache.as_ref(),
         &fed,
         &config,
+        &notify,
         alice_id,
         "alice",
         "trip",
@@ -451,29 +459,10 @@ async fn cleanup_incoming_share_deletes_unreachable_pictures_only(db: PgPool) {
         .unwrap()
         .unwrap();
 
-    // Bob accepts both → same received picture row, two incoming_share tags
-    shares::accept_incoming_share(
-        &db,
-        cache.as_ref(),
-        &fed,
-        &config,
-        bob_id,
-        "bob",
-        incoming1.id,
-    )
-    .await
-    .unwrap();
-    shares::accept_incoming_share(
-        &db,
-        cache.as_ref(),
-        &fed,
-        &config,
-        bob_id,
-        "bob",
-        incoming2.id,
-    )
-    .await
-    .unwrap();
+    // Bob accepts both → same received picture row, two incoming_share tags (announced by the
+    // sender's pipeline).
+    accept_and_announce(&db, &config, bob_id, "bob", incoming1.id, alice_id).await;
+    accept_and_announce(&db, &config, bob_id, "bob", incoming2.id, alice_id).await;
 
     assert_eq!(
         common::count_received_pictures(&db, bob_id).await,
@@ -482,11 +471,14 @@ async fn cleanup_incoming_share_deletes_unreachable_pictures_only(db: PgPool) {
     );
 
     // Revoke share1 → removes its incoming_share tag, but share2's tag remains
+    let (tq, notify) = common::test_task_queue(&db, &config);
     shares::revoke_outgoing_share(
         &db,
         cache.as_ref(),
         &fed,
         &config,
+        &tq,
+        &notify,
         alice_id,
         "alice",
         share1.id,

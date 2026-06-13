@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO outgoing_shares\n                   (owner_id, tag_path, recipient_username, recipient_instance, allow_share_back, future)\n               VALUES ($1, $2::text::ltree, $3, $4, $5, $6)\n               RETURNING id, owner_id, tag_path::text as \"tag_path!\",\n                         recipient_username, recipient_instance,\n                         allow_share_back, future,\n                         status as \"status: ShareStatus\",\n                         share_token, created_at, revoked_at",
+  "query": "SELECT id, owner_id, tag_path::text as \"tag_path!\",\n                      recipient_username, recipient_instance,\n                      allow_share_back, future,\n                      status as \"status: ShareStatus\",\n                      created_at, revoked_at\n               FROM outgoing_shares\n               WHERE owner_id = $1 AND status = 'active'::share_status AND future = true",
   "describe": {
     "columns": [
       {
@@ -84,6 +84,7 @@
             "kind": {
               "Enum": [
                 "pending",
+                "pending_first_announcement",
                 "active",
                 "revoked",
                 "tombstoned"
@@ -100,17 +101,6 @@
       },
       {
         "ordinal": 8,
-        "name": "share_token",
-        "type_info": "Uuid",
-        "origin": {
-          "Table": {
-            "table": "outgoing_shares",
-            "name": "share_token"
-          }
-        }
-      },
-      {
-        "ordinal": 9,
         "name": "created_at",
         "type_info": "Timestamp",
         "origin": {
@@ -121,7 +111,7 @@
         }
       },
       {
-        "ordinal": 10,
+        "ordinal": 9,
         "name": "revoked_at",
         "type_info": "Timestamp",
         "origin": {
@@ -134,12 +124,7 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Text",
-        "Varchar",
-        "Varchar",
-        "Bool",
-        "Bool"
+        "Uuid"
       ]
     },
     "nullable": [
@@ -152,9 +137,8 @@
       false,
       false,
       false,
-      false,
       true
     ]
   },
-  "hash": "a83897a0aa5ad996584d70c84be4a21909c590d92a21695d2fda2cd1914a03ec"
+  "hash": "383acf11076bf5e668d9d0c6c12488713668c57f783d87c4f131a900d926a416"
 }

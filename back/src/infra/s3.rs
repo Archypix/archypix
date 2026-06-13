@@ -1,8 +1,8 @@
 use crate::infra::config::Config;
 use crate::infra::error::AppError;
 use async_trait::async_trait;
-use aws_config::Region;
 use aws_config::meta::region::RegionProviderChain;
+use aws_config::{BehaviorVersion, Region};
 use aws_sdk_s3::Client;
 use aws_sdk_s3::config::Credentials;
 use aws_sdk_s3::presigning::PresigningConfig;
@@ -162,7 +162,7 @@ pub async fn connect(config: &Config) -> anyhow::Result<StorageClient> {
         "static",
     );
     // Build shared config without an endpoint — each client sets its own below.
-    let shared_config = aws_config::from_env()
+    let shared_config = aws_config::defaults(BehaviorVersion::v2026_01_12())
         .region(region_provider)
         .credentials_provider(credentials)
         .load()

@@ -11,6 +11,7 @@ DROP TABLE IF EXISTS segmentation_tagging_services CASCADE;
 DROP TABLE IF EXISTS rule_tagging_services CASCADE;
 DROP TABLE IF EXISTS shared_tag_mapping_services CASCADE;
 DROP TABLE IF EXISTS tagging_services CASCADE;
+DROP TABLE IF EXISTS share_announcements CASCADE;
 DROP TABLE IF EXISTS incoming_shares CASCADE;
 DROP TABLE IF EXISTS outgoing_shares CASCADE;
 DROP TABLE IF EXISTS tags CASCADE;

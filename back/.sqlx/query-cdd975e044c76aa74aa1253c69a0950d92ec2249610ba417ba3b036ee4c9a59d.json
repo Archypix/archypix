@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, owner_id, tag_path::text as \"tag_path!\",\n                      recipient_username, recipient_instance,\n                      allow_share_back, future,\n                      status as \"status: ShareStatus\",\n                      share_token, created_at, revoked_at\n               FROM outgoing_shares WHERE owner_id = $1 ORDER BY created_at DESC",
+  "query": "SELECT id, recipient_id, sender_username, sender_instance, outgoing_share_id,\n                      local_mapping_service_id,\n                      status as \"status: ShareStatus\",\n                      allow_share_back, created_at, revoked_at\n               FROM incoming_shares\n               WHERE outgoing_share_id = $1 AND sender_instance = $2",
   "describe": {
     "columns": [
       {
@@ -9,74 +9,68 @@
         "type_info": "Uuid",
         "origin": {
           "Table": {
-            "table": "outgoing_shares",
+            "table": "incoming_shares",
             "name": "id"
           }
         }
       },
       {
         "ordinal": 1,
-        "name": "owner_id",
+        "name": "recipient_id",
         "type_info": "Uuid",
         "origin": {
           "Table": {
-            "table": "outgoing_shares",
-            "name": "owner_id"
+            "table": "incoming_shares",
+            "name": "recipient_id"
           }
         }
       },
       {
         "ordinal": 2,
-        "name": "tag_path!",
-        "type_info": "Text",
-        "origin": "Expression"
-      },
-      {
-        "ordinal": 3,
-        "name": "recipient_username",
+        "name": "sender_username",
         "type_info": "Varchar",
         "origin": {
           "Table": {
-            "table": "outgoing_shares",
-            "name": "recipient_username"
+            "table": "incoming_shares",
+            "name": "sender_username"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "sender_instance",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "incoming_shares",
+            "name": "sender_instance"
           }
         }
       },
       {
         "ordinal": 4,
-        "name": "recipient_instance",
-        "type_info": "Varchar",
+        "name": "outgoing_share_id",
+        "type_info": "Uuid",
         "origin": {
           "Table": {
-            "table": "outgoing_shares",
-            "name": "recipient_instance"
+            "table": "incoming_shares",
+            "name": "outgoing_share_id"
           }
         }
       },
       {
         "ordinal": 5,
-        "name": "allow_share_back",
-        "type_info": "Bool",
+        "name": "local_mapping_service_id",
+        "type_info": "Uuid",
         "origin": {
           "Table": {
-            "table": "outgoing_shares",
-            "name": "allow_share_back"
+            "table": "incoming_shares",
+            "name": "local_mapping_service_id"
           }
         }
       },
       {
         "ordinal": 6,
-        "name": "future",
-        "type_info": "Bool",
-        "origin": {
-          "Table": {
-            "table": "outgoing_shares",
-            "name": "future"
-          }
-        }
-      },
-      {
-        "ordinal": 7,
         "name": "status: ShareStatus",
         "type_info": {
           "Custom": {
@@ -84,6 +78,7 @@
             "kind": {
               "Enum": [
                 "pending",
+                "pending_first_announcement",
                 "active",
                 "revoked",
                 "tombstoned"
@@ -93,40 +88,40 @@
         },
         "origin": {
           "Table": {
-            "table": "outgoing_shares",
+            "table": "incoming_shares",
             "name": "status"
           }
         }
       },
       {
-        "ordinal": 8,
-        "name": "share_token",
-        "type_info": "Uuid",
+        "ordinal": 7,
+        "name": "allow_share_back",
+        "type_info": "Bool",
         "origin": {
           "Table": {
-            "table": "outgoing_shares",
-            "name": "share_token"
+            "table": "incoming_shares",
+            "name": "allow_share_back"
           }
         }
       },
       {
-        "ordinal": 9,
+        "ordinal": 8,
         "name": "created_at",
         "type_info": "Timestamp",
         "origin": {
           "Table": {
-            "table": "outgoing_shares",
+            "table": "incoming_shares",
             "name": "created_at"
           }
         }
       },
       {
-        "ordinal": 10,
+        "ordinal": 9,
         "name": "revoked_at",
         "type_info": "Timestamp",
         "origin": {
           "Table": {
-            "table": "outgoing_shares",
+            "table": "incoming_shares",
             "name": "revoked_at"
           }
         }
@@ -134,22 +129,22 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid"
+        "Uuid",
+        "Text"
       ]
     },
     "nullable": [
       false,
       false,
-      null,
       false,
       false,
       false,
-      false,
+      true,
       false,
       false,
       false,
       true
     ]
   },
-  "hash": "34e60454fb906bb633da155f49dbb0d21bdcaae6d41a08b008930b08f282be0a"
+  "hash": "cdd975e044c76aa74aa1253c69a0950d92ec2249610ba417ba3b036ee4c9a59d"
 }

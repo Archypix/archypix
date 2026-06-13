@@ -21,6 +21,8 @@ use sqlx::PgPool;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+pub(crate) static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
 // ── /api/federation/shares/announce ──────────────────────────────────────────
 
 #[sqlx::test(migrator = "MIGRATOR")]
@@ -39,7 +41,7 @@ async fn announce_share_rejects_wrong_recipient_instance(db: PgPool) {
                 "recipient_username": "bob",  "recipient_instance": "wrong.com",
                 "outgoing_share_id": Uuid::new_v4(), "tag_path": "vacation",
                 "allow_share_back": false, "future": false,
-                "shareback_of": null, "share_token": Uuid::new_v4()
+                "shareback_of": null
             }),
         ))
         .await
@@ -65,7 +67,7 @@ async fn announce_share_rejects_sender_instance_mismatch(db: PgPool) {
                 "recipient_username": "bob", "recipient_instance": "b.test",
                 "outgoing_share_id": Uuid::new_v4(), "tag_path": "vacation",
                 "allow_share_back": false, "future": false,
-                "shareback_of": null, "share_token": Uuid::new_v4()
+                "shareback_of": null
             }),
         ))
         .await
@@ -89,7 +91,7 @@ async fn announce_share_rejects_unknown_recipient(db: PgPool) {
                 "recipient_username": "nobody", "recipient_instance": "b.test",
                 "outgoing_share_id": Uuid::new_v4(), "tag_path": "vacation",
                 "allow_share_back": false, "future": false,
-                "shareback_of": null, "share_token": Uuid::new_v4()
+                "shareback_of": null
             }),
         ))
         .await
@@ -181,16 +183,9 @@ async fn announce_pictures_rejects_pending_share(db: PgPool) {
     let outgoing_id = Uuid::new_v4();
 
     // Share is still Pending — pictures must be refused until Bob accepts.
-    IncomingShareRepository::create(
-        &db,
-        bob_id,
-        "alice",
-        "a.test",
-        outgoing_id,
-        Some(Uuid::new_v4()),
-    )
-    .await
-    .unwrap();
+    IncomingShareRepository::create(&db, bob_id, "alice", "a.test", outgoing_id, false)
+        .await
+        .unwrap();
 
     let token = common::federation::federation_jwt(&cfg, "a.test");
     let app = archypix_back::api::routes(&cfg).with_state(common::test_app_state(db.clone(), &cfg));
@@ -206,6 +201,7 @@ async fn announce_pictures_rejects_pending_share(db: PgPool) {
                 "pictures": [{
                     "picture_id": Uuid::new_v4().to_string(),
                     "owner_username": "alice", "owner_instance_domain": "a.test",
+                    "picture_token": Uuid::new_v4(),
                     "filename": null, "mime_type": null,
                     "file_size": null, "width": null, "height": null, "captured_at": null
                 }]

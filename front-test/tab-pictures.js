@@ -5,7 +5,7 @@ const PicturesTab = {
     data(){
         return {
             uploadProgress: '',
-            listPage: 1, listSize: 20, listThumbnail: 'small',
+            listPage: 1, listSize: 20, listThumbnail: 'small', listScope: 'all',
             picGrid: [],
             picId: '',
             picUrl: {id: '', variant: 'original', imgSrc: null},
@@ -110,7 +110,9 @@ const PicturesTab = {
         },
 
         async doListPictures(){
-            const qs = `?page=${this.listPage}&page_size=${this.listSize}${this.listThumbnail ? '&thumbnail=' + this.listThumbnail : ''}`;
+            let qs = `?page=${this.listPage}&page_size=${this.listSize}${this.listThumbnail ? '&thumbnail=' + this.listThumbnail : ''}`;
+            if(this.listScope === 'owned') qs += '&owned_only=true';
+            else if(this.listScope === 'shared') qs += '&shared_with_me=true';
             const r = await this.api('/api/authenticated/pictures' + qs);
             this.show('list', r.data, !r.ok);
             this.picGrid = (r.ok && r.data.items) ? r.data.items : [];
@@ -239,6 +241,11 @@ const PicturesTab = {
                     <option value="medium">medium</option>
                     <option value="large">large</option>
                 </select>
+                <select class="input" v-model="listScope" title="ownership filter">
+                    <option value="all">all pictures</option>
+                    <option value="owned">owned only</option>
+                    <option value="shared">shared with me</option>
+                </select>
                 <button @click="doListPictures" class="btn bg-blue-600 hover:bg-blue-700 text-white">List</button>
             </div>
             <pre :class="{'text-red-600': out.list.err}" class="out mb-2">{{ out.list.text }}</pre>
@@ -247,9 +254,15 @@ const PicturesTab = {
                      :class="tagPane.pictureId === pic.id ? 'ring-2 ring-blue-500' : ''"
                      class="border rounded overflow-hidden cursor-pointer hover:shadow-md"
                      v-for="pic in picGrid">
-                    <img :src="pic.thumbnail_url" class="w-full h-20 object-cover bg-gray-200" v-if="pic.thumbnail_url"/>
-                    <div class="w-full h-20 bg-gray-200 flex items-center justify-center text-xs text-gray-400" v-else>no thumb</div>
+                    <div class="relative">
+                        <img :src="pic.thumbnail_url" class="w-full h-20 object-cover bg-gray-200" v-if="pic.thumbnail_url"/>
+                        <div class="w-full h-20 bg-gray-200 flex items-center justify-center text-xs text-gray-400" v-else>no thumb</div>
+                        <span v-if="pic.owned === false"
+                              class="absolute top-1 left-1 text-[9px] bg-pink-600 text-white rounded px-1 py-0.5 leading-none"
+                              :title="'shared by @' + pic.owner_username + ':' + pic.owner_instance">shared</span>
+                    </div>
                     <div class="p-1 text-xs truncate text-gray-700">{{ pic.filename }}</div>
+                    <div v-if="pic.owned === false" class="px-1 pb-1 text-[10px] truncate text-pink-600">by {{ pic.owner_username }}</div>
                 </div>
             </div>
         </div>

@@ -33,23 +33,30 @@ pub struct PipelineTagAssignment {
 pub struct PipelineRepository;
 
 impl PipelineRepository {
-    /// Return the IDs of users who have at least one enabled tagging service
-    /// and at least one dirty picture (never processed, or processed before the
-    /// service was last invalidated).
+    /// Return the IDs of users the pipeline needs to process: those with a dirty picture
+    /// (for tagging or the announcement diff) **or** an `OutgoingShare` awaiting its first
+    /// announcement (which the pipeline must announce and flip to `active`, even if the share has
+    /// no pictures or none are dirty).
     pub async fn find_users_with_dirty_pictures(db: &PgPool) -> Result<Vec<Uuid>, AppError> {
         let rows = sqlx::query_scalar!(
-            r#"SELECT DISTINCT p.local_user_id
+            r#"SELECT DISTINCT p.local_user_id AS "id!"
                FROM pictures p
                WHERE p.deleted_at IS NULL
-                 AND EXISTS (
-                   SELECT 1 FROM tagging_services ts
-                   WHERE ts.owner_id = p.local_user_id
-                     AND ts.enabled = true
-                     AND (
-                       p.last_pipeline_run_at IS NULL
-                       OR p.last_pipeline_run_at < ts.last_invalidated_at
-                     )
-                 )"#,
+                 AND (
+                   (p.last_pipeline_run_at IS NULL)
+                   OR
+                   EXISTS (
+                     SELECT 1 FROM tagging_services ts
+                     WHERE ts.owner_id = p.local_user_id
+                       AND ts.enabled = true
+                       AND p.last_pipeline_run_at < ts.last_invalidated_at
+                   )
+                 )
+               UNION
+               -- Owners of shares awaiting their first announcement.
+               SELECT DISTINCT os.owner_id AS "id!"
+               FROM outgoing_shares os
+               WHERE os.status = 'pending_first_announcement'::share_status"#,
         )
         .fetch_all(db)
         .await
@@ -59,8 +66,8 @@ impl PipelineRepository {
 
     /// Return all dirty pictures for a specific user.
     ///
-    /// A picture is dirty if any enabled service for that user has a
-    /// `last_invalidated_at` newer than the picture's `last_pipeline_run_at`.
+    /// A picture is dirty if `last_pipeline_run_at IS NULL` or if any enabled service for that user
+    /// has a `last_invalidated_at` newer than the picture's `last_pipeline_run_at`.
     pub async fn find_dirty_for_user<'e, E>(
         ex: E,
         user_id: Uuid,
@@ -74,14 +81,15 @@ impl PipelineRepository {
                FROM pictures p
                WHERE p.local_user_id = $1
                  AND p.deleted_at IS NULL
-                 AND EXISTS (
-                   SELECT 1 FROM tagging_services ts
-                   WHERE ts.owner_id = $1
-                     AND ts.enabled = true
-                     AND (
-                       p.last_pipeline_run_at IS NULL
-                       OR p.last_pipeline_run_at < ts.last_invalidated_at
-                     )
+                 AND (
+                   (p.last_pipeline_run_at IS NULL)
+                   OR
+                   EXISTS (
+                     SELECT 1 FROM tagging_services ts
+                     WHERE ts.owner_id = $1
+                       AND ts.enabled = true
+                       AND p.last_pipeline_run_at < ts.last_invalidated_at
+                   )
                  )"#,
             user_id,
         )

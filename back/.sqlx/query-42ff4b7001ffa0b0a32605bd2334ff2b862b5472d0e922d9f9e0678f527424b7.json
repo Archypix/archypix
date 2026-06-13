@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT t.picture_token\n               FROM tags t\n               JOIN incoming_shares ish ON ish.id = t.source_id\n               WHERE t.picture_id = $1\n                 AND t.source = 'incoming_share'::tag_source\n                 AND t.picture_token IS NOT NULL\n                 AND ish.status = 'active'::share_status\n               ORDER BY t.source_id\n               LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "picture_token",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "tags",
+            "name": "picture_token"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "42ff4b7001ffa0b0a32605bd2334ff2b862b5472d0e922d9f9e0678f527424b7"
+}

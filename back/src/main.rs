@@ -58,8 +58,18 @@ async fn main() -> anyhow::Result<()> {
     // Register with the resolver so it can route user registrations to this backend.
     resolver.self_register().await?;
 
-    // Start the in-process background task queue (tag rename).
-    let (task_queue, task_runner) = tasks::create(db.clone(), config.task_queue_concurrency);
+    // Pipeline wake signal — shared by the pipeline loop, the task runner (after same-backend
+    // announce/unannounce), and request handlers.
+    let pipeline_notify = Arc::new(Notify::new());
+
+    // Start the in-process background task queue (tag rename, share announce/unannounce).
+    let (task_queue, task_runner) = tasks::create(
+        db.clone(),
+        federation.clone(),
+        config.clone(),
+        pipeline_notify.clone(),
+        config.task_queue_concurrency,
+    );
     tokio::spawn(task_runner);
 
     // Start the job watchdog — resets stuck `processing` jobs to `pending`.
@@ -70,11 +80,12 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     // Start the tagging pipeline loop.
-    let pipeline_notify = Arc::new(Notify::new());
     tokio::spawn(infra::pipeline::create(
         db.clone(),
         pipeline_notify.clone(),
         Duration::from_secs(config.pipeline_poll_interval_secs),
+        task_queue.clone(),
+        config.clone(),
     ));
 
     let state = AppState::new(

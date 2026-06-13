@@ -4,6 +4,7 @@ pub mod picture;
 pub mod picture_version;
 pub mod pipeline;
 pub mod share;
+pub mod share_announcement;
 pub mod tag;
 pub mod tagging;
 pub mod user;

@@ -23,8 +23,10 @@
 - [x] **Tagging pipeline tags removal** — tags are stored per-source; pipeline tags are live and re-derived each run, with stale `rule`/`segment`/
   `share_mapping` tags removed atomically. Disabling a service drops its tags; deleting one promotes them to `manual` if `promoting=true`. Provenance
   is exposed per tag.
-- [ ] **Better sharing support** — create a tagging rule to associate tags with an incoming share, share back support, announce/unannounce on shared
-  tag add/remove or on picture edit/remove. Test transitive sharing.
+- [x] **Better sharing support** — per-picture token presign model replacing `OutgoingShare.share_token`; pipeline-driven announce/unannounce via
+  `share_announcements` tracking table; ShareBack auto-accept with `SharedTagMappingService` rule creation; loop prevention (sender + recipient);
+  transitive sharing and presigning end-to-end; token refresh on partial revocation; transitive revocation for `SharedToMe` re-shares; `SharedToMe`
+  prefix protection. See `doc/features/01_better_sharing_support.md`.
 - [ ] **Exif edition** — exif update api endpoint, triggering a worker job editing the s3 picture metadata.
 - [ ] **Admin endpoints** — user list/suspend/delete, job status, instance metrics.
 - [ ] **Full frontend** — v1 of a user-friendly frontend, with super simple code for a MvP, but with a realistic user experience that could give an

@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO share_announcements (outgoing_share_id, picture_id)\n               VALUES ($1, $2)\n               ON CONFLICT (outgoing_share_id, picture_id) DO UPDATE\n                   SET picture_token = share_announcements.picture_token\n               RETURNING picture_token",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "picture_token",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "share_announcements",
+            "name": "picture_token"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d900abbe1e23878d81b70cbb93e902d2f56aa919a444e578581474e9a63395f7"
+}

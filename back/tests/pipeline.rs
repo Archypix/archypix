@@ -5,6 +5,7 @@ mod common;
 
 use archypix_back::domain::tag::TagSource;
 use archypix_back::domain::tagging::ServiceType;
+use archypix_back::infra::config::Config;
 use archypix_back::infra::pipeline;
 use archypix_back::repository::tag::TagRepository;
 use archypix_back::repository::tagging::{RuleTaggingRuleRepository, TaggingServiceRepository};
@@ -13,6 +14,15 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+/// Run the pipeline once for `user`, with a throwaway task queue + test config.
+async fn run_pipeline(db: &PgPool, user: Uuid) {
+    let config = Config::test_defaults();
+    let (queue, _notify) = common::test_task_queue(db, &config);
+    pipeline::run_once_for_user(db, &queue, &config, user)
+        .await
+        .unwrap();
+}
 
 /// Insert a picture captured in 2024 so `capture_year(2024)` rules match it.
 async fn seed_picture_2024(db: &PgPool, user_id: Uuid) -> Uuid {
@@ -50,7 +60,7 @@ async fn pipeline_assigns_matching_rule_tag(db: PgPool) {
     let pic = seed_picture_2024(&db, user).await;
     seed_rule_service(&db, user, "Photos.Y2024").await;
 
-    pipeline::run_once_for_user(&db, user).await.unwrap();
+    run_pipeline(&db, user).await;
 
     let tags = TagRepository::list_for_picture(&db, user, pic)
         .await
@@ -68,7 +78,7 @@ async fn pipeline_removes_tag_when_rule_no_longer_produces_it(db: PgPool) {
     let pic = seed_picture_2024(&db, user).await;
     let svc = seed_rule_service(&db, user, "Photos.Y2024").await;
 
-    pipeline::run_once_for_user(&db, user).await.unwrap();
+    run_pipeline(&db, user).await;
     assert!(has_tag(
         &TagRepository::list_for_picture(&db, user, pic)
             .await
@@ -87,7 +97,7 @@ async fn pipeline_removes_tag_when_rule_no_longer_produces_it(db: PgPool) {
         .await
         .unwrap();
 
-    pipeline::run_once_for_user(&db, user).await.unwrap();
+    run_pipeline(&db, user).await;
 
     assert!(
         !has_tag(
@@ -109,7 +119,7 @@ async fn pipeline_leaves_manual_tags_untouched(db: PgPool) {
         .await
         .unwrap();
 
-    pipeline::run_once_for_user(&db, user).await.unwrap();
+    run_pipeline(&db, user).await;
 
     // Disable the service → its tags go, manual survives.
     TaggingServiceRepository::update(&db, user, svc, Some(false), None, None)
@@ -133,7 +143,7 @@ async fn deleting_service_promotes_its_tags_to_manual(db: PgPool) {
     let pic = seed_picture_2024(&db, user).await;
     let svc = seed_rule_service(&db, user, "Photos.Y2024").await;
 
-    pipeline::run_once_for_user(&db, user).await.unwrap();
+    run_pipeline(&db, user).await;
 
     let deleted = services::tagging::delete_service(&db, user, svc, true)
         .await

@@ -27,7 +27,7 @@ impl OutgoingShareRepository {
                          recipient_username, recipient_instance,
                          allow_share_back, future,
                          status as "status: ShareStatus",
-                         share_token, created_at, revoked_at"#,
+                         created_at, revoked_at"#,
             owner_id,
             tag_path,
             recipient_username,
@@ -50,7 +50,7 @@ impl OutgoingShareRepository {
                       recipient_username, recipient_instance,
                       allow_share_back, future,
                       status as "status: ShareStatus",
-                      share_token, created_at, revoked_at
+                      created_at, revoked_at
                FROM outgoing_shares WHERE id = $1"#,
             share_id,
         )
@@ -59,26 +59,84 @@ impl OutgoingShareRepository {
         .map_err(map_sqlx_error)
     }
 
-    /// Check if a share token belongs to an active outgoing share. Used for transitive presign
-    /// authorization: a recipient holds the token from the original sender's OutgoingShare.
-    pub async fn has_active_share_for_token<'e, E>(
+    /// List the owner's active shares that auto-announce new pictures (`future = true`).
+    /// Used by the pipeline announcement step to compute current coverage.
+    pub async fn list_active_future_by_owner<'e, E>(
         ex: E,
-        share_token: Uuid,
-    ) -> Result<bool, AppError>
+        owner_id: Uuid,
+    ) -> Result<Vec<OutgoingShare>, AppError>
     where
         E: Executor<'e, Database = Postgres>,
     {
-        let exists: Option<bool> = sqlx::query_scalar!(
-            r#"SELECT EXISTS(
-                   SELECT 1 FROM outgoing_shares
-                   WHERE share_token = $1 AND status = 'active'::share_status
-               )"#,
-            share_token,
+        sqlx::query_as!(
+            OutgoingShare,
+            r#"SELECT id, owner_id, tag_path::text as "tag_path!",
+                      recipient_username, recipient_instance,
+                      allow_share_back, future,
+                      status as "status: ShareStatus",
+                      created_at, revoked_at
+               FROM outgoing_shares
+               WHERE owner_id = $1 AND status = 'active'::share_status AND future = true"#,
+            owner_id,
         )
-        .fetch_one(ex)
+        .fetch_all(ex)
         .await
-        .map_err(map_sqlx_error)?;
-        Ok(exists.unwrap_or(false))
+        .map_err(map_sqlx_error)
+    }
+
+    /// List the owner's shares awaiting their first announcement (`pending_first_announcement`).
+    /// The pipeline announces each one's current coverage and flips it to `active`.
+    pub async fn list_pending_first_announcement_by_owner<'e, E>(
+        ex: E,
+        owner_id: Uuid,
+    ) -> Result<Vec<OutgoingShare>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query_as!(
+            OutgoingShare,
+            r#"SELECT id, owner_id, tag_path::text as "tag_path!",
+                      recipient_username, recipient_instance,
+                      allow_share_back, future,
+                      status as "status: ShareStatus",
+                      created_at, revoked_at
+               FROM outgoing_shares
+               WHERE owner_id = $1 AND status = 'pending_first_announcement'::share_status"#,
+            owner_id,
+        )
+        .fetch_all(ex)
+        .await
+        .map_err(map_sqlx_error)
+    }
+
+    /// Find the owner's active shares whose `tag_path` is exactly or under `prefix` (an ltree
+    /// path). Used by transitive revocation: when a directly re-shared `SharedToMe.*` tag is
+    /// fully revoked upstream, the matching downstream shares are auto-revoked.
+    pub async fn find_by_tag_prefix<'e, E>(
+        ex: E,
+        owner_id: Uuid,
+        prefix_ltree: &str,
+    ) -> Result<Vec<OutgoingShare>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query_as!(
+            OutgoingShare,
+            r#"SELECT id, owner_id, tag_path::text as "tag_path!",
+                      recipient_username, recipient_instance,
+                      allow_share_back, future,
+                      status as "status: ShareStatus",
+                      created_at, revoked_at
+               FROM outgoing_shares
+               WHERE owner_id = $1
+                 AND status = 'active'::share_status
+                 AND tag_path <@ $2::text::ltree"#,
+            owner_id,
+            prefix_ltree,
+        )
+        .fetch_all(ex)
+        .await
+        .map_err(map_sqlx_error)
     }
 
     pub async fn set_status<'e, E>(
@@ -116,7 +174,7 @@ impl OutgoingShareRepository {
                       recipient_username, recipient_instance,
                       allow_share_back, future,
                       status as "status: ShareStatus",
-                      share_token, created_at, revoked_at
+                      created_at, revoked_at
                FROM outgoing_shares WHERE owner_id = $1 ORDER BY created_at DESC"#,
             owner_id,
         )
@@ -135,7 +193,7 @@ impl IncomingShareRepository {
         sender_username: &str,
         sender_instance: &str,
         outgoing_share_id: Uuid,
-        origin_share_token: Option<Uuid>,
+        allow_share_back: bool,
     ) -> Result<IncomingShare, AppError>
     where
         E: Executor<'e, Database = Postgres>,
@@ -143,20 +201,20 @@ impl IncomingShareRepository {
         sqlx::query_as!(
             IncomingShare,
             r#"INSERT INTO incoming_shares
-                   (recipient_id, sender_username, sender_instance, outgoing_share_id, origin_share_token)
+                   (recipient_id, sender_username, sender_instance, outgoing_share_id, allow_share_back)
                VALUES ($1, $2, $3, $4, $5)
                ON CONFLICT (recipient_id, sender_username, sender_instance, outgoing_share_id)
                DO UPDATE SET status = incoming_shares.status,
-                             origin_share_token = COALESCE($5, incoming_shares.origin_share_token)
+                             allow_share_back = EXCLUDED.allow_share_back
                RETURNING id, recipient_id, sender_username, sender_instance, outgoing_share_id,
                          local_mapping_service_id,
                          status as "status: ShareStatus",
-                         origin_share_token, created_at, revoked_at"#,
+                         allow_share_back, created_at, revoked_at"#,
             recipient_id,
             sender_username,
             sender_instance,
             outgoing_share_id,
-            origin_share_token as Option<Uuid>,
+            allow_share_back,
         )
             .fetch_one(ex)
             .await
@@ -175,7 +233,7 @@ impl IncomingShareRepository {
             r#"SELECT id, recipient_id, sender_username, sender_instance, outgoing_share_id,
                       local_mapping_service_id,
                       status as "status: ShareStatus",
-                      origin_share_token, created_at, revoked_at
+                      allow_share_back, created_at, revoked_at
                FROM incoming_shares WHERE recipient_id = $1 ORDER BY created_at DESC"#,
             recipient_id,
         )
@@ -218,7 +276,7 @@ impl IncomingShareRepository {
             r#"SELECT id, recipient_id, sender_username, sender_instance, outgoing_share_id,
                       local_mapping_service_id,
                       status as "status: ShareStatus",
-                      origin_share_token, created_at, revoked_at
+                      allow_share_back, created_at, revoked_at
                FROM incoming_shares WHERE id = $1"#,
             share_id,
         )
@@ -242,7 +300,7 @@ impl IncomingShareRepository {
             r#"SELECT id, recipient_id, sender_username, sender_instance, outgoing_share_id,
                       local_mapping_service_id,
                       status as "status: ShareStatus",
-                      origin_share_token, created_at, revoked_at
+                      allow_share_back, created_at, revoked_at
                FROM incoming_shares
                WHERE outgoing_share_id = $1 AND sender_instance = $2"#,
             outgoing_share_id,
@@ -253,35 +311,25 @@ impl IncomingShareRepository {
         .map_err(map_sqlx_error)
     }
 
-    /// Return the `origin_share_token` of an active incoming share from the given sender.
-    /// Used to authorize federation presign requests for received cross-instance pictures.
-    pub async fn find_token_by_sender<'e, E>(
+    /// Link an incoming share to the local `SharedTagMappingService` mapping created for it
+    /// (ShareBack auto-accept). Stored so the frontend can surface the mapping.
+    pub async fn set_local_mapping_service<'e, E>(
         ex: E,
-        local_user_id: Uuid,
-        sender_username: &str,
-        sender_instance: &str,
-    ) -> Result<Option<Uuid>, AppError>
+        share_id: Uuid,
+        service_id: Uuid,
+    ) -> Result<(), AppError>
     where
         E: Executor<'e, Database = Postgres>,
     {
-        sqlx::query_scalar!(
-            r#"SELECT origin_share_token
-               FROM incoming_shares
-               WHERE recipient_id = $1
-                 AND sender_username = $2
-                 AND sender_instance = $3
-                 AND status = 'active'::share_status
-                 AND origin_share_token IS NOT NULL
-               ORDER BY created_at DESC
-               LIMIT 1"#,
-            local_user_id,
-            sender_username,
-            sender_instance,
+        sqlx::query!(
+            r#"UPDATE incoming_shares SET local_mapping_service_id = $2 WHERE id = $1"#,
+            share_id,
+            service_id,
         )
-        .fetch_optional(ex)
+        .execute(ex)
         .await
-        .map_err(map_sqlx_error)
-        .map(|opt| opt.flatten())
+        .map_err(map_sqlx_error)?;
+        Ok(())
     }
 }
 
@@ -374,14 +422,14 @@ mod tests {
             "sender",
             "other.com",
             outgoing.id,
-            Some(outgoing.share_token),
+            true,
         )
         .await
         .unwrap();
 
         assert_eq!(incoming.status, ShareStatus::Pending);
         assert_eq!(incoming.outgoing_share_id, outgoing.id);
-        assert_eq!(incoming.origin_share_token, Some(outgoing.share_token));
+        assert!(incoming.allow_share_back);
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
@@ -400,7 +448,7 @@ mod tests {
         .await
         .unwrap();
 
-        IncomingShareRepository::create(&db, recipient, "sender", "other.com", outgoing.id, None)
+        IncomingShareRepository::create(&db, recipient, "sender", "other.com", outgoing.id, false)
             .await
             .unwrap();
 
@@ -412,75 +460,90 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn find_token_by_sender_returns_token_for_active_share(db: PgPool) {
-        let sender = seed_user(&db).await;
-        let recipient = seed_user(&db).await;
-        let outgoing = OutgoingShareRepository::create(
-            &db,
-            sender,
-            "Photos",
-            "recipient",
-            "this.com",
-            true,
-            true,
-        )
-        .await
-        .unwrap();
-        let token = outgoing.share_token;
+    async fn list_active_future_by_owner_filters_correctly(db: PgPool) {
+        let owner = seed_user(&db).await;
+        // active + future → included
+        let s1 =
+            OutgoingShareRepository::create(&db, owner, "Photos", "bob", "other.com", true, true)
+                .await
+                .unwrap();
+        OutgoingShareRepository::set_status(&db, s1.id, ShareStatus::Active)
+            .await
+            .unwrap();
+        // active but future=false → excluded
+        let s2 =
+            OutgoingShareRepository::create(&db, owner, "Images", "bob", "other.com", true, false)
+                .await
+                .unwrap();
+        OutgoingShareRepository::set_status(&db, s2.id, ShareStatus::Active)
+            .await
+            .unwrap();
+        // pending → excluded
+        OutgoingShareRepository::create(&db, owner, "Docs", "bob", "other.com", true, true)
+            .await
+            .unwrap();
 
-        let incoming = IncomingShareRepository::create(
+        let found = OutgoingShareRepository::list_active_future_by_owner(&db, owner)
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, s1.id);
+    }
+
+    #[sqlx::test(migrator = "MIGRATOR")]
+    async fn find_by_tag_prefix_matches_exact_and_descendants(db: PgPool) {
+        let owner = seed_user(&db).await;
+        let exact = OutgoingShareRepository::create(
             &db,
-            recipient,
-            "sender",
-            "other.com",
-            outgoing.id,
-            Some(token),
+            owner,
+            "SharedToMe.alice_AT_x.Travel",
+            "carol",
+            "carol.com",
+            true,
+            true,
         )
         .await
         .unwrap();
-        IncomingShareRepository::set_status(&db, incoming.id, ShareStatus::Active)
+        OutgoingShareRepository::set_status(&db, exact.id, ShareStatus::Active)
+            .await
+            .unwrap();
+        let deeper = OutgoingShareRepository::create(
+            &db,
+            owner,
+            "SharedToMe.alice_AT_x.Travel.France",
+            "carol",
+            "carol.com",
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+        OutgoingShareRepository::set_status(&db, deeper.id, ShareStatus::Active)
+            .await
+            .unwrap();
+        // Unrelated tag → not matched
+        let other = OutgoingShareRepository::create(
+            &db,
+            owner,
+            "Photos.Holidays",
+            "carol",
+            "carol.com",
+            true,
+            true,
+        )
+        .await
+        .unwrap();
+        OutgoingShareRepository::set_status(&db, other.id, ShareStatus::Active)
             .await
             .unwrap();
 
         let found =
-            IncomingShareRepository::find_token_by_sender(&db, recipient, "sender", "other.com")
+            OutgoingShareRepository::find_by_tag_prefix(&db, owner, "SharedToMe.alice_AT_x.Travel")
                 .await
                 .unwrap();
-        assert_eq!(found, Some(token));
-    }
-
-    #[sqlx::test(migrator = "MIGRATOR")]
-    async fn find_token_returns_none_for_non_active_share(db: PgPool) {
-        let sender = seed_user(&db).await;
-        let recipient = seed_user(&db).await;
-        let outgoing = OutgoingShareRepository::create(
-            &db,
-            sender,
-            "Photos",
-            "recipient",
-            "this.com",
-            true,
-            true,
-        )
-        .await
-        .unwrap();
-
-        // Remains Pending, not Active
-        IncomingShareRepository::create(
-            &db,
-            recipient,
-            "sender",
-            "other.com",
-            outgoing.id,
-            Some(outgoing.share_token),
-        )
-        .await
-        .unwrap();
-
-        let found =
-            IncomingShareRepository::find_token_by_sender(&db, recipient, "sender", "other.com")
-                .await
-                .unwrap();
-        assert!(found.is_none());
+        let ids: Vec<Uuid> = found.iter().map(|s| s.id).collect();
+        assert!(ids.contains(&exact.id));
+        assert!(ids.contains(&deeper.id));
+        assert!(!ids.contains(&other.id));
     }
 }

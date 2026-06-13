@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM share_announcements WHERE outgoing_share_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c93bdc4bfd4ffb79db10fba8a9a325747c854791b1ada40e6293be2e98c325a9"
+}

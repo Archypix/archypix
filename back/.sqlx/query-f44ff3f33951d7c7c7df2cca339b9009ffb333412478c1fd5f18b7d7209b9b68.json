@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT p.local_user_id AS \"id!\"\n               FROM pictures p\n               WHERE p.deleted_at IS NULL\n                 AND (\n                   (p.last_pipeline_run_at IS NULL)\n                   OR\n                   EXISTS (\n                     SELECT 1 FROM tagging_services ts\n                     WHERE ts.owner_id = p.local_user_id\n                       AND ts.enabled = true\n                       AND p.last_pipeline_run_at < ts.last_invalidated_at\n                   )\n                 )\n               UNION\n               -- Owners of shares awaiting their first announcement.\n               SELECT DISTINCT os.owner_id AS \"id!\"\n               FROM outgoing_shares os\n               WHERE os.status = 'pending_first_announcement'::share_status",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "f44ff3f33951d7c7c7df2cca339b9009ffb333412478c1fd5f18b7d7209b9b68"
+}

@@ -170,23 +170,29 @@ impl TagRepository {
     /// Assign a `/SharedToMe/…` tag to a received picture, linked to the incoming share that
     /// created it. Used exclusively by the share-acceptance and picture-announcement flows.
     ///
-    /// Uses ON CONFLICT DO NOTHING so re-announcing the same picture is idempotent.
+    /// `picture_token` is the per-picture presign token the sender generated; it is stored on
+    /// this row and used to authorise presign calls to the sender (and forwarded downstream in
+    /// transitive announcements). Uses `ON CONFLICT DO UPDATE SET picture_token` so re-announcing
+    /// the same picture refreshes the token without error (token-refresh path).
     pub async fn assign_incoming_share_tag<'e, E>(
         ex: E,
         picture_id: Uuid,
         tag_path_ltree: &str,
         incoming_share_id: Uuid,
+        picture_token: Uuid,
     ) -> Result<(), AppError>
     where
         E: Executor<'e, Database = Postgres>,
     {
         sqlx::query!(
-            r#"INSERT INTO tags (picture_id, tag_path, source, source_id)
-               VALUES ($1, $2::text::ltree, 'incoming_share'::tag_source, $3)
-               ON CONFLICT (picture_id, tag_path, source, source_id) WHERE source <> 'manual' DO NOTHING"#,
+            r#"INSERT INTO tags (picture_id, tag_path, source, source_id, picture_token)
+               VALUES ($1, $2::text::ltree, 'incoming_share'::tag_source, $3, $4)
+               ON CONFLICT (picture_id, tag_path, source, source_id) WHERE source <> 'manual'
+               DO UPDATE SET picture_token = EXCLUDED.picture_token"#,
             picture_id,
             tag_path_ltree,
             incoming_share_id,
+            picture_token,
         )
         .execute(ex)
         .await
@@ -194,23 +200,149 @@ impl TagRepository {
         Ok(())
     }
 
-    /// Remove all `incoming_share` tags assigned by the given share.
+    /// Remove all `incoming_share` tags assigned by the given share, returning the distinct
+    /// picture IDs that were affected (needed by `cleanup_incoming_share` to compute survivors).
     /// Called on share revocation to clean up all `/SharedToMe/…` entries for that share.
     pub async fn remove_incoming_share_tags<'e, E>(
         ex: E,
         incoming_share_id: Uuid,
-    ) -> Result<(), AppError>
+    ) -> Result<Vec<Uuid>, AppError>
     where
         E: Executor<'e, Database = Postgres>,
     {
-        sqlx::query!(
-            r#"DELETE FROM tags WHERE source = 'incoming_share'::tag_source AND source_id = $1"#,
+        let rows = sqlx::query_scalar!(
+            r#"DELETE FROM tags
+               WHERE source = 'incoming_share'::tag_source AND source_id = $1
+               RETURNING picture_id"#,
             incoming_share_id,
         )
-        .execute(ex)
+        .fetch_all(ex)
         .await
         .map_err(map_sqlx_error)?;
-        Ok(())
+        // Distinct picture ids.
+        let mut ids: Vec<Uuid> = rows;
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
+    }
+
+    /// Distinct `SharedToMe.*` tag paths currently assigned by an incoming share. Used by
+    /// transitive revocation to locate downstream shares re-sharing this tag (before the tags
+    /// are removed).
+    pub async fn incoming_share_tag_paths<'e, E>(
+        ex: E,
+        incoming_share_id: Uuid,
+    ) -> Result<Vec<String>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query_scalar!(
+            r#"SELECT DISTINCT tag_path::text as "tag_path!"
+               FROM tags
+               WHERE source = 'incoming_share'::tag_source AND source_id = $1"#,
+            incoming_share_id,
+        )
+        .fetch_all(ex)
+        .await
+        .map_err(map_sqlx_error)
+    }
+
+    /// Remove the incoming-share tags of a specific share for a specific set of pictures.
+    /// Used by per-picture unannounce (a subset of the share leaves coverage). Returns the
+    /// affected picture ids.
+    pub async fn remove_incoming_share_tags_for_pictures<'e, E>(
+        ex: E,
+        incoming_share_id: Uuid,
+        picture_ids: &[Uuid],
+    ) -> Result<Vec<Uuid>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        if picture_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let rows = sqlx::query_scalar!(
+            r#"DELETE FROM tags
+               WHERE source = 'incoming_share'::tag_source
+                 AND source_id = $1
+                 AND picture_id = ANY($2::uuid[])
+               RETURNING picture_id"#,
+            incoming_share_id,
+            picture_ids as &[Uuid],
+        )
+        .fetch_all(ex)
+        .await
+        .map_err(map_sqlx_error)?;
+        let mut ids = rows;
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
+    }
+
+    /// Select the active presign token for a received picture: the `picture_token` of any
+    /// `incoming_share` tag whose share is still active, chosen deterministically by
+    /// `source_id` (lowest UUID) so the choice is stable across runs. Returns `None` for owned
+    /// pictures or when every covering share has been revoked.
+    ///
+    /// Used both by the recipient's presign path and by the pipeline's transitive token
+    /// selection (§5.3).
+    pub async fn find_active_picture_token<'e, E>(
+        ex: E,
+        picture_id: Uuid,
+    ) -> Result<Option<Uuid>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query_scalar!(
+            r#"SELECT t.picture_token
+               FROM tags t
+               JOIN incoming_shares ish ON ish.id = t.source_id
+               WHERE t.picture_id = $1
+                 AND t.source = 'incoming_share'::tag_source
+                 AND t.picture_token IS NOT NULL
+                 AND ish.status = 'active'::share_status
+               ORDER BY t.source_id
+               LIMIT 1"#,
+            picture_id,
+        )
+        .fetch_optional(ex)
+        .await
+        .map_err(map_sqlx_error)
+        .map(|opt| opt.flatten())
+    }
+
+    /// Batch variant of [`find_active_picture_token`](Self::find_active_picture_token): for each
+    /// of `picture_ids` that is a received picture with an active covering share, return its
+    /// deterministically-chosen token. Used by the pipeline announcement step (token-refresh).
+    pub async fn active_picture_tokens_for<'e, E>(
+        ex: E,
+        picture_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, Uuid>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        if picture_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        // DISTINCT ON picks the lowest source_id per picture (matching the single-row query).
+        let rows = sqlx::query!(
+            r#"SELECT DISTINCT ON (t.picture_id) t.picture_id, t.picture_token as "picture_token!"
+               FROM tags t
+               JOIN incoming_shares ish ON ish.id = t.source_id
+               WHERE t.picture_id = ANY($1::uuid[])
+                 AND t.source = 'incoming_share'::tag_source
+                 AND t.picture_token IS NOT NULL
+                 AND ish.status = 'active'::share_status
+               ORDER BY t.picture_id, t.source_id"#,
+            picture_ids as &[Uuid],
+        )
+        .fetch_all(ex)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.picture_id, r.picture_token))
+            .collect())
     }
 
     /// Remove every pipeline tag (`rule`/`segment`/`share_mapping`) produced by a service.
@@ -330,6 +462,23 @@ mod tests {
             "INSERT INTO pictures (id, local_user_id) VALUES ($1, $2)",
             id,
             user_id,
+        )
+        .execute(db)
+        .await
+        .unwrap();
+        id
+    }
+
+    /// Insert an active incoming_share row for the given recipient and return its id.
+    async fn seed_incoming_share(db: &PgPool, recipient: Uuid) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query!(
+            "INSERT INTO incoming_shares
+                 (id, recipient_id, sender_username, sender_instance, outgoing_share_id, status)
+             VALUES ($1, $2, 'alice', 'ex.com', $3, 'active'::share_status)",
+            id,
+            recipient,
+            Uuid::new_v4(),
         )
         .execute(db)
         .await
@@ -468,13 +617,17 @@ mod tests {
     async fn assign_and_remove_incoming_share_tag(db: PgPool) {
         let user = seed_user(&db).await;
         let pic = seed_picture(&db, user).await;
-        let share_id = Uuid::new_v4();
+        // A real incoming_shares row is required so the token-selection join works and the
+        // FK-free source_id is meaningful.
+        let share_id = seed_incoming_share(&db, user).await;
+        let token = Uuid::new_v4();
 
         TagRepository::assign_incoming_share_tag(
             &db,
             pic,
             "SharedToMe.alice_AT_ex_DOT_com.Photos",
             share_id,
+            token,
         )
         .await
         .unwrap();
@@ -484,9 +637,10 @@ mod tests {
             .unwrap();
         assert!(tags.iter().any(|t| t.source_id == Some(share_id)));
 
-        TagRepository::remove_incoming_share_tags(&db, share_id)
+        let affected = TagRepository::remove_incoming_share_tags(&db, share_id)
             .await
             .unwrap();
+        assert_eq!(affected, vec![pic]);
 
         let tags = TagRepository::list_for_picture(&db, user, pic)
             .await
@@ -495,25 +649,29 @@ mod tests {
     }
 
     #[sqlx::test(migrator = "MIGRATOR")]
-    async fn assign_incoming_share_tag_is_idempotent(db: PgPool) {
+    async fn assign_incoming_share_tag_refreshes_token_on_conflict(db: PgPool) {
         let user = seed_user(&db).await;
         let pic = seed_picture(&db, user).await;
-        let share_id = Uuid::new_v4();
+        let share_id = seed_incoming_share(&db, user).await;
+        let token1 = Uuid::new_v4();
+        let token2 = Uuid::new_v4();
 
         TagRepository::assign_incoming_share_tag(
             &db,
             pic,
             "SharedToMe.alice_AT_ex_DOT_com.Photos",
             share_id,
+            token1,
         )
         .await
         .unwrap();
-        // Replay is idempotent (ON CONFLICT DO NOTHING)
+        // Replay with a new token updates the stored token (ON CONFLICT DO UPDATE).
         TagRepository::assign_incoming_share_tag(
             &db,
             pic,
             "SharedToMe.alice_AT_ex_DOT_com.Photos",
             share_id,
+            token2,
         )
         .await
         .unwrap();
@@ -522,6 +680,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(tags.len(), 1);
+        // Active share → token selection returns the refreshed token.
+        let selected = TagRepository::find_active_picture_token(&db, pic)
+            .await
+            .unwrap();
+        assert_eq!(selected, Some(token2));
     }
 
     // ── per-source storage / lifecycle ────────────────────────────────────────

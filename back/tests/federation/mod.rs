@@ -17,8 +17,6 @@ use axum::body::Body;
 use axum::http::{Request, header};
 use serde_json::Value;
 
-pub(crate) static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
-
 /// Single-server config for "backend A" — oneshot tests only.
 /// `back_domain` is a static fake hostname; no real port needed.
 pub(crate) fn cfg_a() -> archypix_back::infra::config::Config {

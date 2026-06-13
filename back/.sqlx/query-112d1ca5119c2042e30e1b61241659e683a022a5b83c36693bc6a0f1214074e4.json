@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, recipient_id, sender_username, sender_instance, outgoing_share_id,\n                      local_mapping_service_id,\n                      status as \"status: ShareStatus\",\n                      origin_share_token, created_at, revoked_at\n               FROM incoming_shares WHERE id = $1",
+  "query": "SELECT id, recipient_id, sender_username, sender_instance, outgoing_share_id,\n                      local_mapping_service_id,\n                      status as \"status: ShareStatus\",\n                      allow_share_back, created_at, revoked_at\n               FROM incoming_shares WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -78,6 +78,7 @@
             "kind": {
               "Enum": [
                 "pending",
+                "pending_first_announcement",
                 "active",
                 "revoked",
                 "tombstoned"
@@ -94,12 +95,12 @@
       },
       {
         "ordinal": 7,
-        "name": "origin_share_token",
-        "type_info": "Uuid",
+        "name": "allow_share_back",
+        "type_info": "Bool",
         "origin": {
           "Table": {
             "table": "incoming_shares",
-            "name": "origin_share_token"
+            "name": "allow_share_back"
           }
         }
       },
@@ -139,10 +140,10 @@
       false,
       true,
       false,
-      true,
+      false,
       false,
       true
     ]
   },
-  "hash": "799c7e3b90aaae77b4f97c946b48a6c26344377aeca8d397f49e73c165b39860"
+  "hash": "112d1ca5119c2042e30e1b61241659e683a022a5b83c36693bc6a0f1214074e4"
 }

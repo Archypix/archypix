@@ -4,9 +4,12 @@ const SharingTab = {
 
     data(){
         return {
-            share: {tagPath: '', recipientUsername: '', recipientInstance: '', allowBack: false, future: false},
+            // Backend defaults: allow_share_back = true, future = true.
+            share: {tagPath: '', recipientUsername: '', recipientInstance: '', allowBack: true, future: true},
             outgoingShares: [],
             incomingShares: [],
+            // ShareBack inline forms, keyed by incoming-share id.
+            sharebackForms: {},
             out: {
                 create: {text: '', err: false},
                 action: {text: '', err: false},
@@ -64,12 +67,15 @@ const SharingTab = {
         },
 
         async doCreateShare(){
+            if(!this.share.recipientInstance){
+                return this.show('create', 'recipient_instance is required (the recipient\'s global domain).', true);
+            }
             const r = await this.api('/api/authenticated/shares/outgoing', {
                 method: 'POST',
                 body: JSON.stringify({
                     tag_path: this.share.tagPath,
                     recipient_username: this.share.recipientUsername,
-                    recipient_instance: this.share.recipientInstance || null,
+                    recipient_instance: this.share.recipientInstance,
                     allow_share_back: this.share.allowBack,
                     future: this.share.future,
                 }),
@@ -107,6 +113,40 @@ const SharingTab = {
             this.show('action', r.data, !r.ok);
             if(r.ok) this.doListIncoming();
         },
+
+        // ── ShareBack ────────────────────────────────────────────────────────
+        toggleShareback(s){
+            const cur = this.sharebackForms[s.id];
+            this.sharebackForms = {
+                ...this.sharebackForms,
+                [s.id]: cur ? null : {tagPath: '', allowBack: true, future: true},
+            };
+        },
+
+        async doShareBack(s){
+            const f = this.sharebackForms[s.id];
+            if(!f || !f.tagPath){
+                return this.show('action', 'Enter a tag of yours to share back.', true);
+            }
+            // ShareBack = a new outgoing share to the original sender, referencing their share.
+            const r = await this.api('/api/authenticated/shares/outgoing', {
+                method: 'POST',
+                body: JSON.stringify({
+                    tag_path: f.tagPath,
+                    recipient_username: s.sender_username,
+                    recipient_instance: s.sender_instance,
+                    allow_share_back: f.allowBack,
+                    future: f.future,
+                    shareback_of: s.outgoing_share_id,
+                }),
+            });
+            this.show('action', r.data, !r.ok);
+            if(r.ok){
+                this.sharebackForms = {...this.sharebackForms, [s.id]: null};
+                this.doListOutgoing();
+                this.doListIncoming();
+            }
+        },
     },
 
     template: `
@@ -118,12 +158,16 @@ const SharingTab = {
             <div class="grid grid-cols-2 gap-2 mb-2">
                 <input class="input" placeholder="tag_path (e.g. Photos.Travel)" v-model="share.tagPath"/>
                 <input class="input" placeholder="recipient_username" v-model="share.recipientUsername"/>
-                <input class="input" placeholder="recipient_instance (global domain)" v-model="share.recipientInstance"/>
+                <input class="input" placeholder="recipient_instance (global domain, required)" v-model="share.recipientInstance"/>
                 <div class="flex gap-4 items-center text-xs">
                     <label><input type="checkbox" v-model="share.allowBack"/> allow_share_back</label>
                     <label><input type="checkbox" v-model="share.future"/> future</label>
                 </div>
             </div>
+            <p class="text-[11px] text-gray-400 mb-2">
+                <b>future</b>: new pictures added to the tag are auto-announced to the recipient.
+                <b>allow_share_back</b>: the recipient may share pictures back to you with auto-accept.
+            </p>
             <button @click="doCreateShare" class="btn bg-blue-600 hover:bg-blue-700 text-white mb-2">Create Share</button>
             <pre :class="{'text-red-600': out.create.err}" class="out">{{ out.create.text }}</pre>
         </div>
@@ -139,11 +183,15 @@ const SharingTab = {
                     <div class="font-mono text-xs text-gray-400 truncate">{{ s.id }}</div>
                     <div class="font-medium truncate">{{ s.tag_path }}</div>
                     <div class="text-xs text-gray-500">→ {{ s.recipient_username }}@{{ s.recipient_instance }}</div>
+                    <div class="flex gap-1 mt-1">
+                        <span v-if="s.future" class="text-[10px] bg-sky-100 text-sky-700 rounded px-1.5 py-0.5">future</span>
+                        <span v-if="s.allow_share_back" class="text-[10px] bg-teal-100 text-teal-700 rounded px-1.5 py-0.5">share-back allowed</span>
+                    </div>
                 </div>
                 <div class="flex items-center gap-2 shrink-0">
                     <span :class="statusBadgeClass(s.status)"
                           class="text-xs font-semibold px-2 py-0.5 rounded-full capitalize">{{ s.status }}</span>
-                    <button v-if="s.status === 'active'"
+                    <button v-if="s.status === 'active' || s.status === 'pending'"
                             @click="doRevoke(s.id)"
                             class="btn bg-red-600 hover:bg-red-700 text-white text-xs py-0.5">Revoke</button>
                 </div>
@@ -156,23 +204,47 @@ const SharingTab = {
             <button @click="doListIncoming" class="btn bg-gray-200 hover:bg-gray-300 mb-3">Refresh</button>
             <div v-if="incomingShares.length === 0" class="text-xs text-gray-400">No incoming shares.</div>
             <div v-for="s in incomingShares" :key="s.id"
-                 class="flex items-center justify-between border rounded px-3 py-2 mb-2 text-sm gap-2">
-                <div class="min-w-0">
-                    <div class="font-mono text-xs text-gray-400 truncate">{{ s.id }}</div>
-                    <div class="font-medium truncate">from {{ s.sender_username }}@{{ s.sender_instance }}</div>
+                 class="border rounded px-3 py-2 mb-2 text-sm">
+                <div class="flex items-center justify-between gap-2">
+                    <div class="min-w-0">
+                        <div class="font-mono text-xs text-gray-400 truncate">{{ s.id }}</div>
+                        <div class="font-medium truncate">from {{ s.sender_username }}@{{ s.sender_instance }}</div>
+                        <div class="flex gap-1 mt-1">
+                            <span v-if="s.allow_share_back" class="text-[10px] bg-teal-100 text-teal-700 rounded px-1.5 py-0.5">share-back allowed</span>
+                            <span v-if="s.local_mapping_service_id" class="text-[10px] bg-purple-100 text-purple-700 rounded px-1.5 py-0.5"
+                                  :title="s.local_mapping_service_id">mapped → local tag</span>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-2 shrink-0">
+                        <span :class="statusBadgeClass(s.status)"
+                              class="text-xs font-semibold px-2 py-0.5 rounded-full capitalize">{{ s.status }}</span>
+                        <template v-if="s.status === 'pending'">
+                            <button @click="doAccept(s.id)"
+                                    class="btn bg-green-600 hover:bg-green-700 text-white text-xs py-0.5">Accept</button>
+                            <button @click="doReject(s.id)"
+                                    class="btn bg-red-500 hover:bg-red-600 text-white text-xs py-0.5">Reject</button>
+                        </template>
+                        <template v-else-if="s.status === 'active'">
+                            <button v-if="s.allow_share_back" @click="toggleShareback(s)"
+                                    class="btn bg-teal-600 hover:bg-teal-700 text-white text-xs py-0.5">
+                                {{ sharebackForms[s.id] ? 'Cancel' : 'Share back' }}
+                            </button>
+                            <button @click="doReject(s.id)"
+                                    class="btn bg-gray-400 hover:bg-gray-500 text-white text-xs py-0.5">Remove</button>
+                        </template>
+                    </div>
                 </div>
-                <div class="flex items-center gap-2 shrink-0">
-                    <span :class="statusBadgeClass(s.status)"
-                          class="text-xs font-semibold px-2 py-0.5 rounded-full capitalize">{{ s.status }}</span>
-                    <template v-if="s.status === 'pending'">
-                        <button @click="doAccept(s.id)"
-                                class="btn bg-green-600 hover:bg-green-700 text-white text-xs py-0.5">Accept</button>
-                        <button @click="doReject(s.id)"
-                                class="btn bg-red-500 hover:bg-red-600 text-white text-xs py-0.5">Reject</button>
-                    </template>
-                    <button v-else-if="s.status === 'active'"
-                            @click="doReject(s.id)"
-                            class="btn bg-gray-400 hover:bg-gray-500 text-white text-xs py-0.5">Remove</button>
+
+                <!-- ShareBack inline form -->
+                <div v-if="sharebackForms[s.id]" class="mt-2 pt-2 border-t flex flex-wrap items-center gap-2">
+                    <input class="input flex-1 min-w-40" placeholder="a tag of yours to share back (e.g. Photos.MyEdits)"
+                           v-model="sharebackForms[s.id].tagPath"/>
+                    <label class="text-xs"><input type="checkbox" v-model="sharebackForms[s.id].allowBack"/> allow_share_back</label>
+                    <label class="text-xs"><input type="checkbox" v-model="sharebackForms[s.id].future"/> future</label>
+                    <button @click="doShareBack(s)" class="btn bg-teal-600 hover:bg-teal-700 text-white text-xs shrink-0">Send ShareBack</button>
+                    <p class="text-[11px] text-gray-400 w-full">
+                        Auto-accepted by {{ s.sender_username }} (allow_share_back was set); your pictures map back into their original tag.
+                    </p>
                 </div>
             </div>
         </div>

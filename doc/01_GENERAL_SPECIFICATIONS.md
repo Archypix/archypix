@@ -222,7 +222,9 @@ OutgoingShare:
   recipient: "@bob:other.com"
   allowShareBack: true         # if false, ShareBack creates a normal share request (no auto-accept)
   future: true                 # new pictures added to the tag are announced automatically
-  status: pending              # pending | active | revoked
+  status: pending              # pending | pending_first_announcement | active | revoked
+                               # pending_first_announcement: accepted; the pipeline announces the
+                               # current pictures (ignoring `future`) then flips it to active.
 
 IncomingShare:
   id: is-001

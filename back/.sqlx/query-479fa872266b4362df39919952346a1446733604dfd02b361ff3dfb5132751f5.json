@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT tag_path::text as \"tag_path!\"\n               FROM tags\n               WHERE source = 'incoming_share'::tag_source AND source_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "tag_path!",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "479fa872266b4362df39919952346a1446733604dfd02b361ff3dfb5132751f5"
+}

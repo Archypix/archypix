@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT sa.picture_id\n               FROM share_announcements sa\n               JOIN pictures p ON p.id = sa.picture_id\n               WHERE sa.picture_token = $1\n                 AND p.remote_picture_id IS NULL\n               LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "picture_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "share_announcements",
+            "name": "picture_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f5048fdf484b50093b733323aa25e6e1cc239f585d5803b4908b552dd9b19583"
+}

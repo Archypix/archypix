@@ -56,8 +56,14 @@ clients/
   resolver.rs       # self_register, update_mapping, verify_token
 
 services/
-  auth.rs / users.rs / pictures.rs / user_settings.rs / shares.rs / jobs.rs
-  federation.rs     # inbound federation protocol handlers (receive_share_announcement, receive_share_accept, receive_share_revoke, receive_share_reject, receive_pictures_announcement, presign_batch_for_token)
+  auth.rs / users.rs / pictures.rs / user_settings.rs / jobs.rs
+  shares.rs         # module root re-exporting the submodules below
+  shares/
+    lifecycle.rs    # create/accept/revoke/reject + cleanup_incoming_share (share state)
+    registration.rs # recipient-side received-picture register / unregister
+    shareback.rs    # ShareBack auto-accept (mapping wiring)
+    delivery.rs     # task delivery of announce / unannounce
+  federation.rs     # inbound federation protocol handlers (receive_share_announcement, receive_share_accept, receive_share_revoke, receive_share_reject, receive_pictures_announcement, receive_pictures_unannouncement, presign_by_picture_tokens)
 
 api/
   middleware/auth_user.rs / auth_admin.rs / auth_resolver.rs / auth_federation.rs / auth_worker.rs
@@ -69,9 +75,12 @@ api/
 
 infra/
   config.rs / error.rs / redis.rs / crypto.rs / db.rs / s3.rs
-  tasks.rs        # in-process Tokio task queue (tag rename)
-  pipeline.rs     # tagging pipeline background loop
-  job_watchdog.rs # periodic reset of stale processing jobs
+  tasks.rs           # in-process Tokio task queue (tag rename, share announce/unannounce)
+  pipeline.rs        # tagging pipeline: loop, sweep
+  pipeline/
+    evaluation.rs    # per-user tag service evaluation + reconciliation, then announcement
+    announcement.rs  # process_first_announcements (initial, PFA) + process_batch (ongoing diff)
+  job_watchdog.rs    # periodic reset of stale processing jobs
 ```
 
 ## D) AppState
@@ -93,50 +102,39 @@ pub struct AppState {
 
 ## E) Tagging pipeline
 
-The pipeline runs as a background Tokio task (`infra/pipeline.rs`). It evaluates all enabled tagging services against dirty pictures and applies the
-resulting tag assignments.
+The pipeline runs as a background Tokio task (`infra/pipeline.rs`). It evaluates enabled tagging services against dirty pictures and reconciles tag
+assignments.
 
-**Dirty picture detection** — two schema columns drive this:
+**Dirty picture detection** — `pictures.last_pipeline_run_at` is `NULL` on new/invalidated pictures; `tagging_services.last_invalidated_at` bumps on
+any config change. A picture is dirty when `last_pipeline_run_at IS NULL OR last_pipeline_run_at < last_invalidated_at` for any enabled service.
 
-- `pictures.last_pipeline_run_at` — `NULL` on new/invalidated pictures, set to `NOW()` after a successful run.
-- `tagging_services.last_invalidated_at` — bumped on any configuration change (rule/segment/mapping add or remove, enable/disable).
+**Wake model** — `tokio::sync::Notify` for event-driven wakes + configurable polling fallback (`PIPELINE_POLL_INTERVAL_SECS`, default 1 hour).
+Notified after: ingest, manual tag edit, service config change, inbound share announcement, `cleanup_incoming_share`.
 
-A picture is dirty when `last_pipeline_run_at IS NULL OR last_pipeline_run_at < last_invalidated_at` for any of its user's enabled services.
+**Evaluation order** — `SharedTagMapping → Rule → Segmentation`. Gating accumulates tags from `manual` + `incoming_share` plus earlier services (
+in-memory, per picture); pipeline tags are re-derived from scratch each run, never carried forward.
 
-**Wake model** — the loop uses a `tokio::sync::Notify` for immediate event-driven wakes, with a configurable polling interval as a recovery fallback (
-`PIPELINE_POLL_INTERVAL_SECS`, default 1 hour). Callsites call `pipeline_notify.notify_one()` after:
+**Rule predicates** — stored in `rule_tagging_services.predicate`, validated at creation. Supported:
+`gps_within_bbox(lat_min, lat_max, lon_min, lon_max)`, `capture_year(YYYY)`, `capture_month(M)`, `filename_contains("string")`.
 
-- Ingest (new picture → `last_pipeline_run_at = NULL` by default)
-- Manual tag edit (pictures explicitly re-invalidated)
-- Service config change (service's `last_invalidated_at` bumped)
-- Inbound share announcement (new received pictures → `NULL` by default)
+**Tag storage (per-source)** — the same `tag_path` may be asserted by multiple sources on one picture. Two partial unique indexes:
+`(picture_id, tag_path) WHERE source='manual'` and `(picture_id, tag_path, source, source_id) WHERE source<>'manual'`. `source_id` is the
+`tagging_services.id` for pipeline sources, `incoming_shares.id` for `incoming_share`, or `NULL` for `manual`.
 
-**Evaluation order** — `SharedTagMapping → Rule → Segmentation`. Gating starts from the picture's `manual` + `incoming_share` tags and accumulates the
-tags produced by earlier services in the same run (in-memory, per picture), so downstream services can use upstream results via `requires`. Prior-run
-pipeline tags are **not** carried into gating — pipeline tags are re-derived from scratch each run, so a stale tag can never keep a service firing.
+**Reconciliation** — `PipelineRepository::reconcile_pipeline_tags` (atomic CTE per picture) inserts produced tags and deletes stale `rule`/`segment`/
+`share_mapping` rows. `manual` and `incoming_share` tags are never touched.
 
-**Rule predicates** — the `rule` service type supports a simple predicate DSL stored in `rule_tagging_services.predicate`. Supported forms:
-`gps_within_bbox(lat_min, lat_max, lon_min, lon_max)`, `capture_year(YYYY)`, `capture_month(M)`, `filename_contains("string")`. Predicates are
-validated at rule creation time.
+**Announcement** — the pipeline is the single picture-announcement path, with two entry points in `pipeline::announcement`:
 
-**Tag storage (per-source)** — tags are keyed per-source, not per-path: the same `tag_path` may be asserted independently by several sources on one
-picture (e.g. a `manual` tag and a `rule` that also matches). Two partial unique indexes enforce this — `(picture_id, tag_path) WHERE source='manual'`
-and `(picture_id, tag_path, source, source_id) WHERE source<>'manual'` — and double as the `ON CONFLICT` arbiters for all tag writers. `source_id` is
-polymorphic with no FK: the `tagging_services.id` for pipeline sources (`rule`/`segment`/`share_mapping`), or the `incoming_shares.id` for
-`incoming_share` tags; `NULL` for `manual`.
+- `process_first_announcements` — for each `pending_first_announcement` share: announces current coverage (ignoring `future`), flips to `active`,
+  records tracking rows in one transaction.
+- `process_batch` — after reconciliation: diffs `active` + `future=true` shares, announces new coverage, unannounces lost coverage, re-announces
+  received pictures whose token changed.
 
-**Tag assignment & removal (always-on)** — pipeline tags are live. On each run the reconcile (`PipelineRepository::reconcile_pipeline_tags`, one
-atomic
-CTE per picture) inserts the run's produced tags and deletes every stored `rule`/`segment`/`share_mapping` row that is no longer produced. `manual`
-and
-`incoming_share` tags are never touched. Because rows are per-source, removing one source's tag never disturbs another source's ancestor tag, so no
-ancestor re-derivation is needed.
+The sweep wakes for users with dirty pictures **or** a `pending_first_announcement` share.
 
-**Service lifecycle** — the dirty-picture sweep cannot reach pictures whose only relevant service was just disabled or deleted (a disabled service no
-longer marks pictures dirty; a deleted service leaves `source_id` dangling), so these transitions clean tags explicitly and transactionally:
-**disabling** a service deletes its tags (`TagRepository::remove_service_tags`); **deleting** a service either promotes its tags to `manual`
-(`promote_service_tags_to_manual`, preserving the curation — a pre-existing manual tag on the same path wins and the redundant row is dropped) or
-removes them, selected by the `promote_tags` flag.
+**Service lifecycle** — **disabling** deletes its tags (`TagRepository::remove_service_tags`); **deleting** either promotes them to `manual` (
+`promote_service_tags_to_manual`, pre-existing manual tag on the same path wins) or removes them, controlled by the `promote_tags` flag.
 
 # Backend REST API
 
@@ -301,15 +299,16 @@ requests. Allowed label characters are `[A-Za-z0-9_]`.
 
 ### Federation endpoints
 
-| Method | Path                                | Description                                                                                                                                                                             |
-|--------|-------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `POST` | `/api/federation/auth/request`      | Request a federation JWT.                                                                                                                                                               |
-| `POST` | `/api/federation/auth/grant`        | Receive a federation JWT from another instance.                                                                                                                                         |
-| `POST` | `/api/federation/shares/announce`   | Share announcement. Requires federation JWT.                                                                                                                                            |
-| `POST` | `/api/federation/shares/accept`     | Recipient notifies sender that a share was accepted. Sender responds by announcing current pictures. Requires federation JWT.                                                           |
-| `POST` | `/api/federation/shares/revoke`     | Share revocation. Body: `{ outgoing_share_id }`. Requires federation JWT.                                                                                                               |
-| `POST` | `/api/federation/pictures/announce` | Announce pictures for an active share. Only accepted when `IncomingShare.status == active`. Requires federation JWT.                                                                    |
-| `POST` | `/api/federation/pictures/presign`  | Request presigned URLs for a batch of pictures. Auth: `share_token` only — no JWT required. Body: `{ owner_username, owner_instance, share_token, pictures: [{picture_id, variant}] }`. |
+| Method | Path                                  | Description                                                                                                                                                  |
+|--------|---------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `POST` | `/api/federation/auth/request`        | Request a federation JWT.                                                                                                                                    |
+| `POST` | `/api/federation/auth/grant`          | Receive a federation JWT from another instance.                                                                                                              |
+| `POST` | `/api/federation/shares/announce`     | Share announcement. Requires federation JWT.                                                                                                                 |
+| `POST` | `/api/federation/shares/accept`       | Recipient notifies sender that a share was accepted. Sender responds by announcing current pictures. Requires federation JWT.                                |
+| `POST` | `/api/federation/shares/revoke`       | Share revocation. Body: `{ outgoing_share_id }`. Requires federation JWT.                                                                                    |
+| `POST` | `/api/federation/pictures/announce`   | Announce pictures for an active share. Only accepted when `IncomingShare.status == active`. Requires federation JWT. Each picture carries a `picture_token`. |
+| `POST` | `/api/federation/pictures/unannounce` | Remove specific pictures from a share. Body: `{ outgoing_share_id, sender_username, sender_instance, picture_ids }`. Requires federation JWT.                |
+| `POST` | `/api/federation/pictures/presign`    | Request presigned URLs. Auth: `picture_token` per picture — no JWT required. Body: `{ pictures: [{picture_token, variant}] }`.                               |
 
 ### Worker endpoints (`/api/worker/*`)
 
@@ -325,6 +324,28 @@ the token and refresh 30 s before expiry.
 Wire shapes are defined in `archypix-common/transfer.rs`. See `04_WORKER_ARCHITECTURE.md` for the claim-token protocol and job loop.
 
 ## 6) Key flows
+
+### Federation consistency rules
+
+All federation code follows one rule and three options.
+
+**Rule — federation calls run inside the requester's transaction.** A delivery failure rolls back local changes (e.g. `create_outgoing_share`
+announces inside the transaction that inserted the `OutgoingShare`; failure rolls it back).
+
+When a federation **handler** must itself make a federation call, pick the first option that applies:
+
+1. **Inline, same transaction** — only when the inner call does not depend on the outer requester's uncommitted state.
+2. **Return a value instead of calling back** — when the inner call would depend on uncommitted state. *ShareBack: `shares/announce`
+   returns `auto_accepted: true`; the initiator acts within its own still-open transaction instead of receiving a callback.*
+3. **Deferred task** — when neither fits; tolerate silent failure since the outer request can no longer be rolled back. Used for `pictures/unannounce`
+   delivery and picture announcement.
+
+**Picture announcement is pipeline-driven.** No flow announces pictures synchronously. Accepting a share moves the `OutgoingShare` to
+`pending_first_announcement`; the pipeline announces current coverage (ignoring `future`), flips it to `active`, and enqueues delivery. This makes
+initial and ongoing announce one mechanism, and eliminates cross-backend callbacks on uncommitted state.
+
+**Revocation is local-first** (intentional exception). Local state and presign tokens are deleted immediately; downstream delivery of
+`shares/revoke` / `pictures/unannounce` is best-effort.
 
 ### Picture upload
 
@@ -349,30 +370,39 @@ demand.
 
 1. Alice creates `OutgoingShare` (`status = pending`). The `OutgoingShare` insert and the federation delivery run in a single transaction: if the
    federation call fails the insert is rolled back.
-   - **Same-backend** (`recipient_instance == global_domain`): `IncomingShare` is created in the same transaction (`status = pending`); no HTTP
-     federation.
-   - **Cross-instance**: federation handshake (or JWT from cache), then `POST /api/federation/shares/announce` to Bob’s backend. Bob’s backend creates
-     `IncomingShare` (`status = pending`).
+    - **Same-backend** (`recipient_instance == global_domain`): `IncomingShare` is created in the same transaction (`status = pending`); no HTTP
+      federation.
+    - **Cross-instance**: federation handshake (or JWT from cache), then `POST /api/federation/shares/announce` to Bob’s backend. Bob’s backend
+      creates
+      `IncomingShare` (`status = pending`).
 2. Bob accepts the share via `POST /api/authenticated/shares/incoming/{id}/accept`. Bob’s backend **immediately transitions `IncomingShare`
-   to `active`** (Bob’s consent), then handles delivery:
-   - **Same-backend**: Alice’s pictures under the tag are queried locally; received-picture rows + `/SharedToMe/…` tags are created in a single
-     transaction. Alice’s `OutgoingShare` is also transitioned to `active`.
-   - **Cross-instance**: sends `POST /api/federation/shares/accept` to Alice’s backend.
-3. Alice’s backend (on receiving accept): transitions `OutgoingShare` to `active`, queries her owned pictures under the shared tag, sends
-   `POST /api/federation/pictures/announce` to Bob.
+   to `active`** (Bob’s consent), then signals the sender — but never announces pictures itself:
+    - **Same-backend**: Alice’s `OutgoingShare` is moved to `pending_first_announcement`; the pipeline takes over (step 3).
+    - **Cross-instance**: sends `POST /api/federation/shares/accept` to Alice’s backend. If delivery fails the `IncomingShare` reverts to `pending`.
+      On receipt, Alice moves her `OutgoingShare` to `pending_first_announcement`.
+3. The **pipeline** (on the sender's backend) sees the `pending_first_announcement` share, announces its current coverage (ignoring `future`) by
+   recording per-picture tokens and enqueuing `pictures/announce`, and flips the share to `active` — tracking rows + status in one transaction. This
+   is
+   the single announce path; `future = true` shares are subsequently re-diffed by the same pipeline.
+
+**ShareBack** (`shares/outgoing` with `shareback_of` set, `allowShareBack = true` on the referenced share): the recipient *auto-accepts* in its
+`shares/announce` handler (sets its `IncomingShare = active` and creates the `SharedTagMappingService` mapping) and returns `auto_accepted: true`
+**instead of calling back** (rule 2). The initiator moves its own `OutgoingShare` to `pending_first_announcement` and lets its pipeline announce. If
+`allowShareBack = false`, the share stays `pending` for manual acceptance.
 4. Bob’s `announce_pictures` handler registers each announced picture (`PictureRepository::create_received`) and assigns the
    `/SharedToMe/alice_AT_instance_DOT_com/…` tag (`source = incoming_share`). It only accepts `active` shares — `pending` shares are rejected (
    prevents picture injection into unaccepted shares).
 5. When Bob accesses a picture, `presign_for_picture` checks Redis cache first, then:
     - **Same-backend owner**: derives S3 key from `remote_picture_id` and owner’s local `user_id`.
-    - **Cross-instance owner**: looks up `origin_share_token` (cached in Redis), calls `POST /api/federation/pictures/presign` on Alice’s backend.
+   - **Cross-instance owner**: looks up the picture's per-picture `picture_token` (from its `incoming_share` tag row), calls
+     `POST /api/federation/pictures/presign` on Alice’s backend with that token.
 
 ### Federation share revocation
 
 1. Alice calls `POST /api/authenticated/shares/outgoing/{id}/revoke`. Alice’s backend sets `OutgoingShare` status to `revoked` and notifies the
    recipient.
-   - **Same-backend**: directly removes `/SharedToMe/…` tags, deletes unreachable received pictures, sets `IncomingShare` status to `revoked`,
-     invalidates Redis presign-token cache.
-   - **Cross-instance**: sends `POST /api/federation/shares/revoke` (keyed by `outgoing_share_id`) to Bob’s backend, which performs the same cleanup
-     locally.
+    - **Same-backend**: directly removes `/SharedToMe/…` tags, deletes unreachable received pictures, sets `IncomingShare` status to `revoked`,
+      invalidates Redis presign-token cache.
+    - **Cross-instance**: sends `POST /api/federation/shares/revoke` (keyed by `outgoing_share_id`) to Bob’s backend, which performs the same cleanup
+      locally.
 2. Bob’s backend propagates revocation downstream to any transitive recipients.

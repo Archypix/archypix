@@ -1,0 +1,59 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT sa.outgoing_share_id,\n                      COALESCE(p.remote_picture_id, sa.picture_id::text) AS \"announce_id!\",\n                      os.recipient_username, os.recipient_instance\n               FROM share_announcements sa\n               JOIN outgoing_shares os ON os.id = sa.outgoing_share_id\n               LEFT JOIN pictures p ON p.id = sa.picture_id\n               WHERE sa.picture_id = ANY($1::uuid[])",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "outgoing_share_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "share_announcements",
+            "name": "outgoing_share_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "announce_id!",
+        "type_info": "Varchar",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "recipient_username",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "outgoing_shares",
+            "name": "recipient_username"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "recipient_instance",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "outgoing_shares",
+            "name": "recipient_instance"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      false,
+      false
+    ]
+  },
+  "hash": "61c1b2a4edddbda2cc80dc9465abf806cffe41a3ba9bfd2d97f533ad36112698"
+}

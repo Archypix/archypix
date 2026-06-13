@@ -1,16 +1,11 @@
--- Archypix Backend PostgreSQL Schema
--- Initial migration: Core tables for decentralized picture management
-
 -- Enable required extensions
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "ltree";
--- For hierarchical tag paths
-
 
 -- ============================================================================
 -- ENUM TYPES
 -- ============================================================================
-CREATE TYPE share_status AS ENUM ('pending', 'active', 'revoked', 'tombstoned');
+CREATE TYPE share_status AS ENUM ('pending', 'pending_first_announcement', 'active', 'revoked', 'tombstoned');
 CREATE TYPE tag_source AS ENUM ('manual', 'rule', 'segment', 'share_mapping', 'incoming_share');
 CREATE TYPE job_status AS ENUM ('pending', 'processing', 'completed', 'failed');
 CREATE TYPE job_type AS ENUM ('gen_thumbnail', 'ml_style', 'ml_people', 'ml_group_location', 'edit_picture');
@@ -165,6 +160,12 @@ CREATE TABLE tags
     source      tag_source NOT NULL DEFAULT 'manual',
     source_id   UUID,
 
+    -- Per-picture presign token (only populated for source = 'incoming_share' rows).
+    -- Stores the token the sender generated in `share_announcements` and forwarded in the
+    -- `AnnouncedPicture`. Used to authorise presign calls to the sender on the local user's
+    -- clients' behalf, and forwarded downstream in transitive announcements.
+    picture_token UUID,
+
     -- Timestamps
     assigned_at TIMESTAMP NOT NULL DEFAULT (now() at time zone 'utc')
 );
@@ -181,6 +182,10 @@ CREATE UNIQUE INDEX uq_picture_tag_source ON tags (picture_id, tag_path, source,
 CREATE INDEX idx_tags_path ON tags USING GIST (tag_path);
 CREATE INDEX idx_tags_picture ON tags (picture_id);
 CREATE INDEX idx_tags_source ON tags (source, source_id);
+-- Index over presign tokens stored on incoming_share tag rows (transitive token selection).
+-- Not unique: on a single-instance deployment the same forwarded token can appear on two
+-- recipients' tag rows (e.g. Bob's and Carol's) for the same upstream picture.
+CREATE INDEX idx_tags_picture_token ON tags (picture_token) WHERE picture_token IS NOT NULL;
 
 -- ============================================================================
 -- OUTGOING SHARES
@@ -204,9 +209,6 @@ CREATE TABLE outgoing_shares
     -- Status: starts as pending until the recipient accepts, then active.
     status share_status NOT NULL DEFAULT 'pending',
 
-    -- Capability token forwarded to recipients for transitive presign authorization
-    share_token UUID NOT NULL DEFAULT gen_random_uuid(),
-
     -- Timestamps
     created_at         TIMESTAMP    NOT NULL DEFAULT (now() at time zone 'utc'),
     revoked_at         TIMESTAMP,
@@ -219,7 +221,30 @@ CREATE INDEX idx_outgoing_shares_owner ON outgoing_shares (owner_id);
 CREATE INDEX idx_outgoing_shares_recipient ON outgoing_shares (recipient_username, recipient_instance);
 CREATE INDEX idx_outgoing_shares_tag ON outgoing_shares USING GIST (tag_path);
 CREATE INDEX idx_outgoing_shares_status ON outgoing_shares (status);
-CREATE UNIQUE INDEX idx_outgoing_shares_token ON outgoing_shares (share_token);
+
+-- ============================================================================
+-- SHARE ANNOUNCEMENTS (per-picture presign tokens — sender-side tracking table)
+-- ============================================================================
+-- One row per (outgoing_share, picture) that has been announced to the recipient.
+-- Each row carries a unique `picture_token` that the recipient (and any transitive
+-- recipient) presents to this backend's presign endpoint to fetch the picture.
+-- The pipeline announcement step diffs current share coverage against this table to
+-- decide which pictures to announce / unannounce. Revoking a share deletes its rows,
+-- immediately invalidating every token it held.
+CREATE TABLE share_announcements
+(
+    outgoing_share_id UUID NOT NULL REFERENCES outgoing_shares (id) ON DELETE CASCADE,
+    picture_id        UUID NOT NULL, -- sender's local picture.id
+    picture_token     UUID NOT NULL DEFAULT gen_random_uuid(),
+    PRIMARY KEY (outgoing_share_id, picture_id)
+);
+
+CREATE INDEX idx_share_announcements_picture ON share_announcements (picture_id);
+-- Token → picture lookup for the presign endpoint. Not unique: a relayer copies the upstream
+-- owner's token into its own tracking row for a transitively-shared picture, so the same token
+-- value can appear on both the owner's row and the relayer's row (on a single-instance
+-- deployment). The presign lookup disambiguates by resolving only the *owned* picture.
+CREATE INDEX idx_share_announcements_token ON share_announcements (picture_token);
 
 -- ============================================================================
 -- INCOMING SHARES
@@ -242,8 +267,9 @@ CREATE TABLE incoming_shares
     -- Status: starts as pending until the recipient explicitly accepts.
     status share_status NOT NULL DEFAULT 'pending',
 
-    -- Share token from the upstream sender; propagated for transitive presign authorization
-    origin_share_token UUID,
+    -- Propagated from the sender's ShareAnnouncement: whether the recipient may share
+    -- these pictures back to the sender with auto-accept. Drives the "Share back" UI.
+    allow_share_back BOOLEAN NOT NULL DEFAULT FALSE,
 
     -- Timestamps
     created_at               TIMESTAMP    NOT NULL DEFAULT (now() at time zone 'utc'),

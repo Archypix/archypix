@@ -91,6 +91,27 @@ impl TaggingServiceRepository {
         .map_err(map_sqlx_error)
     }
 
+    /// Return the id of the user's first `shared_tag_mapping` service (oldest), if any.
+    /// Used by ShareBack auto-accept to attach the new mapping to an existing service.
+    pub async fn first_mapping_service_for_owner<'e, E>(
+        ex: E,
+        owner_id: Uuid,
+    ) -> Result<Option<Uuid>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query_scalar!(
+            r#"SELECT id FROM tagging_services
+               WHERE owner_id = $1 AND service_type = 'shared_tag_mapping'::service_type
+               ORDER BY created_at
+               LIMIT 1"#,
+            owner_id,
+        )
+        .fetch_optional(ex)
+        .await
+        .map_err(map_sqlx_error)
+    }
+
     pub async fn create<'e, E>(
         ex: E,
         owner_id: Uuid,
@@ -303,6 +324,26 @@ impl SharedTagMappingRuleRepository {
         .await
         .map_err(map_sqlx_error)?;
         Ok(result.rows_affected() > 0)
+    }
+
+    /// Flag every mapping rule referencing an incoming share as broken. Called when the share
+    /// is revoked/tombstoned so the UI can surface the now-empty mapping.
+    pub async fn flag_broken_for_share<'e, E>(
+        ex: E,
+        incoming_share_id: Uuid,
+    ) -> Result<(), AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query!(
+            r#"UPDATE shared_tag_mapping_services SET is_broken = true
+               WHERE incoming_share_id = $1"#,
+            incoming_share_id,
+        )
+        .execute(ex)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(())
     }
 }
 

@@ -3,11 +3,15 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
-#[sqlx(type_name = "share_status", rename_all = "lowercase")]
-#[serde(rename_all = "lowercase")]
+// snake_case keeps the single-word variants ("pending", "active", …) identical to the old
+// lowercase form while mapping `PendingFirstAnnouncement` → "pending_first_announcement".
+#[sqlx(type_name = "share_status", rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub enum ShareStatus {
     /// Announced to the recipient but not yet accepted.
     Pending,
+    /// OutgoingShare only: the recipient accepted, but the sender has not yet announced.
+    PendingFirstAnnouncement,
     /// Accepted by the recipient; pictures are visible.
     Active,
     /// Revoked by the sender; pictures are no longer accessible.
@@ -27,8 +31,6 @@ pub struct OutgoingShare {
     pub allow_share_back: bool,
     pub future: bool,
     pub status: ShareStatus,
-    /// Opaque token used to authorize presign requests for transitive federation shares.
-    pub share_token: Uuid,
     pub created_at: NaiveDateTime,
     pub revoked_at: Option<NaiveDateTime>,
 }
@@ -42,8 +44,8 @@ pub struct IncomingShare {
     pub outgoing_share_id: Uuid,
     pub local_mapping_service_id: Option<Uuid>,
     pub status: ShareStatus,
-    /// Share token from the upstream sender, forwarded here for transitive presign authorization.
-    pub origin_share_token: Option<Uuid>,
+    /// Whether the sender allows sharing these pictures back with auto-accept.
+    pub allow_share_back: bool,
     pub created_at: NaiveDateTime,
     pub revoked_at: Option<NaiveDateTime>,
 }

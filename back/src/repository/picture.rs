@@ -183,6 +183,92 @@ impl PictureRepository {
         Ok(result.rows_affected())
     }
 
+    /// From `candidate_picture_ids`, return those that still carry at least one
+    /// `incoming_share` source tag (i.e. survived a share's tag cleanup). Used by
+    /// `cleanup_incoming_share` to mark survivors dirty for token refresh.
+    pub async fn find_with_any_incoming_share_tag<'e, E>(
+        ex: E,
+        recipient_id: Uuid,
+        candidate_picture_ids: &[Uuid],
+    ) -> Result<Vec<Uuid>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        if candidate_picture_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        sqlx::query_scalar!(
+            r#"SELECT DISTINCT p.id
+               FROM pictures p
+               JOIN tags t ON t.picture_id = p.id
+               WHERE p.id = ANY($1::uuid[])
+                 AND p.local_user_id = $2
+                 AND t.source = 'incoming_share'::tag_source"#,
+            candidate_picture_ids as &[Uuid],
+            recipient_id,
+        )
+        .fetch_all(ex)
+        .await
+        .map_err(map_sqlx_error)
+    }
+
+    /// Map a set of `remote_picture_id` strings to the recipient's local picture ids.
+    /// Used by per-picture unannounce to resolve the sender's announce ids locally.
+    pub async fn find_ids_by_remote_ids<'e, E>(
+        ex: E,
+        recipient_id: Uuid,
+        remote_ids: &[String],
+    ) -> Result<Vec<Uuid>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        if remote_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        sqlx::query_scalar!(
+            r#"SELECT id FROM pictures
+               WHERE local_user_id = $1
+                 AND remote_picture_id = ANY($2::text[])"#,
+            recipient_id,
+            remote_ids as &[String],
+        )
+        .fetch_all(ex)
+        .await
+        .map_err(map_sqlx_error)
+    }
+
+    /// Delete the received pictures in `picture_ids` that have no remaining `incoming_share`
+    /// tag. Returns the deleted ids. Used by per-picture unannounce.
+    pub async fn delete_orphans_among<'e, E>(
+        ex: E,
+        recipient_id: Uuid,
+        picture_ids: &[Uuid],
+    ) -> Result<Vec<Uuid>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        if picture_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        sqlx::query_scalar!(
+            r#"DELETE FROM pictures
+               WHERE id = ANY($1::uuid[])
+                 AND local_user_id = $2
+                 AND remote_picture_id IS NOT NULL
+                 AND NOT EXISTS (
+                     SELECT 1 FROM tags
+                     WHERE tags.picture_id = pictures.id
+                       AND tags.source = 'incoming_share'::tag_source
+                 )
+               RETURNING id"#,
+            picture_ids as &[Uuid],
+            recipient_id,
+        )
+        .fetch_all(ex)
+        .await
+        .map_err(map_sqlx_error)
+    }
+
     /// List all active owned pictures that carry a tag under `tag_path_ltree` (inclusive).
     ///
     /// Used by Alice's backend to enumerate pictures to announce when a share is accepted.
@@ -209,6 +295,63 @@ impl PictureRepository {
                  AND p.deleted_at IS NULL
                  AND t.tag_path <@ $2::text::ltree"#,
             owner_id,
+            tag_path_ltree,
+        )
+        .fetch_all(ex)
+        .await
+        .map_err(map_sqlx_error)
+    }
+
+    /// Load a batch of picture rows by id (order unspecified). Used by the pipeline
+    /// announcement step to build announcement payloads for the pictures it announces.
+    pub async fn list_by_ids<'e, E>(ex: E, ids: &[Uuid]) -> Result<Vec<Picture>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        sqlx::query_as!(
+            Picture,
+            r#"SELECT id, local_user_id, remote_picture_id, owner_username, owner_instance_domain,
+                      filename, mime_type, file_size, width, height,
+                      exif_data as "exif_data: _", metadata as "metadata: _",
+                      deleted_at, captured_at, ingested_at, updated_at,
+                      blurhash, gps_lat, gps_lng, gps_alt, orientation, thumbnails_generated_at,
+                      file_hash
+               FROM pictures WHERE id = ANY($1::uuid[])"#,
+            ids as &[Uuid],
+        )
+        .fetch_all(ex)
+        .await
+        .map_err(map_sqlx_error)
+    }
+
+    /// List all of a user's active pictures (owned **and** received) carrying a tag under
+    /// `tag_path_ltree` (inclusive). Used by share accept / ShareBack to enumerate pictures to
+    /// announce — including received pictures, which enables transitive sharing.
+    pub async fn list_by_tag_for_user<'e, E>(
+        ex: E,
+        local_user_id: Uuid,
+        tag_path_ltree: &str,
+    ) -> Result<Vec<Picture>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query_as!(
+            Picture,
+            r#"SELECT DISTINCT p.id, p.local_user_id, p.remote_picture_id, p.owner_username,
+                      p.owner_instance_domain, p.filename, p.mime_type, p.file_size,
+                      p.width, p.height, p.exif_data as "exif_data: _", p.metadata as "metadata: _",
+                      p.deleted_at, p.captured_at, p.ingested_at, p.updated_at,
+                      p.blurhash, p.gps_lat, p.gps_lng, p.gps_alt, p.orientation,
+                      p.thumbnails_generated_at, p.file_hash
+               FROM pictures p
+               JOIN tags t ON t.picture_id = p.id
+               WHERE p.local_user_id = $1
+                 AND p.deleted_at IS NULL
+                 AND t.tag_path <@ $2::text::ltree"#,
+            local_user_id,
             tag_path_ltree,
         )
         .fetch_all(ex)

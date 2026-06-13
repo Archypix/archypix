@@ -39,7 +39,7 @@ impl TagPath {
     /// - Trims surrounding whitespace.
     /// - Splits on `.`; each label must be non-empty and contain only `[A-Za-z0-9_]`.
     /// - Returns the validated path unchanged.
-    pub fn parse(raw: &str) -> Result<Self, String> {
+    pub fn parse(raw: &str, allow_protected_prefixes: bool) -> Result<Self, String> {
         let stripped = raw.trim();
         if stripped.is_empty() {
             return Err("tag path must not be empty".to_string());
@@ -60,6 +60,11 @@ impl TagPath {
                 ));
             }
         }
+        if !allow_protected_prefixes && Self::is_reserved_prefix(stripped) {
+            return Err(format!(
+                "tag path {stripped:?} uses a reserved prefix (SharedToMe, ...)"
+            ));
+        }
         Ok(TagPath(stripped.to_string()))
     }
 
@@ -77,6 +82,13 @@ impl TagPath {
 
     pub fn as_ltree(&self) -> &str {
         &self.0
+    }
+
+    /// Whether this path is the reserved `SharedToMe` prefix (exact or a descendant). Manual tag
+    /// writes and pipeline service `assign_tag` values must not use it — only the share machinery
+    /// may assign `incoming_share` tags under `SharedToMe`.
+    pub fn is_reserved_prefix(path: &str) -> bool {
+        path == "SharedToMe" || path.starts_with("SharedToMe.")
     }
 
     /// Build the `/SharedToMe/<sender>/...` path for a federation-received tag.
@@ -211,60 +223,67 @@ mod tests {
 
     #[test]
     fn parse_dot_path_roundtrips() {
-        let t = TagPath::parse("Photos.Travel.Alps").unwrap();
+        let t = TagPath::parse("Photos.Travel.Alps", true).unwrap();
         assert_eq!(t.as_ltree(), "Photos.Travel.Alps");
     }
 
     #[test]
     fn parse_trims_whitespace() {
-        let t = TagPath::parse("  Photos.Travel  ").unwrap();
+        let t = TagPath::parse("  Photos.Travel  ", true).unwrap();
         assert_eq!(t.as_ltree(), "Photos.Travel");
     }
 
     #[test]
     fn parse_single_segment() {
-        let t = TagPath::parse("Photos").unwrap();
+        let t = TagPath::parse("Photos", true).unwrap();
         assert_eq!(t.as_ltree(), "Photos");
     }
 
     #[test]
     fn parse_rejects_empty() {
-        assert!(TagPath::parse("").is_err());
-        assert!(TagPath::parse(".").is_err());
-        assert!(TagPath::parse("   ").is_err());
+        assert!(TagPath::parse("", true).is_err());
+        assert!(TagPath::parse(".", true).is_err());
+        assert!(TagPath::parse("   ", true).is_err());
     }
 
     #[test]
     fn parse_rejects_double_dot() {
-        assert!(TagPath::parse("Photos..Travel").is_err());
+        assert!(TagPath::parse("Photos..Travel", true).is_err());
     }
 
     #[test]
     fn parse_rejects_leading_and_trailing_dot() {
-        assert!(TagPath::parse(".Photos").is_err());
-        assert!(TagPath::parse("Photos.Travel.").is_err());
+        assert!(TagPath::parse(".Photos", true).is_err());
+        assert!(TagPath::parse("Photos.Travel.", true).is_err());
     }
 
     #[test]
     fn parse_rejects_slash() {
         // The slash is no longer a separator — it is just an invalid character.
-        assert!(TagPath::parse("Photos/Travel").is_err());
+        assert!(TagPath::parse("Photos/Travel", true).is_err());
     }
 
     #[test]
     fn parse_rejects_hyphen() {
-        assert!(TagPath::parse("My-Photos").is_err());
+        assert!(TagPath::parse("My-Photos", true).is_err());
     }
 
     #[test]
     fn parse_rejects_space() {
-        assert!(TagPath::parse("My Photos").is_err());
+        assert!(TagPath::parse("My Photos", true).is_err());
     }
 
     #[test]
     fn parse_accepts_underscore_and_digits() {
-        let t = TagPath::parse("Photos_2024.Trip_01").unwrap();
+        let t = TagPath::parse("Photos_2024.Trip_01", true).unwrap();
         assert_eq!(t.as_ltree(), "Photos_2024.Trip_01");
+    }
+    #[test]
+    fn parse_rejects_protected_prefix() {
+        assert!(TagPath::parse("SharedToMe.Test", false).is_err());
+        assert!(TagPath::parse("SharedToMe", false).is_err());
+        assert!(TagPath::parse("  SharedToMe.test", false).is_err());
+        assert!(TagPath::parse("SharedToMe  ", false).is_err());
     }
 
     // ── TagPath::from_slash ───────────────────────────────────────────────────
@@ -299,6 +318,21 @@ mod tests {
     fn encode_username_with_underscores() {
         let label = encode_sender_label("my_user", "host.io");
         assert_eq!(label, "my_user_AT_host_DOT_io");
+    }
+
+    // ── TagPath::is_reserved_prefix ───────────────────────────────────────────
+
+    #[test]
+    fn reserved_prefix_matches_exact_and_descendants() {
+        assert!(TagPath::is_reserved_prefix("SharedToMe"));
+        assert!(TagPath::is_reserved_prefix("SharedToMe.alice_AT_x.Photos"));
+    }
+
+    #[test]
+    fn reserved_prefix_rejects_unrelated_and_lookalikes() {
+        assert!(!TagPath::is_reserved_prefix("Photos"));
+        assert!(!TagPath::is_reserved_prefix("SharedToMeNot"));
+        assert!(!TagPath::is_reserved_prefix("My.SharedToMe"));
     }
 
     // ── TagPath::shared_to_me ─────────────────────────────────────────────────

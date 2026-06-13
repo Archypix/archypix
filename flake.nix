@@ -28,6 +28,7 @@
           sqlx-cli          # for sqlx migrate + sqlx prepare
           cargo-watch       # for cargo-watch hot-reload
           cargo-nextest     # faster test runner
+          git               # for development
         ];
 
         # Runtime / link-time libraries

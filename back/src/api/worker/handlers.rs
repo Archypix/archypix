@@ -2,7 +2,7 @@ use crate::api::middleware::auth_worker::AuthWorker;
 use crate::api::worker::models::{ClaimJobResponse, CompleteJobRequest, FailJobRequest};
 use crate::domain::job::{JobConfig, JobType};
 use crate::domain::user_settings::VersioningMode;
-use crate::infra::error::AppError;
+use crate::infra::error::{AppError, map_sqlx_error};
 use crate::infra::s3;
 use crate::repository::job::JobRepository;
 use crate::repository::picture::PictureRepository;
@@ -111,9 +111,7 @@ pub async fn claim_next_job(
                 picture.mime_type.as_deref(),
             )
             .await?;
-            vtx.commit().await.map_err(|e| {
-                AppError::InternalServerError(format!("failed to commit version tx: {e}"))
-            })?;
+            vtx.commit().await.map_err(map_sqlx_error)?;
         }
     }
 
@@ -266,9 +264,7 @@ pub async fn complete_job(
         ));
     }
 
-    tx.commit()
-        .await
-        .map_err(|e| AppError::InternalServerError(format!("failed to commit tx: {e}")))?;
+    tx.commit().await.map_err(map_sqlx_error)?;
 
     Ok(StatusCode::NO_CONTENT)
 }

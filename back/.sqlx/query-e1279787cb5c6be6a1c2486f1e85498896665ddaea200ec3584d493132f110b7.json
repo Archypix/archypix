@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO tags (picture_id, tag_path, source, source_id, picture_token)\n               VALUES ($1, $2::text::ltree, 'incoming_share'::tag_source, $3, $4)\n               ON CONFLICT (picture_id, tag_path, source, source_id) WHERE source <> 'manual'\n               DO UPDATE SET picture_token = EXCLUDED.picture_token",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e1279787cb5c6be6a1c2486f1e85498896665ddaea200ec3584d493132f110b7"
+}

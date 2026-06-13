@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "INSERT INTO incoming_shares\n                   (recipient_id, sender_username, sender_instance, outgoing_share_id, origin_share_token)\n               VALUES ($1, $2, $3, $4, $5)\n               ON CONFLICT (recipient_id, sender_username, sender_instance, outgoing_share_id)\n               DO UPDATE SET status = incoming_shares.status,\n                             origin_share_token = COALESCE($5, incoming_shares.origin_share_token)\n               RETURNING id, recipient_id, sender_username, sender_instance, outgoing_share_id,\n                         local_mapping_service_id,\n                         status as \"status: ShareStatus\",\n                         origin_share_token, created_at, revoked_at",
+  "query": "SELECT id, recipient_id, sender_username, sender_instance, outgoing_share_id,\n                      local_mapping_service_id,\n                      status as \"status: ShareStatus\",\n                      allow_share_back, created_at, revoked_at\n               FROM incoming_shares WHERE recipient_id = $1 ORDER BY created_at DESC",
   "describe": {
     "columns": [
       {
@@ -78,6 +78,7 @@
             "kind": {
               "Enum": [
                 "pending",
+                "pending_first_announcement",
                 "active",
                 "revoked",
                 "tombstoned"
@@ -94,12 +95,12 @@
       },
       {
         "ordinal": 7,
-        "name": "origin_share_token",
-        "type_info": "Uuid",
+        "name": "allow_share_back",
+        "type_info": "Bool",
         "origin": {
           "Table": {
             "table": "incoming_shares",
-            "name": "origin_share_token"
+            "name": "allow_share_back"
           }
         }
       },
@@ -128,10 +129,6 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Varchar",
-        "Varchar",
-        "Uuid",
         "Uuid"
       ]
     },
@@ -143,10 +140,10 @@
       false,
       true,
       false,
-      true,
+      false,
       false,
       true
     ]
   },
-  "hash": "79dd2fdff3a0f68411aab482b86b5932c6f612de264fd4dce5effac971ca538b"
+  "hash": "86d44a6217fbcf988077f3274232bf0f7e3c45f79c80b9f92f2bf36beafd5dbb"
 }

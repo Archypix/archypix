@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id FROM tagging_services\n               WHERE owner_id = $1 AND service_type = 'shared_tag_mapping'::service_type\n               ORDER BY created_at\n               LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "tagging_services",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "faf7d383a69a949fe4b25b95b802d8725060fb3c592ece1fc974078303c911c1"
+}

@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT p.id\n               FROM pictures p\n               JOIN tags t ON t.picture_id = p.id\n               WHERE p.id = ANY($1::uuid[])\n                 AND p.local_user_id = $2\n                 AND t.source = 'incoming_share'::tag_source",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "pictures",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0b40987013f2a8cc72bc867bc6d9a99307971e12871f938ded0aceba91ca772c"
+}
