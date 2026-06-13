@@ -71,6 +71,12 @@ pub struct Config {
     /// Optional milliseconds to sleep between picture batches in the pipeline (default 0).
     /// Provides manual backpressure for large deployments.
     pub pipeline_batch_sleep_ms: u64,
+    /// Maximum number of users whose pipeline runs concurrently. Runs are serialized per user
+    /// and parallel across users. Default: 4.
+    pub pipeline_concurrency: usize,
+    /// Backoff (seconds) before a share whose announce/unannounce delivery failed is retried.
+    /// Default: 60.
+    pub pipeline_retry_backoff_secs: i64,
 
     // ── S3 / Object storage ───────────────────────────────────────────────────
     pub s3_endpoint: String,
@@ -157,6 +163,8 @@ impl Config {
             job_watchdog_interval_secs: env_u64("JOB_WATCHDOG_INTERVAL_SECS", 60)?,
             pipeline_poll_interval_secs: env_u64("PIPELINE_POLL_INTERVAL_SECS", 3600)?,
             pipeline_batch_sleep_ms: env_u64("PIPELINE_BATCH_SLEEP_MS", 0)?,
+            pipeline_concurrency: env_usize("PIPELINE_CONCURRENCY", 4)?,
+            pipeline_retry_backoff_secs: env_i64("PIPELINE_RETRY_BACKOFF_SECS", 60)?,
 
             s3_public_endpoint: env("S3_PUBLIC_ENDPOINT", s3_endpoint.clone()),
             s3_workers_endpoint: env("S3_WORKERS_ENDPOINT", s3_endpoint.clone()),
@@ -290,6 +298,8 @@ impl Config {
             job_watchdog_interval_secs: 60,
             pipeline_poll_interval_secs: 3600,
             pipeline_batch_sleep_ms: 0,
+            pipeline_concurrency: 4,
+            pipeline_retry_backoff_secs: 60,
             s3_endpoint: "http://localhost:9000".to_string(),
             s3_public_endpoint: "http://localhost:9000".to_string(),
             s3_workers_endpoint: "http://localhost:9000".to_string(),

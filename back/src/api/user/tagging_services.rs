@@ -280,7 +280,7 @@ pub async fn create_service(
     )
     .await?;
     // New service: last_invalidated_at = NOW() by default, so all existing pictures are dirty.
-    state.pipeline_notify.notify_one();
+    state.pipeline_waker.wake(auth.user_id()?);
     Ok(Json(service_to_response(service)))
 }
 
@@ -385,7 +385,7 @@ pub async fn update_service(
         TagRepository::remove_service_tags(&state.db, service_id).await?;
     }
     TaggingServiceRepository::touch_invalidated(&state.db, service_id).await?;
-    state.pipeline_notify.notify_one();
+    state.pipeline_waker.wake(auth.user_id()?);
     Ok(Json(service_to_response(service)))
 }
 
@@ -448,7 +448,7 @@ pub async fn add_mapping(
     )
     .await?;
     TaggingServiceRepository::touch_invalidated(&state.db, service_id).await?;
-    state.pipeline_notify.notify_one();
+    state.pipeline_waker.wake(auth.user_id()?);
     Ok(Json(mapping_to_response(rule)))
 }
 
@@ -466,7 +466,7 @@ pub async fn delete_mapping(
         return Err(AppError::NotFound);
     }
     TaggingServiceRepository::touch_invalidated(&state.db, service_id).await?;
-    state.pipeline_notify.notify_one();
+    state.pipeline_waker.wake(auth.user_id()?);
     Ok(Json(serde_json::json!({ "deleted": true })))
 }
 
@@ -500,7 +500,7 @@ pub async fn add_rule(
         RuleTaggingRuleRepository::create(&state.db, service_id, &payload.predicate, &assign_tag)
             .await?;
     TaggingServiceRepository::touch_invalidated(&state.db, service_id).await?;
-    state.pipeline_notify.notify_one();
+    state.pipeline_waker.wake(auth.user_id()?);
     Ok(Json(rule_to_response(rule)))
 }
 
@@ -518,7 +518,7 @@ pub async fn delete_rule(
         return Err(AppError::NotFound);
     }
     TaggingServiceRepository::touch_invalidated(&state.db, service_id).await?;
-    state.pipeline_notify.notify_one();
+    state.pipeline_waker.wake(auth.user_id()?);
     Ok(Json(serde_json::json!({ "deleted": true })))
 }
 
@@ -567,7 +567,7 @@ pub async fn add_segment(
     )
     .await?;
     TaggingServiceRepository::touch_invalidated(&state.db, service_id).await?;
-    state.pipeline_notify.notify_one();
+    state.pipeline_waker.wake(auth.user_id()?);
     Ok(Json(segment_to_response(segment)))
 }
 
@@ -585,7 +585,7 @@ pub async fn delete_segment(
         return Err(AppError::NotFound);
     }
     TaggingServiceRepository::touch_invalidated(&state.db, service_id).await?;
-    state.pipeline_notify.notify_one();
+    state.pipeline_waker.wake(auth.user_id()?);
     Ok(Json(serde_json::json!({ "deleted": true })))
 }
 

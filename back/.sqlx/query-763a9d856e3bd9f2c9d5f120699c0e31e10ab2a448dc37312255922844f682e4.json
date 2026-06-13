@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT t.picture_id\n               FROM tags t\n               JOIN pictures p ON p.id = t.picture_id\n               WHERE p.local_user_id = $1\n                 AND t.tag_path <@ $2::text::ltree\n                 AND ($3::uuid[] IS NULL OR t.picture_id = ANY($3::uuid[]))\n                 AND (\n                       p.owner_username IS DISTINCT FROM $4\n                    OR p.owner_instance_domain IS DISTINCT FROM $5\n                 )",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "picture_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "tags",
+            "name": "picture_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "UuidArray",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "763a9d856e3bd9f2c9d5f120699c0e31e10ab2a448dc37312255922844f682e4"
+}

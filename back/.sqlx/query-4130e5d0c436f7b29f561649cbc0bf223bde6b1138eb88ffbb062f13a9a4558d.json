@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, owner_id, tag_path::text as \"tag_path!\",\n                      recipient_username, recipient_instance,\n                      allow_share_back, future,\n                      status as \"status: ShareStatus\",\n                      created_at, revoked_at\n               FROM outgoing_shares\n               WHERE owner_id = $1 AND status = 'pending_first_announcement'::share_status",
+  "query": "SELECT id, owner_id, tag_path::text as \"tag_path!\",\n                      recipient_username, recipient_instance,\n                      allow_share_back, future,\n                      status as \"status: ShareStatus\",\n                      created_at, revoked_at\n               FROM outgoing_shares\n               WHERE owner_id = $1\n                 AND status IN ('pending_first_announcement'::share_status, 'errored'::share_status)\n                 AND (next_retry_at IS NULL OR next_retry_at <= $2)",
   "describe": {
     "columns": [
       {
@@ -86,6 +86,7 @@
                 "pending",
                 "pending_first_announcement",
                 "active",
+                "errored",
                 "revoked",
                 "tombstoned"
               ]
@@ -124,7 +125,8 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid"
+        "Uuid",
+        "Timestamp"
       ]
     },
     "nullable": [
@@ -140,5 +142,5 @@
       true
     ]
   },
-  "hash": "273a499784ac588ad87e5658ae12835d66229103ecca2c37aba9fb9b54db0d5f"
+  "hash": "4130e5d0c436f7b29f561649cbc0bf223bde6b1138eb88ffbb062f13a9a4558d"
 }

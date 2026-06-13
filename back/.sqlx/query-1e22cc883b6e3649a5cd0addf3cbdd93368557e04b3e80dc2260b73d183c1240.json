@@ -86,6 +86,7 @@
                 "pending",
                 "pending_first_announcement",
                 "active",
+                "errored",
                 "revoked",
                 "tombstoned"
               ]

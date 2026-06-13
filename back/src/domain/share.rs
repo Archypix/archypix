@@ -14,6 +14,10 @@ pub enum ShareStatus {
     PendingFirstAnnouncement,
     /// Accepted by the recipient; pictures are visible.
     Active,
+    /// OutgoingShare only: an announce/unannounce delivery failed. The pipeline retries it with a
+    /// full coverage reconcile (subject to `next_retry_at` backoff) and flips it back to `active`
+    /// once fully delivered.
+    Errored,
     /// Revoked by the sender; pictures are no longer accessible.
     Revoked,
     /// Rejected or deleted by the recipient.

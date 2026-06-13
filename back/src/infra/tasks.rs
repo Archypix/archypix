@@ -9,13 +9,11 @@
 //! and holds a permit for its duration.
 
 use crate::clients::federation::FederationClient;
-use crate::clients::federation::models::AnnouncedPicture;
-use crate::domain::picture::Picture;
 use crate::infra::config::Config;
-use chrono::NaiveDateTime;
+use crate::infra::pipeline::PipelineWaker;
 use sqlx::PgPool;
 use std::sync::Arc;
-use tokio::sync::{Notify, Semaphore, mpsc};
+use tokio::sync::{Semaphore, mpsc};
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -27,20 +25,9 @@ pub enum InternalTask {
         new_tag: String,
     },
 
-    /// Announce (or re-announce) pictures to a share recipient.
-    /// Used both for new coverage and for token refresh.
-    AnnounceSharedPictures {
-        outgoing_share_id: Uuid,
-        sender_username: String,
-        recipient_username: String,
-        recipient_instance: String,
-        /// Sender's shared tag path (ltree); recipient builds `SharedToMe.<sender>.<tag_path>`.
-        tag_path: String,
-        pictures: Vec<AnnouncedPicture>,
-        is_same_backend: bool,
-    },
-
-    /// Unannounce specific pictures from a share recipient.
+    /// Unannounce specific pictures from a share recipient. Emitted by `cleanup_incoming_share`
+    /// during revocation (best-effort downstream cascade); the pipeline handles all other
+    /// (un)announcement inline.
     UnannounceSharedPictures {
         outgoing_share_id: Uuid,
         sender_username: String,
@@ -78,7 +65,7 @@ pub fn create(
     db: PgPool,
     federation: FederationClient,
     config: Config,
-    pipeline_notify: Arc<Notify>,
+    pipeline_waker: PipelineWaker,
     concurrency: usize,
 ) -> (TaskQueue, impl Future<Output = ()>) {
     let (tx, rx) = mpsc::unbounded_channel::<InternalTask>();
@@ -86,7 +73,7 @@ pub fn create(
         db,
         federation,
         config,
-        pipeline_notify,
+        pipeline_waker,
         rx,
         sem: Arc::new(Semaphore::new(concurrency)),
     };
@@ -99,7 +86,7 @@ struct TaskRunner {
     db: PgPool,
     federation: FederationClient,
     config: Config,
-    pipeline_notify: Arc<Notify>,
+    pipeline_waker: PipelineWaker,
     rx: mpsc::UnboundedReceiver<InternalTask>,
     sem: Arc<Semaphore>,
 }
@@ -117,9 +104,9 @@ impl TaskRunner {
             let db = self.db.clone();
             let federation = self.federation.clone();
             let config = self.config.clone();
-            let notify = self.pipeline_notify.clone();
+            let waker = self.pipeline_waker.clone();
             tokio::spawn(async move {
-                execute_task(db, federation, config, notify, task).await;
+                execute_task(db, federation, config, waker, task).await;
                 drop(permit);
             });
         }
@@ -131,7 +118,7 @@ async fn execute_task(
     db: PgPool,
     federation: FederationClient,
     config: Config,
-    notify: Arc<Notify>,
+    waker: PipelineWaker,
     task: InternalTask,
 ) {
     match task {
@@ -150,25 +137,12 @@ async fn execute_task(
                 "implement tag rename across tags, shares, segmentation configs, hierarchies, ..."
             );
         }
-        InternalTask::AnnounceSharedPictures { .. } => {
-            if let Err(e) = crate::services::shares::deliver_announce_task(
-                &db,
-                &federation,
-                &config,
-                &notify,
-                task,
-            )
-            .await
-            {
-                tracing::error!(error = ?e, "announce task failed");
-            }
-        }
         InternalTask::UnannounceSharedPictures { .. } => {
             if let Err(e) = crate::services::shares::deliver_unannounce_task(
                 &db,
                 &federation,
                 &config,
-                &notify,
+                &waker,
                 task,
             )
             .await

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE outgoing_shares\n               SET status = CASE WHEN $2 THEN 'errored'::share_status ELSE status END,\n                   last_error_at = now() AT TIME ZONE 'utc',\n                   next_retry_at = $3\n               WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bool",
+        "Timestamp"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a62c19ea8d1a15a444fb86f8edfb1a3ee8205877e056c0bbcdd05246bef0d84c"
+}

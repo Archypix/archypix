@@ -8,6 +8,7 @@ use crate::clients::federation::models::ShareAnnouncementRequest;
 use crate::domain::share::{IncomingShare, OutgoingShare, ShareStatus};
 use crate::infra::config::Config;
 use crate::infra::error::{AppError, map_sqlx_error};
+use crate::infra::pipeline::PipelineWaker;
 use crate::infra::redis::Cache;
 use crate::infra::tasks::{InternalTask, TaskQueue};
 use crate::repository::picture::PictureRepository;
@@ -22,8 +23,6 @@ use crate::services::users::find_local_user_id;
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 use std::hash::RandomState;
-use std::sync::Arc;
-use tokio::sync::Notify;
 use tracing::trace;
 use uuid::Uuid;
 
@@ -40,7 +39,7 @@ pub async fn cleanup_incoming_share(
     federation: &FederationClient,
     config: &Config,
     task_queue: &TaskQueue,
-    pipeline_notify: &Arc<Notify>,
+    pipeline_waker: &PipelineWaker,
     share: &IncomingShare,
     final_status: ShareStatus,
 ) -> Result<u64, AppError> {
@@ -105,7 +104,12 @@ pub async fn cleanup_incoming_share(
         entry.2.push(d.announce_id);
     }
     for (os_id, (recipient_username, recipient_instance, picture_ids)) in by_share {
-        let is_same_backend = recipient_instance == config.global_domain;
+        // Same-backend ⇔ the recipient user resolves locally — not merely the same global domain
+        // (multiple backends can share a global domain). See doc/features/02 §5.
+        let is_same_backend =
+            find_local_user_id(cache, db, config, &recipient_username, &recipient_instance)
+                .await?
+                .is_some();
         task_queue.enqueue(InternalTask::UnannounceSharedPictures {
             outgoing_share_id: os_id,
             sender_username: relayer_username.clone(),
@@ -129,7 +133,7 @@ pub async fn cleanup_incoming_share(
                     federation,
                     config,
                     task_queue,
-                    pipeline_notify,
+                    pipeline_waker,
                     share.recipient_id,
                     "", // owner_username only used for cross-instance federation messages
                     sh.id,
@@ -139,7 +143,7 @@ pub async fn cleanup_incoming_share(
         }
     }
 
-    pipeline_notify.notify_one();
+    pipeline_waker.wake(share.recipient_id);
     Ok(deleted)
 }
 
@@ -150,7 +154,7 @@ pub async fn reject_incoming_share(
     federation: &FederationClient,
     config: &Config,
     task_queue: &TaskQueue,
-    pipeline_notify: &Arc<Notify>,
+    pipeline_waker: &PipelineWaker,
     rejector_id: Uuid,
     rejector_username: &str,
     share_id: Uuid,
@@ -170,14 +174,15 @@ pub async fn reject_incoming_share(
         ShareStatus::Pending | ShareStatus::PendingFirstAnnouncement => {
             IncomingShareRepository::set_status(db, share_id, ShareStatus::Tombstoned).await?;
         }
-        ShareStatus::Active => {
+        // `Errored` is outgoing-only, but the shared enum requires a branch; treat like Active.
+        ShareStatus::Active | ShareStatus::Errored => {
             cleanup_incoming_share(
                 db,
                 cache,
                 federation,
                 config,
                 task_queue,
-                pipeline_notify,
+                pipeline_waker,
                 &incoming,
                 ShareStatus::Tombstoned,
             )
@@ -224,7 +229,7 @@ pub async fn create_outgoing_share(
     cache: &dyn Cache,
     federation: &FederationClient,
     config: &Config,
-    pipeline_notify: &Arc<Notify>,
+    pipeline_waker: &PipelineWaker,
     owner_id: Uuid,
     sender_username: &str,
     tag_path: &str,
@@ -318,8 +323,8 @@ pub async fn create_outgoing_share(
     tx.commit().await.map_err(map_sqlx_error)?;
 
     if cross_instance_auto_accepted {
-        // Wake the pipeline to announce the just-created ShareBack's pictures.
-        pipeline_notify.notify_one();
+        // Wake the pipeline to announce the just-created ShareBack's pictures (owner is the sender).
+        pipeline_waker.wake(owner_id);
     }
 
     // Same-backend ShareBack auto-accept (no federation involved). Runs *after* commit and is
@@ -337,7 +342,7 @@ pub async fn create_outgoing_share(
             if verified {
                 match auto_accept_shareback_local(
                     db,
-                    pipeline_notify,
+                    pipeline_waker,
                     recipient_id,
                     &incoming,
                     &original,
@@ -352,7 +357,7 @@ pub async fn create_outgoing_share(
                             ShareStatus::PendingFirstAnnouncement,
                         )
                         .await;
-                        pipeline_notify.notify_one();
+                        pipeline_waker.wake(owner_id);
                     }
                     Err(e) => tracing::error!(
                         share_id = %share.id,
@@ -379,7 +384,7 @@ pub async fn accept_incoming_share(
     cache: &dyn Cache,
     federation: &FederationClient,
     config: &Config,
-    pipeline_notify: &Arc<Notify>,
+    pipeline_waker: &PipelineWaker,
     acceptor_id: Uuid,
     acceptor_username: &str,
     share_id: Uuid,
@@ -394,25 +399,26 @@ pub async fn accept_incoming_share(
     }
 
     match incoming.status {
-        ShareStatus::Pending => {}                              // normal path
-        ShareStatus::Active => return Ok(()),                   // already accepted — idempotent
-        ShareStatus::PendingFirstAnnouncement => return Ok(()), // outgoing-only state, not expected here
+        ShareStatus::Pending => {} // normal path
+        // already accepted / outgoing-only states — idempotent no-op on the incoming side
+        ShareStatus::Active | ShareStatus::PendingFirstAnnouncement | ShareStatus::Errored => {
+            return Ok(());
+        }
         ShareStatus::Revoked | ShareStatus::Tombstoned => return Err(AppError::NotFound),
     }
 
     // Transition to Active immediately — this is the acceptor's consent.
     IncomingShareRepository::set_status(db, incoming.id, ShareStatus::Active).await?;
 
-    if find_local_user_id(
+    let sender_local_id = find_local_user_id(
         cache,
         db,
         config,
         &incoming.sender_username,
         &incoming.sender_instance,
     )
-    .await?
-    .is_some()
-    {
+    .await?;
+    if let Some(sender_id) = sender_local_id {
         // ── Same-backend path ─────────────────────────────────────────────────
         // Hand the sender's OutgoingShare to the pipeline: it announces the current coverage and
         // flips the share to Active. No pictures are registered synchronously here.
@@ -422,7 +428,7 @@ pub async fn accept_incoming_share(
             ShareStatus::PendingFirstAnnouncement,
         )
         .await?;
-        pipeline_notify.notify_one();
+        pipeline_waker.wake(sender_id);
         Ok(())
     } else {
         // ── Cross-instance path ───────────────────────────────────────────────
@@ -456,7 +462,7 @@ pub async fn revoke_outgoing_share(
     federation: &FederationClient,
     config: &Config,
     task_queue: &TaskQueue,
-    pipeline_notify: &Arc<Notify>,
+    pipeline_waker: &PipelineWaker,
     owner_id: Uuid,
     owner_username: &str,
     share_id: Uuid,
@@ -502,7 +508,7 @@ pub async fn revoke_outgoing_share(
                     federation,
                     config,
                     task_queue,
-                    pipeline_notify,
+                    pipeline_waker,
                     &incoming,
                     ShareStatus::Revoked,
                 )

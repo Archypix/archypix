@@ -108,6 +108,6 @@ pub async fn edit(
     if let Err(e) = PipelineRepository::invalidate(&state.db, &payload.picture_ids).await {
         tracing::error!(error = ?e, "failed to invalidate pipeline for edited pictures");
     }
-    state.pipeline_notify.notify_one();
+    state.pipeline_waker.wake(auth.user_id()?);
     Ok(Json(serde_json::json!({ "ok": true })))
 }

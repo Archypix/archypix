@@ -10,6 +10,7 @@ mod common;
 use archypix_back::domain::share::ShareStatus;
 use archypix_back::infra::config::Config;
 use archypix_back::infra::pipeline;
+use archypix_back::infra::pipeline::PipelineWaker;
 use archypix_back::infra::tasks::TaskQueue;
 use archypix_back::repository::share::{IncomingShareRepository, OutgoingShareRepository};
 use archypix_back::repository::tag::TagRepository;
@@ -17,7 +18,6 @@ use archypix_back::services::shares;
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Notify;
 use uuid::Uuid;
 
 use axum::body::Body;
@@ -83,7 +83,7 @@ fn config() -> Config {
 }
 
 /// Build the shared deps (cache, federation, task queue with spawned runner, pipeline notify).
-async fn deps(db: &PgPool) -> (Config, Arc<common::InMemoryCache>, TaskQueue, Arc<Notify>) {
+async fn deps(db: &PgPool) -> (Config, Arc<common::InMemoryCache>, TaskQueue, PipelineWaker) {
     let config = config();
     let (fed, cache) = common::make_federation(&config);
     let (queue, notify) = common::test_task_queue(db, &config);
@@ -92,12 +92,14 @@ async fn deps(db: &PgPool) -> (Config, Arc<common::InMemoryCache>, TaskQueue, Ar
     (config, cache, queue, notify)
 }
 
-/// Run the pipeline once for `user` and give the spawned task runner time to deliver.
-async fn run_pipeline_and_settle(db: &PgPool, queue: &TaskQueue, config: &Config, user: Uuid) {
-    pipeline::run_once_for_user(db, queue, config, user)
+/// Run the pipeline once for `user`. Delivery is inline (same-backend registers synchronously), so
+/// no settle delay is needed. (`_queue` is kept for call-site symmetry with the share helpers.)
+async fn run_pipeline_and_settle(db: &PgPool, _queue: &TaskQueue, config: &Config, user: Uuid) {
+    let (fed, cache) = common::make_federation(config);
+    let waker = PipelineWaker::disconnected();
+    pipeline::run_once_for_user(db, &fed, cache.as_ref(), config, &waker, user)
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(250)).await;
 }
 
 /// Create an active same-backend share of `tag` from `sender` to `recipient`, accept it, and run
@@ -109,7 +111,7 @@ async fn active_share(
     config: &Config,
     cache: &Arc<common::InMemoryCache>,
     queue: &TaskQueue,
-    notify: &Arc<Notify>,
+    notify: &PipelineWaker,
     sender_id: Uuid,
     sender_name: &str,
     recipient_id: Uuid,

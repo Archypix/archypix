@@ -1,5 +1,6 @@
 use crate::domain::share::{IncomingShare, OutgoingShare, ShareStatus};
 use crate::infra::error::{AppError, map_sqlx_error};
+use chrono::NaiveDateTime;
 use sqlx::{Executor, Postgres};
 use uuid::Uuid;
 
@@ -84,11 +85,14 @@ impl OutgoingShareRepository {
         .map_err(map_sqlx_error)
     }
 
-    /// List the owner's shares awaiting their first announcement (`pending_first_announcement`).
-    /// The pipeline announces each one's current coverage and flips it to `active`.
-    pub async fn list_pending_first_announcement_by_owner<'e, E>(
+    /// List the owner's shares needing a full reconcile pass: those awaiting their first
+    /// announcement (`pending_first_announcement`) or recovering from a failed delivery
+    /// (`errored`), whose backoff window (`next_retry_at`) has elapsed. The pipeline reconciles each
+    /// one's full coverage against the tracking table and flips it to `active` once fully delivered.
+    pub async fn list_announceable_by_owner<'e, E>(
         ex: E,
         owner_id: Uuid,
+        now: NaiveDateTime,
     ) -> Result<Vec<OutgoingShare>, AppError>
     where
         E: Executor<'e, Database = Postgres>,
@@ -101,8 +105,11 @@ impl OutgoingShareRepository {
                       status as "status: ShareStatus",
                       created_at, revoked_at
                FROM outgoing_shares
-               WHERE owner_id = $1 AND status = 'pending_first_announcement'::share_status"#,
+               WHERE owner_id = $1
+                 AND status IN ('pending_first_announcement'::share_status, 'errored'::share_status)
+                 AND (next_retry_at IS NULL OR next_retry_at <= $2)"#,
             owner_id,
+            now,
         )
         .fetch_all(ex)
         .await
@@ -157,6 +164,51 @@ impl OutgoingShareRepository {
                WHERE id = $1"#,
             share_id,
             status as ShareStatus,
+        )
+        .execute(ex)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(())
+    }
+
+    /// A reconcile pass fully delivered the share: flip to `active` and clear the backoff.
+    pub async fn mark_announce_success<'e, E>(ex: E, share_id: Uuid) -> Result<(), AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query!(
+            r#"UPDATE outgoing_shares
+               SET status = 'active'::share_status, last_error_at = NULL, next_retry_at = NULL
+               WHERE id = $1"#,
+            share_id,
+        )
+        .execute(ex)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(())
+    }
+
+    /// A delivery failed: record the error and set the backoff. `demote_to_errored` is true when the
+    /// share was `active` (the incremental path failed) — it moves to `errored` so the next pass is
+    /// a full reconcile; otherwise the status (`pending_first_announcement`/`errored`) is kept.
+    pub async fn mark_announce_failure<'e, E>(
+        ex: E,
+        share_id: Uuid,
+        demote_to_errored: bool,
+        next_retry_at: NaiveDateTime,
+    ) -> Result<(), AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query!(
+            r#"UPDATE outgoing_shares
+               SET status = CASE WHEN $2 THEN 'errored'::share_status ELSE status END,
+                   last_error_at = now() AT TIME ZONE 'utc',
+                   next_retry_at = $3
+               WHERE id = $1"#,
+            share_id,
+            demote_to_errored,
+            next_retry_at,
         )
         .execute(ex)
         .await

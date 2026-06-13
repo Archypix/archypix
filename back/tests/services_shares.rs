@@ -7,7 +7,6 @@ use archypix_back::infra::pipeline;
 use archypix_back::repository::share::{IncomingShareRepository, OutgoingShareRepository};
 use archypix_back::services::shares;
 use sqlx::PgPool;
-use std::time::Duration;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
@@ -30,7 +29,7 @@ async fn accept_and_announce(
     sender_id: uuid::Uuid,
 ) {
     let (fed, cache) = common::make_federation(config);
-    let (queue, notify) = common::test_task_queue(db, config);
+    let (_queue, notify) = common::test_task_queue(db, config);
     shares::accept_incoming_share(
         db,
         cache.as_ref(),
@@ -43,10 +42,9 @@ async fn accept_and_announce(
     )
     .await
     .unwrap();
-    pipeline::run_once_for_user(db, &queue, config, sender_id)
+    pipeline::run_once_for_user(db, &fed, cache.as_ref(), config, &notify, sender_id)
         .await
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(250)).await;
 }
 
 /// Share Alice's `tag_path` with Bob (same backend — recipient_instance = global_domain).
@@ -57,7 +55,7 @@ async fn alice_shares_with_bob(
 ) -> archypix_back::domain::share::OutgoingShare {
     let config = config();
     let (fed, cache) = common::make_federation(&config);
-    let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+    let notify = archypix_back::infra::pipeline::PipelineWaker::disconnected();
 
     shares::create_outgoing_share(
         db,
@@ -160,7 +158,7 @@ async fn accept_incoming_share_is_idempotent(db: PgPool) {
         cache.as_ref(),
         &fed,
         &config,
-        &std::sync::Arc::new(tokio::sync::Notify::new()),
+        &archypix_back::infra::pipeline::PipelineWaker::disconnected(),
         bob_id,
         "bob",
         incoming.id,
@@ -434,7 +432,7 @@ async fn cleanup_incoming_share_deletes_unreachable_pictures_only(db: PgPool) {
 
     let config = config();
     let (fed, cache) = common::make_federation(&config);
-    let notify = std::sync::Arc::new(tokio::sync::Notify::new());
+    let notify = archypix_back::infra::pipeline::PipelineWaker::disconnected();
 
     // Share 2: "trip" → Bob (different tag — no unique-constraint conflict)
     let share2 = shares::create_outgoing_share(

@@ -1,17 +1,10 @@
 //! Per-user tag service evaluation + reconciliation, plus the announcement step.
-//!
-//! # Evaluation order
-//! Services run in fixed order: `SharedTagMapping → Rule → Segmentation`.
-//! Each service sees the tags added by the previous ones (in-memory accumulation),
-//! enabling downstream services to use upstream results via `requires`.
 
 use crate::domain::pipeline::{self, PipelineInput};
 use crate::domain::tag::{TagPath, TagSource};
 use crate::domain::tagging::ServiceType;
-use crate::infra::config::Config;
 use crate::infra::error::AppError;
-use crate::infra::pipeline::announcement;
-use crate::infra::tasks::TaskQueue;
+use crate::infra::pipeline::{PipelineRun, announcement};
 use crate::repository::pipeline::{PipelineRepository, PipelineTagAssignment};
 use crate::repository::tag::TagRepository;
 use crate::repository::tagging::{
@@ -19,23 +12,20 @@ use crate::repository::tagging::{
     TaggingServiceRepository,
 };
 use chrono::Utc;
-use sqlx::PgPool;
 use std::collections::HashMap;
 use std::time::Duration;
 use uuid::Uuid;
 
-pub async fn run_for_user(
-    db: &PgPool,
-    task_queue: &TaskQueue,
-    config: &Config,
-    user_id: Uuid,
-) -> Result<(), AppError> {
+pub async fn run_for_user(run: &PipelineRun<'_>, user_id: Uuid) -> Result<(), AppError> {
+    let db = run.db;
+    let config = run.config;
     let run_at = Utc::now().naive_utc();
 
-    // ── Initial announcements ───────────────────────────────────────────────────
-    // Announce the current coverage of any `pending_first_announcement` share and flip it to
-    // `active`. Runs regardless of tagging services / dirty pictures (the share may be empty).
-    announcement::process_first_announcements(db, task_queue, config, user_id).await?;
+    // ── Initial / recovery announcements ────────────────────────────────────────
+    // Reconcile any `pending_first_announcement` / `errored` share's full coverage (deliver inline,
+    // flip to `active` on success). Runs regardless of tagging services / dirty pictures (the share
+    // may be empty, or recovering from a failed delivery with no tagging changes).
+    announcement::reconcile_pending_and_errored(run, user_id).await?;
 
     // ── Load services ─────────────────────────────────────────────────────────
     // May be empty: a user with no tagging services but an active future share still needs the
@@ -192,10 +182,8 @@ pub async fn run_for_user(
             tracing::error!(error = ?e, "pipeline: failed to mark pictures as run");
         }
 
-        // Diff share coverage against the tracking table and enqueue (un)announce tasks.
-        if let Err(e) =
-            announcement::process_batch(db, task_queue, config, user_id, &success_ids).await
-        {
+        // Diff share coverage against the tracking table and deliver (un)announce inline.
+        if let Err(e) = announcement::reconcile_active_batch(run, user_id, &success_ids).await {
             tracing::error!(error = ?e, "pipeline: announcement step failed for batch");
         }
 

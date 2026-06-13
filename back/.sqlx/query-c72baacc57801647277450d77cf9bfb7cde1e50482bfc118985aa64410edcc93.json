@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT p.local_user_id AS \"id!\"\n               FROM pictures p\n               WHERE (p.last_pipeline_run_at IS NULL)\n                  OR EXISTS (\n                     SELECT 1 FROM tagging_services ts\n                     WHERE ts.owner_id = p.local_user_id\n                       AND ts.enabled = true\n                       AND p.last_pipeline_run_at < ts.last_invalidated_at\n                  )\n               UNION\n               -- Owners of shares awaiting a (re)announcement whose backoff window has elapsed.\n               SELECT DISTINCT os.owner_id AS \"id!\"\n               FROM outgoing_shares os\n               WHERE os.status IN ('pending_first_announcement'::share_status, 'errored'::share_status)\n                 AND (os.next_retry_at IS NULL OR os.next_retry_at <= now() AT TIME ZONE 'utc')",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "c72baacc57801647277450d77cf9bfb7cde1e50482bfc118985aa64410edcc93"
+}

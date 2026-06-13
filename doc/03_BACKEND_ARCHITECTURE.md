@@ -62,7 +62,7 @@ services/
     lifecycle.rs    # create/accept/revoke/reject + cleanup_incoming_share (share state)
     registration.rs # recipient-side received-picture register / unregister
     shareback.rs    # ShareBack auto-accept (mapping wiring)
-    delivery.rs     # task delivery of announce / unannounce
+    delivery.rs     # best-effort task delivery of the revocation-cascade unannounce
   federation.rs     # inbound federation protocol handlers (receive_share_announcement, receive_share_accept, receive_share_revoke, receive_share_reject, receive_pictures_announcement, receive_pictures_unannouncement, presign_by_picture_tokens)
 
 api/
@@ -75,11 +75,11 @@ api/
 
 infra/
   config.rs / error.rs / redis.rs / crypto.rs / db.rs / s3.rs
-  tasks.rs           # in-process Tokio task queue (tag rename, share announce/unannounce)
+  tasks.rs           # in-process Tokio task queue (tag rename, revocation-cascade unannounce)
   pipeline.rs        # tagging pipeline: loop, sweep
   pipeline/
     evaluation.rs    # per-user tag service evaluation + reconciliation, then announcement
-    announcement.rs  # process_first_announcements (initial, PFA) + process_batch (ongoing diff)
+    announcement.rs  # inline reconcile_share: PFA/errored full pass + active dirty-delta (deliver-then-record)
   job_watchdog.rs    # periodic reset of stale processing jobs
 ```
 
@@ -96,7 +96,7 @@ pub struct AppState {
     pub federation: FederationClient,
     pub resolver: ResolverClient,
     pub task_queue: TaskQueue,       // in-process task queue (tag rename)
-    pub pipeline_notify: Arc<Notify>, // wakes the tagging pipeline loop
+    pub pipeline_waker: PipelineWaker, // per-user wake handle (mpsc<Uuid>) for the pipeline loop
 }
 ```
 
@@ -108,7 +108,10 @@ assignments.
 **Dirty picture detection** — `pictures.last_pipeline_run_at` is `NULL` on new/invalidated pictures; `tagging_services.last_invalidated_at` bumps on
 any config change. A picture is dirty when `last_pipeline_run_at IS NULL OR last_pipeline_run_at < last_invalidated_at` for any enabled service.
 
-**Wake model** — `tokio::sync::Notify` for event-driven wakes + configurable polling fallback (`PIPELINE_POLL_INTERVAL_SECS`, default 1 hour).
+**Wake model** — a per-user `mpsc<Uuid>` (`PipelineWaker`) for event-driven wakes, consumed by a per-user coalescing scheduler that runs users
+concurrently (bounded by `PIPELINE_CONCURRENCY`, default 4) and serially per user, plus a configurable polling fallback (
+`PIPELINE_POLL_INTERVAL_SECS`, default 1 hour) that re-enqueues all dirty users. A missed wake is latency-only — the poll sweep recovers it. See
+`doc/features/02_pipeline_announcement_robustness.md` §7.
 Notified after: ingest, manual tag edit, service config change, inbound share announcement, `cleanup_incoming_share`.
 
 **Evaluation order** — `SharedTagMapping` always runs first (no user control; it only depends on incoming share IDs). Rule and Segmentation services
@@ -125,14 +128,22 @@ services (in-memory, per picture); pipeline tags are re-derived from scratch eac
 **Reconciliation** — `PipelineRepository::reconcile_pipeline_tags` (atomic CTE per picture) inserts produced tags and deletes stale `rule`/`segment`/
 `share_mapping` rows. `manual` and `incoming_share` tags are never touched.
 
-**Announcement** — the pipeline is the single picture-announcement path, with two entry points in `pipeline::announcement`:
+**Announcement** — the pipeline is the single picture-announcement path and delivers **inline**
+(deliver-then-record: federation call / same-backend registration first, tracking rows + status flip
+only on success). Two entry points in `pipeline::announcement` wrap an internal `reconcile_share`:
 
-- `process_first_announcements` — for each `pending_first_announcement` share: announces current coverage (ignoring `future`), flips to `active`,
-  records tracking rows in one transaction.
-- `process_batch` — after reconciliation: diffs `active` + `future=true` shares, announces new coverage, unannounces lost coverage, re-announces
-  received pictures whose token changed.
+- `reconcile_pending_and_errored` — for each `pending_first_announcement` (initial) or `errored`
+  (failure recovery) share whose `next_retry_at` backoff has elapsed: diffs **full** coverage against
+  the tracking table, delivers, and flips to `active` once fully delivered.
+- `reconcile_active_batch` — after reconciliation: diffs `active` + `future=true` shares over the
+  batch's **dirty** pictures, announcing new coverage, unannouncing lost coverage, and re-announcing
+  received pictures whose upstream token moved.
 
-The sweep wakes for users with dirty pictures **or** a `pending_first_announcement` share.
+A failed delivery demotes an `active` share to `errored` and sets a `next_retry_at` backoff
+(`PIPELINE_RETRY_BACKOFF_SECS`); the next pass is then a full reconcile. Same-backend vs cross-instance
+is decided by `find_local_user_id` (not a global-domain comparison). The sweep wakes for users with
+dirty pictures **or** a `pending_first_announcement`/`errored` share past its backoff. See
+`doc/features/02_pipeline_announcement_robustness.md`.
 
 **Service lifecycle** — **disabling** deletes its tags (`TagRepository::remove_service_tags`); **deleting** either promotes them to `manual` (
 `promote_service_tags_to_manual`, pre-existing manual tag on the same path wins) or removes them, controlled by the `promote_tags` flag.
@@ -339,12 +350,14 @@ When a federation **handler** must itself make a federation call, pick the first
 1. **Inline, same transaction** — only when the inner call does not depend on the outer requester's uncommitted state.
 2. **Return a value instead of calling back** — when the inner call would depend on uncommitted state. *ShareBack: `shares/announce`
    returns `auto_accepted: true`; the initiator acts within its own still-open transaction instead of receiving a callback.*
-3. **Deferred task** — when neither fits; tolerate silent failure since the outer request can no longer be rolled back. Used for `pictures/unannounce`
-   delivery and picture announcement.
+3. **Deferred task** — when neither fits; tolerate silent failure since the outer request can no longer be rolled back. Used for the best-effort
+   downstream `pictures/unannounce` cascade emitted by `cleanup_incoming_share` during revocation.
 
-**Picture announcement is pipeline-driven.** No flow announces pictures synchronously. Accepting a share moves the `OutgoingShare` to
-`pending_first_announcement`; the pipeline announces current coverage (ignoring `future`), flips it to `active`, and enqueues delivery. This makes
-initial and ongoing announce one mechanism, and eliminates cross-backend callbacks on uncommitted state.
+**Picture announcement is pipeline-driven.** No request handler announces pictures synchronously. Accepting a share moves the `OutgoingShare` to
+`pending_first_announcement`; the pipeline reconciles its coverage and delivers **inline** (deliver-then-record), flipping it to `active` on success
+or
+to `errored` (with a retry backoff) on failure. This makes initial and ongoing announce one mechanism, eliminates cross-backend callbacks on
+uncommitted state, and makes a failed delivery self-healing — the next reconcile re-derives it from coverage-vs-tracking, so nothing is silently lost.
 
 **Revocation is local-first** (intentional exception). Local state and presign tokens are deleted immediately; downstream delivery of
 `shares/revoke` / `pictures/unannounce` is best-effort.
@@ -382,10 +395,11 @@ demand.
     - **Same-backend**: Alice’s `OutgoingShare` is moved to `pending_first_announcement`; the pipeline takes over (step 3).
     - **Cross-instance**: sends `POST /api/federation/shares/accept` to Alice’s backend. If delivery fails the `IncomingShare` reverts to `pending`.
       On receipt, Alice moves her `OutgoingShare` to `pending_first_announcement`.
-3. The **pipeline** (on the sender's backend) sees the `pending_first_announcement` share, announces its current coverage (ignoring `future`) by
-   recording per-picture tokens and enqueuing `pictures/announce`, and flips the share to `active` — tracking rows + status in one transaction. This
-   is
-   the single announce path; `future = true` shares are subsequently re-diffed by the same pipeline.
+3. The **pipeline** (on the sender's backend) sees the `pending_first_announcement` share and reconciles its current coverage (ignoring `future`):
+   it mints a per-picture token, delivers `pictures/announce` **inline** (cross-instance HTTP, or same-backend registration), and — only on success —
+   records the tracking rows and flips the share to `active`. A delivery failure moves it to `errored` with a retry backoff instead. This is the
+   single
+   announce path; `future = true` shares are subsequently re-diffed by the same pipeline.
 
 **ShareBack** (`shares/outgoing` with `shareback_of` set, `allowShareBack = true` on the referenced share): the recipient *auto-accepts* in its
 `shares/announce` handler (sets its `IncomingShare = active` and creates the `SharedTagMappingService` mapping) and returns `auto_accepted: true`

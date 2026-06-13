@@ -83,7 +83,7 @@ pub async fn announce_share(
     let (incoming_id, auto_accepted) = fed::receive_share_announcement(
         &state.db,
         &state.config,
-        &state.pipeline_notify,
+        &state.pipeline_waker,
         &auth.claims.sub,
         &payload.sender_username,
         &payload.sender_instance,
@@ -129,7 +129,7 @@ pub async fn revoke_share(
         &state.federation,
         &state.config,
         &state.task_queue,
-        &state.pipeline_notify,
+        &state.pipeline_waker,
         &auth.claims.sub,
         payload.outgoing_share_id,
     )
@@ -174,7 +174,7 @@ pub async fn accept_share(
     );
     fed::receive_share_accept(
         &state.db,
-        &state.pipeline_notify,
+        &state.pipeline_waker,
         &auth.claims.sub,
         payload.outgoing_share_id,
     )
@@ -202,6 +202,7 @@ pub async fn announce_pictures(
         &state.db,
         state.cache.as_ref(),
         &state.config,
+        &state.pipeline_waker,
         &auth.claims.sub,
         &payload.sender_username,
         &payload.sender_instance,
@@ -215,10 +216,6 @@ pub async fn announce_pictures(
         registered,
         "federation: pictures registered"
     );
-    // Newly received pictures start with last_pipeline_run_at = NULL → wake the pipeline.
-    if registered > 0 {
-        state.pipeline_notify.notify_one();
-    }
     Ok(Json(serde_json::json!({ "registered": registered })))
 }
 
@@ -236,7 +233,7 @@ pub async fn unannounce_pictures(
     );
     let deleted = fed::receive_pictures_unannouncement(
         &state.db,
-        &state.pipeline_notify,
+        &state.pipeline_waker,
         &auth.claims.sub,
         payload.outgoing_share_id,
         &payload.picture_ids,

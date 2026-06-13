@@ -1,263 +1,353 @@
 //! Pipeline announcement step — the single picture-announcement path.
 //!
-//! Two entry points, both diffing share coverage against the `share_announcements` tracking table
-//! and enqueuing `AnnounceSharedPictures` / `UnannounceSharedPictures` tasks:
+//! [`reconcile_share`] diffs one share's coverage against the `share_announcements` tracking table
+//! and delivers **inline** with deliver-then-record ordering: the federation call (cross-instance)
+//! or local registration (same-backend) happens first, and tracking rows / status flips are written
+//! only on success. A failed delivery demotes an `active` share to `errored` and sets a retry
+//! backoff; a fully-delivered `pending_first_announcement`/`errored` share flips to `active`.
 //!
-//! - [`process_first_announcements`] — for each `pending_first_announcement` share, announce its
-//!   current coverage (ignoring `future`) and flip it to `active`, in one transaction. This is the
-//!   *initial* announce, triggered by share acceptance.
-//! - [`process_batch`] — the *ongoing* diff for `active` + `future = true` shares over a batch of
-//!   reconciled (dirty) pictures: announce new coverage, unannounce lost coverage, and refresh
-//!   tokens after a partial upstream revocation.
+//! Two entry points select the coverage scope:
+//! - [`reconcile_pending_and_errored`] — full coverage for `pending_first_announcement`/`errored`
+//!   shares (the initial announce and the failure-recovery pass).
+//! - [`reconcile_active_batch`] — the dirty-picture delta for `active` + `future = true` shares.
 //!
-//! Loop prevention (owner == recipient) is applied by the coverage query / inline check.
+//! See `doc/features/02_pipeline_announcement_robustness.md` §3/§4.
 
-use crate::clients::federation::models::AnnouncedPicture;
+use super::PipelineRun;
+use crate::clients::federation::models::{
+    AnnouncedPicture, PicturesAnnouncementRequest, PicturesUnannouncementRequest,
+};
 use crate::domain::picture::Picture;
-use crate::domain::share::ShareStatus;
-use crate::infra::config::Config;
-use crate::infra::error::AppError;
-use crate::infra::error::map_sqlx_error;
-use crate::infra::tasks::{InternalTask, TaskQueue};
+use crate::domain::share::{OutgoingShare, ShareStatus};
+use crate::domain::tag::TagPath;
+use crate::infra::error::{AppError, map_sqlx_error};
 use crate::repository::picture::PictureRepository;
-use crate::repository::share::OutgoingShareRepository;
+use crate::repository::share::{IncomingShareRepository, OutgoingShareRepository};
 use crate::repository::share_announcement::ShareAnnouncementRepository;
 use crate::repository::tag::TagRepository;
 use crate::repository::user::UserRepository;
-use sqlx::PgPool;
+use crate::services::shares::registration::{
+    register_received_pictures, unregister_announced_pictures,
+};
+use crate::services::users::find_local_user_id;
+use chrono::{Duration as ChronoDuration, Utc};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-/// The id the recipient stores as `remote_picture_id` — the original owner's picture id.
-fn announce_id(p: &Picture) -> String {
-    p.remote_picture_id
-        .clone()
-        .unwrap_or_else(|| p.id.to_string())
+/// Which pictures a reconcile pass considers.
+enum CoverageScope<'a> {
+    /// All pictures under the share's tag (PFA / Errored full reconcile).
+    Full,
+    /// Only these dirty pictures (the active incremental fast path).
+    Dirty(&'a [Uuid]),
 }
 
-/// Resolve the token for a freshly-covered picture and record it in `share_announcements` (inside
-/// `tx`): an owned picture gets a newly generated token; a received picture forwards its active
-/// upstream token (returns `None` — skip — when no active upstream token exists). The single
-/// place where new tracking rows are created, shared by both announcement entry points.
-async fn record_new_token(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    share_id: Uuid,
-    picture: &Picture,
-) -> Result<Option<Uuid>, AppError> {
-    if picture.is_owned() {
-        Ok(Some(
-            ShareAnnouncementRepository::insert(&mut **tx, share_id, picture.id).await?,
-        ))
-    } else {
-        let Some(upstream) =
-            TagRepository::find_active_picture_token(&mut **tx, picture.id).await?
-        else {
-            return Ok(None);
-        };
-        ShareAnnouncementRepository::insert_with_token(&mut **tx, share_id, picture.id, upstream)
-            .await?;
-        Ok(Some(upstream))
-    }
-}
-
-/// Initial announcement: for every `pending_first_announcement` share owned by `user_id`, announce
-/// its current coverage (ignoring `future`) and transition it to `active`. Tracking rows and the
-/// status flip are written in a single transaction per share; the delivery task is enqueued after
-/// commit.
-pub async fn process_first_announcements(
-    db: &PgPool,
-    task_queue: &TaskQueue,
-    config: &Config,
+/// Reconcile every share of `user_id` needing a full pass: `pending_first_announcement` (initial
+/// announce) or `errored` (failure recovery), with the backoff window already elapsed.
+pub async fn reconcile_pending_and_errored(
+    run: &PipelineRun<'_>,
     user_id: Uuid,
 ) -> Result<(), AppError> {
-    let shares =
-        OutgoingShareRepository::list_pending_first_announcement_by_owner(db, user_id).await?;
+    let now = Utc::now().naive_utc();
+    let shares = OutgoingShareRepository::list_announceable_by_owner(run.db, user_id, now).await?;
     if shares.is_empty() {
         return Ok(());
     }
-    let sender_username = UserRepository::find_by_id(db, user_id)
-        .await?
-        .map(|u| u.username)
-        .unwrap_or_default();
-
+    let sender = sender_username(run, user_id).await?;
     for share in shares {
-        let pictures =
-            PictureRepository::list_by_tag_for_user(db, share.owner_id, &share.tag_path).await?;
-
-        let mut items: Vec<AnnouncedPicture> = Vec::new();
-        let mut tx = db.begin().await.map_err(map_sqlx_error)?;
-        for p in &pictures {
-            // Loop prevention: never announce a picture back to its own owner.
-            if p.owner_username.as_deref() == Some(&share.recipient_username)
-                && p.owner_instance_domain.as_deref() == Some(&share.recipient_instance)
-            {
-                continue;
-            }
-            if let Some(token) = record_new_token(&mut tx, share.id, p).await? {
-                items.push(AnnouncedPicture::from_picture(
-                    p,
-                    token,
-                    &sender_username,
-                    &config.global_domain,
-                ));
-            }
-        }
-        // Flip to Active in the same transaction as the tracking rows it just wrote.
-        OutgoingShareRepository::set_status(&mut *tx, share.id, ShareStatus::Active).await?;
-        tx.commit().await.map_err(map_sqlx_error)?;
-
-        if !items.is_empty() {
-            let is_same_backend = share.recipient_instance == config.global_domain;
-            task_queue.enqueue(InternalTask::AnnounceSharedPictures {
-                outgoing_share_id: share.id,
-                sender_username: sender_username.clone(),
-                recipient_username: share.recipient_username.clone(),
-                recipient_instance: share.recipient_instance.clone(),
-                tag_path: share.tag_path.clone(),
-                pictures: items,
-                is_same_backend,
-            });
-        }
+        reconcile_share(run, &share, CoverageScope::Full, &sender).await?;
     }
     Ok(())
 }
 
-/// Ongoing announce/unannounce diff for a batch of reconciled (dirty) picture ids, over the user's
-/// `active` + `future = true` shares.
-pub async fn process_batch(
-    db: &PgPool,
-    task_queue: &TaskQueue,
-    config: &Config,
+/// Reconcile the user's `active` + `future = true` shares over a batch of reconciled dirty pictures.
+pub async fn reconcile_active_batch(
+    run: &PipelineRun<'_>,
     user_id: Uuid,
     dirty_ids: &[Uuid],
 ) -> Result<(), AppError> {
     if dirty_ids.is_empty() {
         return Ok(());
     }
-
-    // Active future shares.
-    let shares = OutgoingShareRepository::list_active_future_by_owner(db, user_id).await?;
+    let shares = OutgoingShareRepository::list_active_future_by_owner(run.db, user_id).await?;
     if shares.is_empty() {
         return Ok(());
     }
-    let share_ids: Vec<Uuid> = shares.iter().map(|s| s.id).collect();
-    let share_by_id: HashMap<Uuid, _> = shares.iter().map(|s| (s.id, s)).collect();
-
-    // Coverage, tracking, upstream tokens, and picture metadata (all read before the write tx).
-    let coverage = ShareAnnouncementRepository::current_coverage(db, user_id, dirty_ids).await?;
-    let tracking =
-        ShareAnnouncementRepository::find_tracking_for_pictures(db, &share_ids, dirty_ids).await?;
-    let upstream = TagRepository::active_picture_tokens_for(db, dirty_ids).await?;
-
-    let mut tracking_map: HashMap<(Uuid, Uuid), Uuid> = HashMap::new();
-    for (share_id, pic, token) in &tracking {
-        tracking_map.insert((*share_id, *pic), *token);
+    let sender = sender_username(run, user_id).await?;
+    for share in shares {
+        reconcile_share(run, &share, CoverageScope::Dirty(dirty_ids), &sender).await?;
     }
-    let coverage_set: HashSet<(Uuid, Uuid)> =
-        coverage.iter().map(|(pic, share)| (*share, *pic)).collect();
+    Ok(())
+}
 
-    let mut involved: HashSet<Uuid> = HashSet::new();
-    for (pic, _) in &coverage {
-        involved.insert(*pic);
-    }
-    for (_, pic, _) in &tracking {
+async fn sender_username(run: &PipelineRun<'_>, user_id: Uuid) -> Result<String, AppError> {
+    Ok(UserRepository::find_by_id(run.db, user_id)
+        .await?
+        .map(|u| u.username)
+        .unwrap_or_default())
+}
+
+/// The id the recipient stores as `remote_picture_id` (the original owner's picture id).
+fn announce_id(p: &Picture) -> String {
+    p.remote_picture_id
+        .clone()
+        .unwrap_or_else(|| p.id.to_string())
+}
+
+fn needs_activation(share: &OutgoingShare) -> bool {
+    matches!(
+        share.status,
+        ShareStatus::PendingFirstAnnouncement | ShareStatus::Errored
+    )
+}
+
+/// Diff one share against the tracking table, deliver inline, and record on success.
+async fn reconcile_share(
+    run: &PipelineRun<'_>,
+    share: &OutgoingShare,
+    scope: CoverageScope<'_>,
+    sender_username: &str,
+) -> Result<(), AppError> {
+    let db = run.db;
+    let scope_ids: Option<&[Uuid]> = match &scope {
+        CoverageScope::Full => None,
+        CoverageScope::Dirty(ids) => Some(ids),
+    };
+
+    // ── Read current coverage and existing tracking ───────────────────────────
+    let covered: HashSet<Uuid> = ShareAnnouncementRepository::coverage_for_share(
+        db,
+        share.owner_id,
+        &share.tag_path,
+        &share.recipient_username,
+        &share.recipient_instance,
+        scope_ids,
+    )
+    .await?
+    .into_iter()
+    .collect();
+
+    let tracking = ShareAnnouncementRepository::tracking_for_share(db, share.id, scope_ids).await?;
+    let tracking_map: HashMap<Uuid, Uuid> = tracking.iter().copied().collect();
+
+    // Picture metadata + upstream tokens for everything involved.
+    let mut involved: HashSet<Uuid> = covered.iter().copied().collect();
+    for (pic, _) in &tracking {
         involved.insert(*pic);
     }
     let involved_ids: Vec<Uuid> = involved.into_iter().collect();
-    let metas = PictureRepository::list_by_ids(db, &involved_ids).await?;
-    let meta_by_id: HashMap<Uuid, Picture> = metas.into_iter().map(|p| (p.id, p)).collect();
-
-    let sender_username = UserRepository::find_by_id(db, user_id)
+    let meta_by_id: HashMap<Uuid, Picture> = PictureRepository::list_by_ids(db, &involved_ids)
         .await?
-        .map(|u| u.username)
-        .unwrap_or_default();
+        .into_iter()
+        .map(|p| (p.id, p))
+        .collect();
+    let upstream = TagRepository::active_picture_tokens_for(db, &involved_ids).await?;
 
-    // Accumulate announce / unannounce work per share, applying all tracking mutations in one tx.
-    let mut announce_by_share: HashMap<Uuid, Vec<AnnouncedPicture>> = HashMap::new();
-    let mut unannounce_by_share: HashMap<Uuid, Vec<String>> = HashMap::new();
-    let mut tx = db.begin().await.map_err(map_sqlx_error)?;
-
-    // ── New coverage / token refresh ──────────────────────────────────────────
-    for (pic, share) in &coverage {
+    // ── Compute the announce set (with the token to record on success) ────────
+    let mut announce_items: Vec<AnnouncedPicture> = Vec::new();
+    let mut announce_tokens: Vec<(Uuid, Uuid)> = Vec::new();
+    for pic in &covered {
         let Some(meta) = meta_by_id.get(pic) else {
             continue;
         };
-        let desired = upstream.get(pic).copied(); // Some => received picture
-        let token = match tracking_map.get(&(*share, *pic)) {
-            None => match record_new_token(&mut tx, *share, meta).await? {
-                Some(t) => t,
-                None => continue, // received picture without an active upstream token
+        let desired_upstream = upstream.get(pic).copied(); // Some => received (relayed) picture
+        let token = match tracking_map.get(pic) {
+            None => match desired_upstream {
+                Some(up) => up,                            // received: forward its upstream token
+                None if meta.is_owned() => Uuid::new_v4(), // owned: mint a fresh token
+                None => continue, // received but no active upstream token yet
             },
-            Some(existing) => match desired {
-                // Already announced — re-announce only on a token change (received picture whose
-                // upstream token moved). Owned pictures have no upstream token → stable.
-                Some(up) if up != *existing => {
-                    ShareAnnouncementRepository::update_token(&mut *tx, *share, *pic, up).await?;
-                    up
-                }
-                _ => continue,
+            Some(existing) => match desired_upstream {
+                Some(up) if up != *existing => up, // received whose upstream token moved → re-announce
+                _ => continue,                     // already announced, token stable → skip
             },
         };
-        announce_by_share
-            .entry(*share)
-            .or_default()
-            .push(AnnouncedPicture::from_picture(
-                meta,
-                token,
-                &sender_username,
-                &config.global_domain,
-            ));
+        announce_items.push(AnnouncedPicture::from_picture(
+            meta,
+            token,
+            sender_username,
+            &run.config.global_domain,
+        ));
+        announce_tokens.push((*pic, token));
     }
 
-    // ── Lost coverage → unannounce ────────────────────────────────────────────
-    for (share, pic, _token) in &tracking {
-        if coverage_set.contains(&(*share, *pic)) {
+    // ── Compute the unannounce set (tracked but no longer covered) ────────────
+    let mut unannounce_ids: Vec<String> = Vec::new();
+    let mut unannounce_pics: Vec<Uuid> = Vec::new();
+    for (pic, _tok) in &tracking {
+        if covered.contains(pic) {
             continue;
         }
-        // No longer covered (tag removed or picture deleted) — delete tracking, unannounce.
-        ShareAnnouncementRepository::delete(&mut *tx, *share, *pic).await?;
-        let announce = meta_by_id
-            .get(pic)
-            .map(announce_id)
-            .unwrap_or_else(|| pic.to_string());
-        unannounce_by_share
-            .entry(*share)
-            .or_default()
-            .push(announce);
+        unannounce_ids.push(
+            meta_by_id
+                .get(pic)
+                .map(announce_id)
+                .unwrap_or_else(|| pic.to_string()),
+        );
+        unannounce_pics.push(*pic);
     }
 
-    tx.commit().await.map_err(map_sqlx_error)?;
-
-    // ── Enqueue tasks (after commit) ──────────────────────────────────────────
-    for (share_id, pictures) in announce_by_share {
-        let Some(share) = share_by_id.get(&share_id) else {
-            continue;
-        };
-        let is_same_backend = share.recipient_instance == config.global_domain;
-        task_queue.enqueue(InternalTask::AnnounceSharedPictures {
-            outgoing_share_id: share_id,
-            sender_username: sender_username.clone(),
-            recipient_username: share.recipient_username.clone(),
-            recipient_instance: share.recipient_instance.clone(),
-            tag_path: share.tag_path.clone(),
-            pictures,
-            is_same_backend,
-        });
-    }
-    for (share_id, picture_ids) in unannounce_by_share {
-        let Some(share) = share_by_id.get(&share_id) else {
-            continue;
-        };
-        let is_same_backend = share.recipient_instance == config.global_domain;
-        task_queue.enqueue(InternalTask::UnannounceSharedPictures {
-            outgoing_share_id: share_id,
-            sender_username: sender_username.clone(),
-            recipient_username: share.recipient_username.clone(),
-            recipient_instance: share.recipient_instance.clone(),
-            picture_ids,
-            is_same_backend,
-        });
+    // ── Nothing to do → activate a fully-consistent PFA/Errored share ─────────
+    if announce_items.is_empty() && unannounce_ids.is_empty() {
+        if needs_activation(share) {
+            OutgoingShareRepository::mark_announce_success(db, share.id).await?;
+        }
+        return Ok(());
     }
 
+    // ── Deliver-then-record ───────────────────────────────────────────────────
+    let same_backend = find_local_user_id(
+        run.cache,
+        db,
+        run.config,
+        &share.recipient_username,
+        &share.recipient_instance,
+    )
+    .await?
+    .is_some();
+    let mut ok = true;
+
+    if !announce_items.is_empty() {
+        match deliver_announce(run, share, sender_username, same_backend, announce_items).await {
+            Ok(()) => {
+                let mut tx = db.begin().await.map_err(map_sqlx_error)?;
+                for (pic, token) in &announce_tokens {
+                    ShareAnnouncementRepository::insert_with_token(
+                        &mut *tx, share.id, *pic, *token,
+                    )
+                    .await?;
+                }
+                tx.commit().await.map_err(map_sqlx_error)?;
+            }
+            Err(e) => {
+                tracing::error!(share_id = %share.id, error = ?e, "pipeline: announce delivery failed");
+                ok = false;
+            }
+        }
+    }
+
+    if !unannounce_ids.is_empty() {
+        match deliver_unannounce(run, share, sender_username, same_backend, &unannounce_ids).await {
+            Ok(()) => {
+                let mut tx = db.begin().await.map_err(map_sqlx_error)?;
+                for pic in &unannounce_pics {
+                    ShareAnnouncementRepository::delete(&mut *tx, share.id, *pic).await?;
+                }
+                tx.commit().await.map_err(map_sqlx_error)?;
+            }
+            Err(e) => {
+                tracing::error!(share_id = %share.id, error = ?e, "pipeline: unannounce delivery failed");
+                ok = false;
+            }
+        }
+    }
+
+    // ── Status transition ─────────────────────────────────────────────────────
+    if ok {
+        if needs_activation(share) {
+            OutgoingShareRepository::mark_announce_success(db, share.id).await?;
+        }
+    } else {
+        let next = (Utc::now() + ChronoDuration::seconds(run.config.pipeline_retry_backoff_secs))
+            .naive_utc();
+        // An `active` share whose incremental pass failed is demoted to `errored` so the next pass
+        // is a full reconcile; PFA/Errored keep their status and just back off.
+        let demote = share.status == ShareStatus::Active;
+        OutgoingShareRepository::mark_announce_failure(db, share.id, demote, next).await?;
+    }
     Ok(())
+}
+
+/// Deliver an announce inline. Same-backend registers against the local recipient (and wakes its
+/// pipeline); cross-instance posts to the recipient's `/pictures/announce`. `items` is consumed.
+async fn deliver_announce(
+    run: &PipelineRun<'_>,
+    share: &OutgoingShare,
+    sender_username: &str,
+    same_backend: bool,
+    items: Vec<AnnouncedPicture>,
+) -> Result<(), AppError> {
+    if same_backend {
+        let incoming = IncomingShareRepository::find_by_outgoing_share(
+            run.db,
+            share.id,
+            &run.config.global_domain,
+        )
+        .await?
+        .ok_or(AppError::NotFound)?;
+        // The recipient must have accepted; otherwise this would record phantom tracking. Surface
+        // it as an error so nothing is recorded and the share backs off and retries.
+        if incoming.status != ShareStatus::Active {
+            return Err(AppError::Conflict(
+                "recipient incoming share is not active".to_string(),
+            ));
+        }
+        let shared_tag = TagPath::shared_to_me(
+            sender_username,
+            &run.config.global_domain,
+            &TagPath::from_ltree(&share.tag_path),
+        );
+        register_received_pictures(
+            run.db,
+            incoming.recipient_id,
+            incoming.id,
+            &shared_tag,
+            &items,
+        )
+        .await?;
+        run.waker.wake(incoming.recipient_id);
+        Ok(())
+    } else {
+        run.federation
+            .announce_pictures_to_backend(
+                sender_username,
+                &share.recipient_username,
+                &share.recipient_instance,
+                &PicturesAnnouncementRequest {
+                    outgoing_share_id: share.id,
+                    tag_path: share.tag_path.clone(),
+                    sender_username: sender_username.to_string(),
+                    sender_instance: run.config.global_domain.clone(),
+                    pictures: items,
+                },
+            )
+            .await
+    }
+}
+
+/// Deliver an unannounce inline. Same-backend unregisters locally (and wakes the recipient);
+/// cross-instance posts to the recipient's `/pictures/unannounce`.
+async fn deliver_unannounce(
+    run: &PipelineRun<'_>,
+    share: &OutgoingShare,
+    sender_username: &str,
+    same_backend: bool,
+    picture_ids: &[String],
+) -> Result<(), AppError> {
+    if same_backend {
+        let incoming = IncomingShareRepository::find_by_outgoing_share(
+            run.db,
+            share.id,
+            &run.config.global_domain,
+        )
+        .await?
+        .ok_or(AppError::NotFound)?;
+        unregister_announced_pictures(run.db, &incoming, picture_ids).await?;
+        run.waker.wake(incoming.recipient_id);
+        Ok(())
+    } else {
+        run.federation
+            .unannounce_pictures_to_backend(
+                sender_username,
+                &share.recipient_username,
+                &share.recipient_instance,
+                &PicturesUnannouncementRequest {
+                    outgoing_share_id: share.id,
+                    sender_username: sender_username.to_string(),
+                    sender_instance: run.config.global_domain.clone(),
+                    picture_ids: picture_ids.to_vec(),
+                },
+            )
+            .await
+    }
 }

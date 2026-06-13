@@ -2,12 +2,12 @@ use crate::clients::federation::FederationClient;
 use crate::clients::resolver::ResolverClient;
 use crate::infra::config::Config;
 use crate::infra::crypto::JwtService;
+use crate::infra::pipeline::PipelineWaker;
 use crate::infra::redis::Cache;
 use crate::infra::s3::Storage;
 use crate::infra::tasks::TaskQueue;
 use sqlx::PgPool;
 use std::sync::Arc;
-use tokio::sync::Notify;
 
 /// Application state injected into every Axum handler via `State<AppState>`.
 #[derive(Clone)]
@@ -25,9 +25,10 @@ pub struct AppState {
     pub resolver: ResolverClient,
     /// In-process background task queue (tag rename).
     pub task_queue: TaskQueue,
-    /// Wake signal for the tagging pipeline loop. Call `notify_one()` after any event
-    /// that creates dirty pictures (ingest, tag edit, service config change, share accept).
-    pub pipeline_notify: Arc<Notify>,
+    /// Per-user wake handle for the tagging pipeline loop. Call `wake(user_id)` after any event
+    /// that creates dirty pictures or share work for that user (ingest, tag edit, service config
+    /// change, share accept, …) — see `infra::pipeline::PipelineWaker`.
+    pub pipeline_waker: PipelineWaker,
 }
 
 impl AppState {
@@ -41,7 +42,7 @@ impl AppState {
         federation: FederationClient,
         resolver: ResolverClient,
         task_queue: TaskQueue,
-        pipeline_notify: Arc<Notify>,
+        pipeline_waker: PipelineWaker,
     ) -> Self {
         Self {
             config,
@@ -53,7 +54,7 @@ impl AppState {
             federation,
             resolver,
             task_queue,
-            pipeline_notify,
+            pipeline_waker,
         }
     }
 }

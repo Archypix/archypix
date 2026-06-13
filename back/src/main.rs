@@ -15,7 +15,6 @@ use crate::state::AppState;
 use reqwest::Client as HttpClient;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Notify;
 use tracing::info;
 
 #[tokio::main]
@@ -58,16 +57,17 @@ async fn main() -> anyhow::Result<()> {
     // Register with the resolver so it can route user registrations to this backend.
     resolver.self_register().await?;
 
-    // Pipeline wake signal — shared by the pipeline loop, the task runner (after same-backend
-    // announce/unannounce), and request handlers.
-    let pipeline_notify = Arc::new(Notify::new());
+    // Pipeline wake handle — shared by request handlers and the task runner (which wakes recipients
+    // after same-backend announce/unannounce). The receiver is consumed by the pipeline loop below.
+    // Built before the task queue to break the waker ↔ task_queue cycle.
+    let (pipeline_waker, pipeline_rx) = infra::pipeline::channel();
 
     // Start the in-process background task queue (tag rename, share announce/unannounce).
     let (task_queue, task_runner) = tasks::create(
         db.clone(),
         federation.clone(),
         config.clone(),
-        pipeline_notify.clone(),
+        pipeline_waker.clone(),
         config.task_queue_concurrency,
     );
     tokio::spawn(task_runner);
@@ -79,26 +79,33 @@ async fn main() -> anyhow::Result<()> {
         config.job_watchdog_interval_secs,
     ));
 
-    // Start the tagging pipeline loop.
+    // Cache handle, shared by the pipeline (same-backend resolution) and request handlers.
+    let cache: Arc<dyn infra::redis::Cache> = Arc::new(redis);
+
+    // Start the tagging pipeline loop. Delivery is inline, so it holds the federation client, the
+    // cache, and the waker (to wake same-backend recipients).
     tokio::spawn(infra::pipeline::create(
         db.clone(),
-        pipeline_notify.clone(),
+        pipeline_rx,
         Duration::from_secs(config.pipeline_poll_interval_secs),
-        task_queue.clone(),
         config.clone(),
+        config.pipeline_concurrency,
+        federation.clone(),
+        cache.clone(),
+        pipeline_waker.clone(),
     ));
 
     let state = AppState::new(
         config.clone(),
         db,
-        Arc::new(redis),
+        cache,
         jwt,
         worker_jwt,
         Arc::new(storage),
         federation,
         resolver,
         task_queue,
-        pipeline_notify,
+        pipeline_waker,
     );
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;

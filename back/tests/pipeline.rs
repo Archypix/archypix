@@ -15,11 +15,12 @@ use uuid::Uuid;
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-/// Run the pipeline once for `user`, with a throwaway task queue + test config.
+/// Run the pipeline once for `user` with throwaway deps + test config.
 async fn run_pipeline(db: &PgPool, user: Uuid) {
     let config = Config::test_defaults();
-    let (queue, _notify) = common::test_task_queue(db, &config);
-    pipeline::run_once_for_user(db, &queue, &config, user)
+    let (fed, cache) = common::make_federation(&config);
+    let waker = pipeline::PipelineWaker::disconnected();
+    pipeline::run_once_for_user(db, &fed, cache.as_ref(), &config, &waker, user)
         .await
         .unwrap();
 }

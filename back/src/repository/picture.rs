@@ -327,38 +327,6 @@ impl PictureRepository {
         .map_err(map_sqlx_error)
     }
 
-    /// List all of a user's active pictures (owned **and** received) carrying a tag under
-    /// `tag_path_ltree` (inclusive). Used by share accept / ShareBack to enumerate pictures to
-    /// announce — including received pictures, which enables transitive sharing.
-    pub async fn list_by_tag_for_user<'e, E>(
-        ex: E,
-        local_user_id: Uuid,
-        tag_path_ltree: &str,
-    ) -> Result<Vec<Picture>, AppError>
-    where
-        E: Executor<'e, Database = Postgres>,
-    {
-        sqlx::query_as!(
-            Picture,
-            r#"SELECT DISTINCT p.id, p.local_user_id, p.remote_picture_id, p.owner_username,
-                      p.owner_instance_domain, p.filename, p.mime_type, p.file_size,
-                      p.width, p.height, p.exif_data as "exif_data: _", p.metadata as "metadata: _",
-                      p.deleted_at, p.captured_at, p.ingested_at, p.updated_at,
-                      p.blurhash, p.gps_lat, p.gps_lng, p.gps_alt, p.orientation,
-                      p.thumbnails_generated_at, p.file_hash
-               FROM pictures p
-               JOIN tags t ON t.picture_id = p.id
-               WHERE p.local_user_id = $1
-                 AND p.deleted_at IS NULL
-                 AND t.tag_path <@ $2::text::ltree"#,
-            local_user_id,
-            tag_path_ltree,
-        )
-        .fetch_all(ex)
-        .await
-        .map_err(map_sqlx_error)
-    }
-
     pub async fn find_by_id<'e, E>(ex: E, id: Uuid) -> Result<Option<Picture>, AppError>
     where
         E: Executor<'e, Database = Postgres>,

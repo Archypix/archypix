@@ -5,7 +5,7 @@ CREATE EXTENSION IF NOT EXISTS "ltree";
 -- ============================================================================
 -- ENUM TYPES
 -- ============================================================================
-CREATE TYPE share_status AS ENUM ('pending', 'pending_first_announcement', 'active', 'revoked', 'tombstoned');
+CREATE TYPE share_status AS ENUM ('pending', 'pending_first_announcement', 'active', 'errored', 'revoked', 'tombstoned');
 CREATE TYPE tag_source AS ENUM ('manual', 'rule', 'segment', 'share_mapping', 'incoming_share');
 CREATE TYPE job_status AS ENUM ('pending', 'processing', 'completed', 'failed');
 CREATE TYPE job_type AS ENUM ('gen_thumbnail', 'ml_style', 'ml_people', 'ml_group_location', 'edit_picture');
@@ -206,8 +206,13 @@ CREATE TABLE outgoing_shares
     allow_share_back   BOOLEAN      NOT NULL DEFAULT TRUE,
     future             BOOLEAN      NOT NULL DEFAULT TRUE, -- Auto-announce new pictures
 
-    -- Status: starts as pending until the recipient accepts, then active.
+    -- Status: starts as pending until the recipient accepts, then active. A delivery failure on
+    -- an active future share demotes it to 'errored'; the pipeline retries it with a full reconcile.
     status share_status NOT NULL DEFAULT 'pending',
+
+    -- Announcement retry/backoff (set on a failed delivery, cleared on success).
+    last_error_at TIMESTAMP,
+    next_retry_at TIMESTAMP,
 
     -- Timestamps
     created_at         TIMESTAMP    NOT NULL DEFAULT (now() at time zone 'utc'),

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE outgoing_shares\n               SET status = 'active'::share_status, last_error_at = NULL, next_retry_at = NULL\n               WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c03233e2bf4771d1677d32caa8dd0520683c21d4f328d390a4ece2eb40846ec5"
+}

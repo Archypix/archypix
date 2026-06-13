@@ -74,74 +74,73 @@ impl ShareAnnouncementRepository {
         Ok(())
     }
 
-    /// Current coverage for a set of dirty pictures: the `(picture_id, outgoing_share_id)` pairs
-    /// where a picture tag is at-or-under an active `future` share's tag. Loop prevention is
-    /// applied inline — pictures whose original owner is the share recipient are excluded.
-    pub async fn current_coverage<'e, E>(
+    /// Picture ids currently covered by one share — those carrying a tag at-or-under the share's
+    /// `tag_path`. Loop prevention is applied inline (pictures whose original owner is the share
+    /// recipient are excluded). `picture_ids = None` returns the full coverage.
+    pub async fn coverage_for_share<'e, E>(
         ex: E,
         owner_id: Uuid,
-        picture_ids: &[Uuid],
+        tag_path_ltree: &str,
+        recipient_username: &str,
+        recipient_instance: &str,
+        picture_ids: Option<&[Uuid]>,
+    ) -> Result<Vec<Uuid>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        if matches!(picture_ids, Some(ids) if ids.is_empty()) {
+            return Ok(vec![]);
+        }
+        let rows = sqlx::query_scalar!(
+            r#"SELECT DISTINCT t.picture_id
+               FROM tags t
+               JOIN pictures p ON p.id = t.picture_id
+               WHERE p.local_user_id = $1
+                 AND t.tag_path <@ $2::text::ltree
+                 AND ($3::uuid[] IS NULL OR t.picture_id = ANY($3::uuid[]))
+                 AND (
+                       p.owner_username IS DISTINCT FROM $4
+                    OR p.owner_instance_domain IS DISTINCT FROM $5
+                 )"#,
+            owner_id,
+            tag_path_ltree,
+            picture_ids as Option<&[Uuid]>,
+            recipient_username,
+            recipient_instance,
+        )
+        .fetch_all(ex)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(rows)
+    }
+
+    /// Tracking rows for one share: `(picture_id, picture_token)`. `picture_ids = None` returns all
+    /// of the share's rows (full reconcile); `Some(ids)` restricts to those pictures.
+    pub async fn tracking_for_share<'e, E>(
+        ex: E,
+        outgoing_share_id: Uuid,
+        picture_ids: Option<&[Uuid]>,
     ) -> Result<Vec<(Uuid, Uuid)>, AppError>
     where
         E: Executor<'e, Database = Postgres>,
     {
-        if picture_ids.is_empty() {
+        if matches!(picture_ids, Some(ids) if ids.is_empty()) {
             return Ok(vec![]);
         }
         let rows = sqlx::query!(
-            r#"SELECT DISTINCT t.picture_id, os.id AS outgoing_share_id
-               FROM tags t
-               JOIN pictures p ON p.id = t.picture_id
-               JOIN outgoing_shares os ON t.tag_path <@ os.tag_path
-               WHERE t.picture_id = ANY($1::uuid[])
-                 AND p.local_user_id = $2
-                 AND p.deleted_at IS NULL
-                 AND os.owner_id = $2
-                 AND os.status = 'active'::share_status
-                 AND os.future = true
-                 AND (
-                       p.owner_username IS DISTINCT FROM os.recipient_username
-                    OR p.owner_instance_domain IS DISTINCT FROM os.recipient_instance
-                 )"#,
-            picture_ids as &[Uuid],
-            owner_id,
-        )
-        .fetch_all(ex)
-        .await
-        .map_err(map_sqlx_error)?;
-        Ok(rows
-            .into_iter()
-            .map(|r| (r.picture_id, r.outgoing_share_id))
-            .collect())
-    }
-
-    /// Load the tracking rows for a set of dirty pictures across the given shares.
-    /// Returns `(outgoing_share_id, picture_id, picture_token)`.
-    pub async fn find_tracking_for_pictures<'e, E>(
-        ex: E,
-        share_ids: &[Uuid],
-        picture_ids: &[Uuid],
-    ) -> Result<Vec<(Uuid, Uuid, Uuid)>, AppError>
-    where
-        E: Executor<'e, Database = Postgres>,
-    {
-        if share_ids.is_empty() || picture_ids.is_empty() {
-            return Ok(vec![]);
-        }
-        let rows = sqlx::query!(
-            r#"SELECT outgoing_share_id, picture_id, picture_token
+            r#"SELECT picture_id, picture_token
                FROM share_announcements
-               WHERE picture_id = ANY($1::uuid[])
-                 AND outgoing_share_id = ANY($2::uuid[])"#,
-            picture_ids as &[Uuid],
-            share_ids as &[Uuid],
+               WHERE outgoing_share_id = $1
+                 AND ($2::uuid[] IS NULL OR picture_id = ANY($2::uuid[]))"#,
+            outgoing_share_id,
+            picture_ids as Option<&[Uuid]>,
         )
         .fetch_all(ex)
         .await
         .map_err(map_sqlx_error)?;
         Ok(rows
             .into_iter()
-            .map(|r| (r.outgoing_share_id, r.picture_id, r.picture_token))
+            .map(|r| (r.picture_id, r.picture_token))
             .collect())
     }
 

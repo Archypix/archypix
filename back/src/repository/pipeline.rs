@@ -38,25 +38,24 @@ impl PipelineRepository {
     /// announcement (which the pipeline must announce and flip to `active`, even if the share has
     /// no pictures or none are dirty).
     pub async fn find_users_with_dirty_pictures(db: &PgPool) -> Result<Vec<Uuid>, AppError> {
+        // Soft-deleted pictures are intentionally *not* filtered out: they stay tagged and announced
+        // until permanently removed (see doc/features/02 §6).
         let rows = sqlx::query_scalar!(
             r#"SELECT DISTINCT p.local_user_id AS "id!"
                FROM pictures p
-               WHERE p.deleted_at IS NULL
-                 AND (
-                   (p.last_pipeline_run_at IS NULL)
-                   OR
-                   EXISTS (
+               WHERE (p.last_pipeline_run_at IS NULL)
+                  OR EXISTS (
                      SELECT 1 FROM tagging_services ts
                      WHERE ts.owner_id = p.local_user_id
                        AND ts.enabled = true
                        AND p.last_pipeline_run_at < ts.last_invalidated_at
-                   )
-                 )
+                  )
                UNION
-               -- Owners of shares awaiting their first announcement.
+               -- Owners of shares awaiting a (re)announcement whose backoff window has elapsed.
                SELECT DISTINCT os.owner_id AS "id!"
                FROM outgoing_shares os
-               WHERE os.status = 'pending_first_announcement'::share_status"#,
+               WHERE os.status IN ('pending_first_announcement'::share_status, 'errored'::share_status)
+                 AND (os.next_retry_at IS NULL OR os.next_retry_at <= now() AT TIME ZONE 'utc')"#,
         )
         .fetch_all(db)
         .await
@@ -75,12 +74,13 @@ impl PipelineRepository {
     where
         E: Executor<'e, Database = Postgres>,
     {
+        // Soft-deleted pictures are still re-tagged (they stay announced until permanent removal,
+        // see doc/features/02 §6), so they are not filtered out here.
         sqlx::query_as!(
             PipelinePicture,
             r#"SELECT p.id, p.captured_at, p.gps_lat, p.gps_lng, p.filename
                FROM pictures p
                WHERE p.local_user_id = $1
-                 AND p.deleted_at IS NULL
                  AND (
                    (p.last_pipeline_run_at IS NULL)
                    OR

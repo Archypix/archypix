@@ -9,30 +9,37 @@ use crate::common;
 use archypix_back::clients::federation::FederationClient;
 use archypix_back::domain::share::ShareStatus;
 use archypix_back::infra::config::Config;
+use archypix_back::infra::pipeline::PipelineWaker;
 use archypix_back::repository::share::{IncomingShareRepository, OutgoingShareRepository};
 use archypix_back::services::shares::{
     accept_incoming_share, create_outgoing_share, reject_incoming_share, revoke_outgoing_share,
 };
 use sqlx::PgPool;
 use std::sync::Arc;
-use tokio::sync::Notify;
 use uuid::Uuid;
 
 pub(crate) static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
-/// Run the sender's pipeline so a `pending_first_announcement` share announces its pictures, with
-/// a task runner that shares the sender's cache for cross-instance delivery. Then wait for the
-/// announcement to round-trip to the recipient.
+/// Run the sender's pipeline so a `pending_first_announcement` share announces its pictures. The
+/// pipeline delivers cross-instance announcements inline via `fed` (which resolves the recipient
+/// backend from its pre-seeded cache), so the round-trip completes synchronously.
 async fn settle_sender(db: &PgPool, cfg: &Config, fed: &FederationClient, sender_id: Uuid) {
-    let (tq, _n) = common::test_task_queue_with_federation(db, cfg, fed.clone());
-    archypix_back::infra::pipeline::run_once_for_user(db, &tq, cfg, sender_id)
-        .await
-        .unwrap();
-    tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+    let cache = std::sync::Arc::new(common::InMemoryCache::new());
+    let waker = PipelineWaker::disconnected();
+    archypix_back::infra::pipeline::run_once_for_user(
+        db,
+        fed,
+        cache.as_ref(),
+        cfg,
+        &waker,
+        sender_id,
+    )
+    .await
+    .unwrap();
 }
 
 /// A throwaway pipeline notify for accept calls whose same-backend wake path is unused.
-fn dummy_notify() -> Arc<Notify> {
-    Arc::new(Notify::new())
+fn dummy_notify() -> PipelineWaker {
+    PipelineWaker::disconnected()
 }
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
@@ -102,7 +109,7 @@ async fn cross_instance_share_announce_and_accept_propagates_pictures(db: PgPool
         &*cache_a,
         &fed_a,
         &cfg_a,
-        &Arc::new(Notify::new()),
+        &PipelineWaker::disconnected(),
         alice_id,
         "alice",
         "vacation",
@@ -165,7 +172,7 @@ async fn cross_instance_revoke_removes_received_pictures(db: PgPool) {
         &*cache_a,
         &fed_a,
         &cfg_a,
-        &Arc::new(Notify::new()),
+        &PipelineWaker::disconnected(),
         alice_id,
         "alice",
         "vacation",
@@ -236,7 +243,7 @@ async fn cross_instance_reject_active_share_cleans_up_received_pictures(db: PgPo
         &*cache_a,
         &fed_a,
         &cfg_a,
-        &Arc::new(Notify::new()),
+        &PipelineWaker::disconnected(),
         alice_id,
         "alice",
         "vacation",
@@ -319,7 +326,7 @@ async fn cross_instance_shareback_auto_accepts_without_deadlock(db: PgPool) {
     let (cache_a, cfg_a, cache_b, cfg_b, alice_id, bob_id) = spawn_pair(db.clone()).await;
     let fed_a = common::federation::make_client(&cfg_a, &cache_a);
     let fed_b = common::federation::make_client(&cfg_b, &cache_b);
-    let notify = Arc::new(Notify::new());
+    let notify = PipelineWaker::disconnected();
 
     // Alice shares "vacation" to Bob with ShareBack allowed.
     common::seed_picture_with_tag(&db, alice_id, "vacation").await;
@@ -400,7 +407,7 @@ async fn cross_instance_reject_tombstones_outgoing_share(db: PgPool) {
         &*cache_a,
         &fed_a,
         &cfg_a,
-        &Arc::new(Notify::new()),
+        &PipelineWaker::disconnected(),
         alice_id,
         "alice",
         "vacation",

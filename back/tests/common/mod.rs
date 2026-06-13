@@ -6,6 +6,7 @@ use archypix_back::domain::tag::encode_sender_label;
 use archypix_back::infra::config::Config;
 use archypix_back::infra::crypto::JwtService;
 use archypix_back::infra::error::AppError;
+use archypix_back::infra::pipeline::PipelineWaker;
 use archypix_back::infra::redis::{Cache, RedisKey};
 use archypix_back::infra::s3::Storage;
 use archypix_back::infra::tasks;
@@ -102,13 +103,11 @@ pub fn make_federation(config: &Config) -> (FederationClient, Arc<InMemoryCache>
     (fed, cache)
 }
 
-/// Build a `TaskQueue` (with its runner spawned) and a shared pipeline `Notify` for tests that
-/// exercise share announce/unannounce delivery. The runner executes same-backend tasks against
-/// the DB; cross-instance tasks attempt HTTP and fail harmlessly (errors are logged).
-pub fn test_task_queue(
-    db: &PgPool,
-    config: &Config,
-) -> (tasks::TaskQueue, Arc<tokio::sync::Notify>) {
+/// Build a `TaskQueue` (with its runner spawned) and a `PipelineWaker` for tests that exercise
+/// share announce/unannounce delivery. The runner executes same-backend tasks against the DB;
+/// cross-instance tasks attempt HTTP and fail harmlessly (errors are logged). The waker is
+/// disconnected — tests drive the pipeline explicitly via `run_once_for_user`.
+pub fn test_task_queue(db: &PgPool, config: &Config) -> (tasks::TaskQueue, PipelineWaker) {
     let (fed, _cache) = make_federation(config);
     test_task_queue_with_federation(db, config, fed)
 }
@@ -120,11 +119,11 @@ pub fn test_task_queue_with_federation(
     db: &PgPool,
     config: &Config,
     federation: FederationClient,
-) -> (tasks::TaskQueue, Arc<tokio::sync::Notify>) {
-    let notify = Arc::new(tokio::sync::Notify::new());
-    let (queue, runner) = tasks::create(db.clone(), federation, config.clone(), notify.clone(), 1);
+) -> (tasks::TaskQueue, PipelineWaker) {
+    let waker = PipelineWaker::disconnected();
+    let (queue, runner) = tasks::create(db.clone(), federation, config.clone(), waker.clone(), 1);
     tokio::spawn(runner);
-    (queue, notify)
+    (queue, waker)
 }
 
 // ── Full AppState helper ──────────────────────────────────────────────────────
@@ -148,12 +147,12 @@ pub fn test_app_state_with_cache(db: PgPool, config: &Config, cache: Arc<dyn Cac
     );
     let resolver = ResolverClient::new(reqwest::Client::new(), config.clone(), resolver_jwt);
 
-    let pipeline_notify = Arc::new(tokio::sync::Notify::new());
+    let pipeline_waker = PipelineWaker::disconnected();
     let (task_queue, runner) = tasks::create(
         db.clone(),
         federation.clone(),
         config.clone(),
-        pipeline_notify.clone(),
+        pipeline_waker.clone(),
         1,
     );
     // Run the task runner so same-backend / cross-instance announce-unannounce tasks execute.
@@ -169,7 +168,7 @@ pub fn test_app_state_with_cache(db: PgPool, config: &Config, cache: Arc<dyn Cac
         federation,
         resolver,
         task_queue,
-        pipeline_notify,
+        pipeline_waker,
     )
 }
 
