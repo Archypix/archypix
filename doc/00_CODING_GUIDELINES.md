@@ -12,6 +12,12 @@ Follow Rust best practices. Always favor refactoring over sticking to existing l
 
 For modules with sub-files, use a `module_name.rs` file alongside the `module_name/` directory instead of placing a `mod.rs` inside the directory.
 
+# Comon mistakes
+
+- Global domain comparaison can’t tell if the instances are the same. bob_global_domain == alice_global_domain does not tell if bob and alice are on
+  the same instance. Multiple instances can have the same global domain. Use `services::users::find_local_user_id` instead to check if a user is on
+  the same instance.
+
 # Agents
 
 When making changes to the codebase:

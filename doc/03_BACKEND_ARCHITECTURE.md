@@ -221,12 +221,54 @@ via WebFinger and cached.
 
 ### Admin endpoints
 
-| Method   | Path                    | Description                   |
-|----------|-------------------------|-------------------------------|
-| `GET`    | `/api/admin/users`      | List users.                   |
-| `POST`   | `/api/admin/users`      | Create user (admin override). |
-| `PATCH`  | `/api/admin/users/{id}` | Suspend/restore, set role.    |
-| `DELETE` | `/api/admin/users/{id}` | Delete user.                  |
+Auth: User JWT with `is_admin = true`.
+
+**Instance**
+
+| Method | Path                  | Description                                                                                         |
+|--------|-----------------------|-----------------------------------------------------------------------------------------------------|
+| `GET`  | `/api/admin/instance` | Instance health: global_domain, back_domain, DB/Redis connectivity, last worker activity timestamp. |
+
+**Analytics** (responses cached in Redis; instance stats 60 s TTL, per-user 120 s TTL)
+
+| Method | Path                          | Description                                                                                                                                     |
+|--------|-------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|
+| `GET`  | `/api/admin/stats`            | Instance-wide analytics: user/picture counts, total storage, job queue depth, errored share count, dirty picture count.                         |
+| `GET`  | `/api/admin/consistency`      | Consistency check: stuck EXIF-pending pictures (no active job), pictures without thumbnails (>30 min old), broken SharedTagMappingService rows. |
+| `GET`  | `/api/admin/users/{id}/stats` | Per-user analytics: picture counts, storage, job counts by status, share counts by status, dirty picture count.                                 |
+
+**User management**
+
+| Method   | Path                                  | Description                                                                                               |
+|----------|---------------------------------------|-----------------------------------------------------------------------------------------------------------|
+| `GET`    | `/api/admin/users`                    | List users with storage used (bytes).                                                                     |
+| `POST`   | `/api/admin/users`                    | Create user (admin override).                                                                             |
+| `PATCH`  | `/api/admin/users/{id}`               | Update display name or admin role.                                                                        |
+| `DELETE` | `/api/admin/users/{id}`               | Delete user.                                                                                              |
+| `GET`    | `/api/admin/users/{id}/shares`        | List a user's outgoing and incoming shares with full status (useful for diagnosing errored/stuck shares). |
+| `POST`   | `/api/admin/users/{id}/pipeline/wake` | Force-wake the tagging pipeline for a user immediately.                                                   |
+
+**Job management**
+
+| Method | Path                          | Description                                                                                    |
+|--------|-------------------------------|------------------------------------------------------------------------------------------------|
+| `GET`  | `/api/admin/jobs`             | List jobs. Query params: `status`, `type`, `user_id`, `limit` (max 200, default 50), `offset`. |
+| `GET`  | `/api/admin/jobs/stale`       | List jobs currently in `processing` past `JOB_PROCESSING_TIMEOUT_SECS`.                        |
+| `POST` | `/api/admin/jobs/{id}/reset`  | Force-reset a non-completed job to `pending` (clears claim_token, resets retry_count to 0).    |
+| `POST` | `/api/admin/jobs/{id}/cancel` | Permanently fail a non-terminal job (sets status to `failed`).                                 |
+
+**Share management**
+
+| Method | Path                                              | Description                                                                                                              |
+|--------|---------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------|
+| `GET`  | `/api/admin/shares/errored`                       | List all `errored` outgoing shares across all users with `next_retry_at` and `last_error_at`.                            |
+| `POST` | `/api/admin/shares/outgoing/{id}/force-reconcile` | Clear the backoff on an `errored` or `pending_first_announcement` share and immediately wake the pipeline for its owner. |
+
+**Federation**
+
+| Method | Path                              | Description                                                                                               |
+|--------|-----------------------------------|-----------------------------------------------------------------------------------------------------------|
+| `GET`  | `/api/admin/federation/instances` | List all known remote instances (derived from share records) with outgoing/incoming/errored share counts. |
 
 ### Public/auth endpoints
 

@@ -25,6 +25,10 @@ pub enum RedisKey<'a> {
     FederationBackend(&'a str, &'a str),
     /// Cached local user UUID for a given username.
     UserByUsername(&'a str),
+    /// Cached instance-wide admin analytics (short TTL).
+    AdminStats,
+    /// Cached per-user admin analytics (short TTL).
+    AdminUserStats(Uuid),
 }
 
 impl<'a> RedisKey<'a> {
@@ -35,6 +39,8 @@ impl<'a> RedisKey<'a> {
             Self::FederationToken(domain) => format!("federation:token:{domain}"),
             Self::FederationBackend(u, d) => format!("federation:backend:{u}@{d}"),
             Self::UserByUsername(username) => format!("user:username:{username}"),
+            Self::AdminStats => "admin:stats:instance".to_string(),
+            Self::AdminUserStats(id) => format!("admin:stats:user:{id}"),
         }
     }
 }
@@ -63,6 +69,8 @@ pub trait Cache: Send + Sync {
         ttl_secs: u64,
     ) -> Result<(), AppError>;
     async fn del(&self, key: RedisKey<'_>) -> Result<(), AppError>;
+    /// Return all keys matching a glob-style pattern. Admin/diagnostic use only.
+    async fn scan_keys(&self, pattern: &str) -> Result<Vec<String>, AppError>;
 }
 
 // ── JSON helpers (free functions to preserve dyn-compatibility) ───────────────
@@ -143,6 +151,17 @@ impl Cache for RedisClient {
             .await
             .map_err(|e| AppError::InternalServerError(e.to_string()))?;
         Ok(())
+    }
+
+    async fn scan_keys(&self, pattern: &str) -> Result<Vec<String>, AppError> {
+        let mut conn = self
+            .pool
+            .get()
+            .await
+            .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+        conn.keys::<_, Vec<String>>(pattern)
+            .await
+            .map_err(|e| AppError::InternalServerError(e.to_string()))
     }
 }
 

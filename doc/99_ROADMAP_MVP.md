@@ -31,7 +31,7 @@
   `edit_picture` job reconciles the S3 original's embedded EXIF, with guaranteed convergence (value-gated revert on permanent failure, one in-flight
   reconcile per picture, MIME preflight → `unsupported`). EXIF edits re-dirty the pipeline and propagate gps/exif/orientation to federated recipients.
   See `doc/features/04_better_exif_support.md`. (History is a v1.0 item below.)
-- [ ] **Admin endpoints** — user list/suspend/delete, job status, instance metrics.
+- [x] **Admin endpoints** — user list/suspend/delete, job status, instance metrics.
 - [ ] **Full frontend** — v1 of a user-friendly frontend, with super simple code for a MvP, but with a realistic user experience that could give an
   idea of what the final front could look like.
 - [ ] **Hierarchies** — CRUD operations for managing hierarchies.
