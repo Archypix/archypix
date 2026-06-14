@@ -112,12 +112,16 @@ pub struct GenThumbnailConfig {
 }
 
 /// Config for `edit_picture` jobs.
+///
+/// The write-through model makes the DB the source of truth: the backend applies the edit to the
+/// `pictures` row synchronously at request time and enqueues this job to reconcile the S3 original's
+/// embedded EXIF. The config therefore carries an explicit edit delta plus the revert baseline
+/// (`ExifEdit::previous`), so a permanent file-write failure can roll the DB back to the old state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditPictureConfig {
     pub picture_id: Uuid,
-    /// Metadata/EXIF fields to override on the picture row.
-    /// `None` means no metadata changes.
-    pub exif_overrides: Option<ExifOverrides>,
+    /// The EXIF edit delta + revert baseline. `None` for a pure visual job.
+    pub exif: Option<ExifEdit>,
     /// Visual pixel-level transformations to apply to the file.
     /// `None` means no visual edits; the original file is unchanged.
     pub visual: Option<VisualTransformations>,
@@ -131,7 +135,47 @@ impl EditPictureConfig {
     }
 }
 
-/// Partial EXIF/metadata override. Only provided fields are written.
+/// An EXIF edit expressed as a `set`/`clear` delta plus the prior full state.
+///
+/// - `set`: only `Some` fields are written.
+/// - `clear`: fields to delete (column → NULL / JSONB key removed / file tag deleted).
+/// - `previous`: the full prior value of every editable field, used by the backend's value-gated
+///   revert (§4.3) and completion-time convergence (§5). The worker only reads `set`/`clear`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExifEdit {
+    pub set: ExifOverrides,
+    #[serde(default)]
+    pub clear: Vec<ExifField>,
+    pub previous: ExifSnapshot,
+}
+
+impl ExifEdit {
+    /// The full snapshot the file/DB reaches once this edit's `set`/`clear` is applied to
+    /// `previous`. This is the file's content after a successful reconcile.
+    pub fn new_state(&self) -> ExifSnapshot {
+        self.previous.applied(&self.set, &self.clear)
+    }
+}
+
+/// One editable EXIF field — the enum form used by `ExifEdit::clear` and the diff machinery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExifField {
+    CapturedAt,
+    GpsLat,
+    GpsLng,
+    GpsAlt,
+    Orientation,
+    CameraBrand,
+    CameraModel,
+    FocalLengthMm,
+    FNumber,
+    IsoSpeed,
+    ExposureTimeNum,
+    ExposureTimeDen,
+}
+
+/// Partial EXIF/metadata override. Only provided (`Some`) fields are written.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ExifOverrides {
     pub captured_at: Option<NaiveDateTime>,
@@ -146,6 +190,118 @@ pub struct ExifOverrides {
     pub iso_speed: Option<i32>,
     pub exposure_time_num: Option<i32>,
     pub exposure_time_den: Option<i32>,
+}
+
+/// A full snapshot of every editable EXIF field. `None` means the field is absent/NULL — unlike
+/// [`ExifOverrides`], where `None` means "leave unchanged". Used as the revert baseline and for
+/// completion-time convergence diffs.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct ExifSnapshot {
+    pub captured_at: Option<NaiveDateTime>,
+    pub gps_lat: Option<f64>,
+    pub gps_lng: Option<f64>,
+    pub gps_alt: Option<i32>,
+    pub orientation: Option<i16>,
+    pub camera_brand: Option<String>,
+    pub camera_model: Option<String>,
+    pub focal_length_mm: Option<f64>,
+    pub f_number: Option<f64>,
+    pub iso_speed: Option<i32>,
+    pub exposure_time_num: Option<i32>,
+    pub exposure_time_den: Option<i32>,
+}
+
+impl ExifSnapshot {
+    /// This snapshot with `set` applied (only `Some` fields overwrite) and `clear` nulled.
+    pub fn applied(&self, set: &ExifOverrides, clear: &[ExifField]) -> ExifSnapshot {
+        let mut s = self.clone();
+        if set.captured_at.is_some() {
+            s.captured_at = set.captured_at;
+        }
+        if set.gps_lat.is_some() {
+            s.gps_lat = set.gps_lat;
+        }
+        if set.gps_lng.is_some() {
+            s.gps_lng = set.gps_lng;
+        }
+        if set.gps_alt.is_some() {
+            s.gps_alt = set.gps_alt;
+        }
+        if set.orientation.is_some() {
+            s.orientation = set.orientation;
+        }
+        if set.camera_brand.is_some() {
+            s.camera_brand = set.camera_brand.clone();
+        }
+        if set.camera_model.is_some() {
+            s.camera_model = set.camera_model.clone();
+        }
+        if set.focal_length_mm.is_some() {
+            s.focal_length_mm = set.focal_length_mm;
+        }
+        if set.f_number.is_some() {
+            s.f_number = set.f_number;
+        }
+        if set.iso_speed.is_some() {
+            s.iso_speed = set.iso_speed;
+        }
+        if set.exposure_time_num.is_some() {
+            s.exposure_time_num = set.exposure_time_num;
+        }
+        if set.exposure_time_den.is_some() {
+            s.exposure_time_den = set.exposure_time_den;
+        }
+        for f in clear {
+            s.clear_field(*f);
+        }
+        s
+    }
+
+    fn clear_field(&mut self, f: ExifField) {
+        match f {
+            ExifField::CapturedAt => self.captured_at = None,
+            ExifField::GpsLat => self.gps_lat = None,
+            ExifField::GpsLng => self.gps_lng = None,
+            ExifField::GpsAlt => self.gps_alt = None,
+            ExifField::Orientation => self.orientation = None,
+            ExifField::CameraBrand => self.camera_brand = None,
+            ExifField::CameraModel => self.camera_model = None,
+            ExifField::FocalLengthMm => self.focal_length_mm = None,
+            ExifField::FNumber => self.f_number = None,
+            ExifField::IsoSpeed => self.iso_speed = None,
+            ExifField::ExposureTimeNum => self.exposure_time_num = None,
+            ExifField::ExposureTimeDen => self.exposure_time_den = None,
+        }
+    }
+
+    /// The `set`/`clear` delta that turns `self` into `target`. Empty when they are already equal.
+    pub fn diff_to(&self, target: &ExifSnapshot) -> (ExifOverrides, Vec<ExifField>) {
+        let mut set = ExifOverrides::default();
+        let mut clear = Vec::new();
+        macro_rules! diff {
+            ($field:ident, $variant:ident) => {
+                if self.$field != target.$field {
+                    match &target.$field {
+                        Some(v) => set.$field = Some(v.clone()),
+                        None => clear.push(ExifField::$variant),
+                    }
+                }
+            };
+        }
+        diff!(captured_at, CapturedAt);
+        diff!(gps_lat, GpsLat);
+        diff!(gps_lng, GpsLng);
+        diff!(gps_alt, GpsAlt);
+        diff!(orientation, Orientation);
+        diff!(camera_brand, CameraBrand);
+        diff!(camera_model, CameraModel);
+        diff!(focal_length_mm, FocalLengthMm);
+        diff!(f_number, FNumber);
+        diff!(iso_speed, IsoSpeed);
+        diff!(exposure_time_num, ExposureTimeNum);
+        diff!(exposure_time_den, ExposureTimeDen);
+        (set, clear)
+    }
 }
 
 /// Pixel-level visual transformations to apply to the image file.
@@ -207,11 +363,18 @@ mod tests {
     fn job_config_edit_picture_exif_only_roundtrips_json() {
         let cfg = JobConfig::EditPicture(EditPictureConfig {
             picture_id: Uuid::new_v4(),
-            exif_overrides: Some(ExifOverrides {
-                captured_at: None,
-                gps_lat: Some(48.8566),
-                gps_lng: Some(2.3522),
-                ..Default::default()
+            exif: Some(ExifEdit {
+                set: ExifOverrides {
+                    gps_lat: Some(48.8566),
+                    gps_lng: Some(2.3522),
+                    ..Default::default()
+                },
+                clear: vec![ExifField::GpsAlt, ExifField::Orientation],
+                previous: ExifSnapshot {
+                    gps_alt: Some(120),
+                    orientation: Some(1),
+                    ..Default::default()
+                },
             }),
             visual: None,
         });
@@ -219,10 +382,37 @@ mod tests {
     }
 
     #[test]
+    fn exif_snapshot_applied_and_diff_round_trip() {
+        let previous = ExifSnapshot {
+            gps_lat: Some(1.0),
+            gps_alt: Some(50),
+            orientation: Some(1),
+            ..Default::default()
+        };
+        let set = ExifOverrides {
+            gps_lat: Some(2.0),
+            ..Default::default()
+        };
+        let clear = vec![ExifField::GpsAlt];
+        let new_state = previous.applied(&set, &clear);
+        assert_eq!(new_state.gps_lat, Some(2.0));
+        assert_eq!(new_state.gps_alt, None);
+        assert_eq!(new_state.orientation, Some(1));
+
+        // diff from previous to new_state reproduces the delta.
+        let (dset, dclear) = previous.diff_to(&new_state);
+        assert_eq!(dset.gps_lat, Some(2.0));
+        assert_eq!(dclear, vec![ExifField::GpsAlt]);
+        // No-op diff when equal.
+        let (empty_set, empty_clear) = new_state.diff_to(&new_state);
+        assert!(empty_set.gps_lat.is_none() && empty_clear.is_empty());
+    }
+
+    #[test]
     fn job_config_edit_picture_visual_roundtrips_json() {
         let cfg = JobConfig::EditPicture(EditPictureConfig {
             picture_id: Uuid::new_v4(),
-            exif_overrides: None,
+            exif: None,
             visual: Some(VisualTransformations {
                 crop: Some(CropTransform {
                     x: 10,

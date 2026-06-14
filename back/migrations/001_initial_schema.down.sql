@@ -30,3 +30,4 @@ DROP TYPE IF EXISTS federation_status;
 DROP TYPE IF EXISTS safe_delete_mode;
 DROP TYPE IF EXISTS service_type;
 DROP TYPE IF EXISTS versioning_mode;
+DROP TYPE IF EXISTS picture_exif_sync_status;

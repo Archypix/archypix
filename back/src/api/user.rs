@@ -59,6 +59,8 @@ pub fn authenticated_routes() -> Router<AppState> {
         .route("/jobs/{id}", get(jobs::get_job))
         .route("/pictures/{id}/jobs", get(jobs::list_picture_jobs))
         .route("/pictures/{id}/edit", post(jobs::enqueue_edit))
+        .route("/pictures/exif", patch(jobs::batch_edit_exif))
+        .route("/pictures/{id}/exif/resync", post(jobs::resync_exif))
         .route(
             "/tagging-services",
             get(tagging_services::list_services).post(tagging_services::create_service),

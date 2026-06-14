@@ -69,6 +69,9 @@ pub struct PicturesAnnouncementRequest {
 }
 
 /// A picture announced in a [PicturesAnnouncementRequest].
+///
+/// Carries the owner's EXIF/geo metadata so federated recipients converge on the same metadata the
+/// owner holds (and so recipient-side `gps_within_bbox`/date tagging works on shared pictures).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AnnouncedPicture {
     pub picture_id: String,
@@ -81,6 +84,16 @@ pub struct AnnouncedPicture {
     pub width: Option<i32>,
     pub height: Option<i32>,
     pub captured_at: Option<NaiveDateTime>,
+    #[serde(default)]
+    pub gps_lat: Option<f64>,
+    #[serde(default)]
+    pub gps_lng: Option<f64>,
+    #[serde(default)]
+    pub gps_alt: Option<i32>,
+    #[serde(default)]
+    pub orientation: Option<i16>,
+    #[serde(default)]
+    pub exif_data: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -149,6 +162,11 @@ impl AnnouncedPicture {
             width: picture.width,
             height: picture.height,
             captured_at: picture.captured_at,
+            gps_lat: picture.gps_lat,
+            gps_lng: picture.gps_lng,
+            gps_alt: picture.gps_alt,
+            orientation: picture.orientation,
+            exif_data: Some(picture.exif_data.0.clone()),
         }
     }
 }

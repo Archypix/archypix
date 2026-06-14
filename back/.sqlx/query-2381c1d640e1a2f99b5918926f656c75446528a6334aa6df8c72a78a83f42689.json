@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, local_user_id, remote_picture_id, owner_username, owner_instance_domain,\n                      filename, mime_type, file_size, width, height,\n                      exif_data as \"exif_data: _\", metadata as \"metadata: _\",\n                      deleted_at, captured_at, ingested_at, updated_at,\n                      blurhash, gps_lat, gps_lng, gps_alt, orientation, thumbnails_generated_at,\n                      file_hash\n               FROM pictures WHERE id = ANY($1::uuid[])",
+  "query": "SELECT id, local_user_id, remote_picture_id, owner_username, owner_instance_domain,\n                      filename, mime_type, file_size, width, height,\n                      exif_data as \"exif_data: _\", metadata as \"metadata: _\",\n                      deleted_at, captured_at, ingested_at, updated_at,\n                      blurhash, gps_lat, gps_lng, gps_alt, orientation, thumbnails_generated_at,\n                      file_hash, exif_sync_status as \"exif_sync_status: _\"\n               FROM pictures WHERE id = ANY($1::uuid[])",
   "describe": {
     "columns": [
       {
@@ -255,6 +255,28 @@
             "name": "file_hash"
           }
         }
+      },
+      {
+        "ordinal": 23,
+        "name": "exif_sync_status: _",
+        "type_info": {
+          "Custom": {
+            "name": "picture_exif_sync_status",
+            "kind": {
+              "Enum": [
+                "synced",
+                "pending",
+                "unsupported"
+              ]
+            }
+          }
+        },
+        "origin": {
+          "Table": {
+            "table": "pictures",
+            "name": "exif_sync_status"
+          }
+        }
       }
     ],
     "parameters": {
@@ -285,8 +307,9 @@
       true,
       true,
       true,
-      true
+      true,
+      false
     ]
   },
-  "hash": "e3b7ca3921912e4703189280c160db466169625f26807d0f7e490743b366d0f3"
+  "hash": "2381c1d640e1a2f99b5918926f656c75446528a6334aa6df8c72a78a83f42689"
 }

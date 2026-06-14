@@ -381,6 +381,11 @@ async fn register_received_pictures_is_idempotent(db: PgPool) {
         width: None,
         height: None,
         captured_at: None,
+        gps_lat: Some(45.92),
+        gps_lng: Some(6.87),
+        gps_alt: Some(1200),
+        orientation: Some(6),
+        exif_data: Some(serde_json::json!({ "camera_brand": "Canon" })),
     }];
 
     // Register twice — second call must be a no-op (ON CONFLICT DO UPDATE / DO NOTHING)
@@ -398,6 +403,21 @@ async fn register_received_pictures_is_idempotent(db: PgPool) {
         1,
         "only one picture row must exist"
     );
+
+    // Geo/EXIF metadata from the announcement must persist on the recipient row (§10.2).
+    let (lat, lng, alt, orient): (Option<f64>, Option<f64>, Option<i32>, Option<i16>) =
+        sqlx::query_as(
+            "SELECT gps_lat, gps_lng, gps_alt, orientation FROM pictures
+         WHERE local_user_id = $1 AND remote_picture_id IS NOT NULL",
+        )
+        .bind(bob_id)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(lat, Some(45.92));
+    assert_eq!(lng, Some(6.87));
+    assert_eq!(alt, Some(1200));
+    assert_eq!(orient, Some(6));
 }
 
 // ── cleanup_incoming_share ────────────────────────────────────────────────────

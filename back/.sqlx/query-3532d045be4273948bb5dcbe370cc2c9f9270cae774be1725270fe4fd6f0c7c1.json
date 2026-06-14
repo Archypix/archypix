@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH removed AS (\n                   DELETE FROM tags\n                   WHERE source_id = $1\n                     AND source IN ('rule'::tag_source, 'segment'::tag_source, 'share_mapping'::tag_source)\n                   RETURNING picture_id\n               )\n               UPDATE pictures SET last_pipeline_run_at = NULL\n               WHERE id IN (SELECT DISTINCT picture_id FROM removed)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3532d045be4273948bb5dcbe370cc2c9f9270cae774be1725270fe4fd6f0c7c1"
+}

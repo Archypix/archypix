@@ -47,26 +47,31 @@ impl ShareAnnouncementRepository {
         .map_err(map_sqlx_error)
     }
 
-    /// Insert a tracking row with an explicit token (used for received/transitive pictures,
-    /// where the forwarded token must equal the upstream `incoming_share` tag token). Idempotent
-    /// on the `(share, picture)` key; on conflict the token is refreshed to `picture_token`.
+    /// Insert/refresh a tracking row with an explicit token and the picture's `updated_at` at the
+    /// moment of this successful (re-)announce. The token must equal the upstream `incoming_share`
+    /// tag token for received/transitive pictures. `announced_updated_at` gates metadata
+    /// re-announce (§10.3): a later `pictures.updated_at` triggers another announce.
     pub async fn insert_with_token<'e, E>(
         ex: E,
         outgoing_share_id: Uuid,
         picture_id: Uuid,
         picture_token: Uuid,
+        announced_updated_at: Option<chrono::NaiveDateTime>,
     ) -> Result<(), AppError>
     where
         E: Executor<'e, Database = Postgres>,
     {
         sqlx::query!(
-            r#"INSERT INTO share_announcements (outgoing_share_id, picture_id, picture_token)
-               VALUES ($1, $2, $3)
+            r#"INSERT INTO share_announcements
+                   (outgoing_share_id, picture_id, picture_token, announced_updated_at)
+               VALUES ($1, $2, $3, $4)
                ON CONFLICT (outgoing_share_id, picture_id)
-               DO UPDATE SET picture_token = EXCLUDED.picture_token"#,
+               DO UPDATE SET picture_token = EXCLUDED.picture_token,
+                             announced_updated_at = EXCLUDED.announced_updated_at"#,
             outgoing_share_id,
             picture_id,
             picture_token,
+            announced_updated_at,
         )
         .execute(ex)
         .await
@@ -114,13 +119,14 @@ impl ShareAnnouncementRepository {
         Ok(rows)
     }
 
-    /// Tracking rows for one share: `(picture_id, picture_token)`. `picture_ids = None` returns all
-    /// of the share's rows (full reconcile); `Some(ids)` restricts to those pictures.
+    /// Tracking rows for one share: `(picture_id, picture_token, announced_updated_at)`.
+    /// `picture_ids = None` returns all of the share's rows (full reconcile); `Some(ids)` restricts
+    /// to those pictures.
     pub async fn tracking_for_share<'e, E>(
         ex: E,
         outgoing_share_id: Uuid,
         picture_ids: Option<&[Uuid]>,
-    ) -> Result<Vec<(Uuid, Uuid)>, AppError>
+    ) -> Result<Vec<(Uuid, Uuid, Option<chrono::NaiveDateTime>)>, AppError>
     where
         E: Executor<'e, Database = Postgres>,
     {
@@ -128,7 +134,7 @@ impl ShareAnnouncementRepository {
             return Ok(vec![]);
         }
         let rows = sqlx::query!(
-            r#"SELECT picture_id, picture_token
+            r#"SELECT picture_id, picture_token, announced_updated_at
                FROM share_announcements
                WHERE outgoing_share_id = $1
                  AND ($2::uuid[] IS NULL OR picture_id = ANY($2::uuid[]))"#,
@@ -140,7 +146,7 @@ impl ShareAnnouncementRepository {
         .map_err(map_sqlx_error)?;
         Ok(rows
             .into_iter()
-            .map(|r| (r.picture_id, r.picture_token))
+            .map(|r| (r.picture_id, r.picture_token, r.announced_updated_at))
             .collect())
     }
 

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id, local_user_id, remote_picture_id, owner_username, owner_instance_domain,\n                      filename, mime_type, file_size, width, height,\n                      exif_data as \"exif_data: _\", metadata as \"metadata: _\",\n                      deleted_at, captured_at, ingested_at, updated_at,\n                      blurhash, gps_lat, gps_lng, gps_alt, orientation, thumbnails_generated_at,\n                      file_hash\n               FROM pictures WHERE id = $1",
+  "query": "UPDATE pictures\n               SET width       = COALESCE($2,  width),\n                   height      = COALESCE($3,  height),\n                   captured_at = COALESCE($4,  captured_at),\n                   gps_lat     = COALESCE($5,  gps_lat),\n                   gps_lng     = COALESCE($6,  gps_lng),\n                   gps_alt     = COALESCE($7,  gps_alt),\n                   orientation = COALESCE($8,  orientation),\n                   blurhash    = COALESCE($9,  blurhash),\n                   exif_data   = CASE WHEN $10::jsonb IS NOT NULL\n                                      THEN exif_data || $10::jsonb\n                                      ELSE exif_data\n                                 END,\n                   file_size   = COALESCE($11, file_size),\n                   file_hash   = COALESCE($12, file_hash),\n                   thumbnails_generated_at = COALESCE(thumbnails_generated_at, now() AT TIME ZONE 'utc')\n               WHERE id = $1\n               RETURNING id, local_user_id, remote_picture_id, owner_username, owner_instance_domain,\n                         filename, mime_type, file_size, width, height,\n                         exif_data as \"exif_data: _\", metadata as \"metadata: _\",\n                         deleted_at, captured_at, ingested_at, updated_at,\n                         blurhash, gps_lat, gps_lng, gps_alt, orientation, thumbnails_generated_at,\n                         file_hash, exif_sync_status as \"exif_sync_status: _\"",
   "describe": {
     "columns": [
       {
@@ -255,11 +255,44 @@
             "name": "file_hash"
           }
         }
+      },
+      {
+        "ordinal": 23,
+        "name": "exif_sync_status: _",
+        "type_info": {
+          "Custom": {
+            "name": "picture_exif_sync_status",
+            "kind": {
+              "Enum": [
+                "synced",
+                "pending",
+                "unsupported"
+              ]
+            }
+          }
+        },
+        "origin": {
+          "Table": {
+            "table": "pictures",
+            "name": "exif_sync_status"
+          }
+        }
       }
     ],
     "parameters": {
       "Left": [
-        "Uuid"
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Timestamp",
+        "Float8",
+        "Float8",
+        "Int4",
+        "Int2",
+        "Text",
+        "Jsonb",
+        "Int8",
+        "Text"
       ]
     },
     "nullable": [
@@ -285,8 +318,9 @@
       true,
       true,
       true,
-      true
+      true,
+      false
     ]
   },
-  "hash": "b6f2efbfca9a88d5655344a602a5d5186614eceb90276c8f3c8a033aa479aed9"
+  "hash": "f93dc0076d0f5a917d19f88e013e5e1ecba8da030410eb4798e35a62587a6e14"
 }

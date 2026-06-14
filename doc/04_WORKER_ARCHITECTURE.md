@@ -18,10 +18,16 @@ backend.rs           — BackendClient: two separate HTTP clients (api_http 10 s
 
 jobs.rs              — run_job_loop(): acquire semaphore → poll → spawn; dispatch()
 jobs/thumbnail.rs    — gen_thumbnail: MIME preflight → download → EXIF → hash → thumbnails → complete
-jobs/edit_picture.rs — edit_picture: download → EXIF write → hash → upload → thumbnail regen → complete
+jobs/edit_picture.rs — edit_picture: download → EXIF set/clear write → thumbnail regen (visual) →
+                       hash → upload original (last fallible step) → complete. The DB is updated
+                       synchronously at edit time (write-through); this job only reconciles the S3
+                       original's embedded EXIF to match. Uploading the original last preserves the
+                       file-untouched-on-failure invariant the backend's revert depends on.
 jobs/ml.rs           — stub for ml_* jobs (log + complete with empty result)
 
-imaging/exif.rs      — extract_exif() / write_exif_overrides() (rexiv2, blocking)
+imaging/exif.rs      — extract_exif() / write_exif_overrides(set, clear) (rexiv2, blocking).
+                       Full editable-field coverage on write (date, GPS, orientation, make, model,
+                       focal length, f-number, ISO, exposure time) plus per-field clear (tag delete).
 imaging/hash.rs      — hash_file(): SHA-256 hex digest in 64 KiB chunks (blocking)
 imaging/resize.rs    — generate_thumbnail() (ImageMagick/WebP), generate_blurhash();
                        THUMBNAIL_VARIANTS const: single source of truth for sizes
@@ -59,13 +65,28 @@ classifies them. On back, the watchdog (`infra/job_watchdog.rs`) runs every `JOB
 `processing` for longer than `JOB_PROCESSING_TIMEOUT_SECS` (default 600 s) by incrementing `retry_count` and returning them to `pending` (or `failed`
 if retries exhausted). It also clears `claim_token` on reset.
 
+## EXIF edit write-through
+
+EXIF edits are write-through: the backend applies the change to the `pictures` row synchronously at
+request time (the DB is the source of truth) after a **MIME preflight** (`supports_exif()`) — a
+format that cannot embed EXIF gets a DB-only edit and `exif_sync_status = 'unsupported'` with no job.
+Otherwise the picture is marked `pending` and an `edit_picture` job reconciles the S3 original.
+
+- **Versioning predicate** (evaluated at job claim, `api/worker/handlers.rs`): `None` → never;
+  `OriginalCopy` → snapshot only on the first edit (keep the pristine original once);
+  `FullVersioning` → first edit or any *visual* edit (exif-only edits never add a version).
+- **Convergence / revert**: on completion the backend flips the picture to `synced` if the DB still
+  equals the job's target, else enqueues a follow-up reconcile. On permanent failure it reverts the
+  DB row to the job's `previous` snapshot (value-gated) and re-syncs at the old state — correct
+  because the original upload is the last fallible step, so a failure never overwrote the file.
+
 ## Shared types (`archypix-common`)
 
 Library crate shared between `back/` and `worker/` so wire shapes never drift:
 
 | Module           | Key types                                                                                                                                                                   |
 |------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `job.rs`         | `JobType`, `JobConfig`, `GenThumbnailConfig`, `EditPictureConfig`, `ExtractedExif`, `ExifOverrides`                                                                         |
+| `job.rs`         | `JobType`, `JobConfig`, `GenThumbnailConfig`, `EditPictureConfig`, `ExifEdit` (`set`/`clear`/`previous`), `ExifField`, `ExifSnapshot`, `ExtractedExif`, `ExifOverrides`     |
 | `transfer.rs`    | `ClaimQuery`, `ClaimJobResponse` (+ `claim_token`), `PresignedWrites`, `CompleteJobRequest` (+ `claim_token`, `file_size`, `file_hash`), `FailJobRequest` (+ `claim_token`) |
 | `mime.rs`        | `MIME_TYPES_EXIF`, `MIME_TYPES_THUMBNAIL`, `supports_exif()`, `supports_thumbnail()`                                                                                        |
 | `serde_utils.rs` | `csv` serde module for comma-separated `Vec<T>` query params                                                                                                                |

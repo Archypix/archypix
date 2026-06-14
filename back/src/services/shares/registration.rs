@@ -9,25 +9,8 @@ use crate::infra::error::{AppError, map_sqlx_error};
 use crate::repository::picture::PictureRepository;
 use crate::repository::pipeline::PipelineRepository;
 use crate::repository::tag::TagRepository;
-use chrono::NaiveDateTime;
 use sqlx::PgPool;
 use uuid::Uuid;
-
-/// Picture descriptor used to register a batch of received pictures.
-/// Accepted by both the same-backend and cross-instance code paths.
-pub struct ReceivedPictureInfo {
-    pub remote_picture_id: String,
-    pub owner_username: String,
-    pub owner_instance_domain: String,
-    /// Per-picture presign token (stored on the `incoming_share` tag row).
-    pub picture_token: Uuid,
-    pub filename: Option<String>,
-    pub mime_type: Option<String>,
-    pub file_size: Option<i64>,
-    pub width: Option<i32>,
-    pub height: Option<i32>,
-    pub captured_at: Option<NaiveDateTime>,
-}
 
 /// Upsert received-picture rows and assign `/SharedToMe/…` tags (with their per-picture token)
 /// for every picture in `pictures`, all inside a single DB transaction.
@@ -64,6 +47,11 @@ pub async fn register_received_pictures(
             pic.width,
             pic.height,
             pic.captured_at,
+            pic.gps_lat,
+            pic.gps_lng,
+            pic.gps_alt,
+            pic.orientation,
+            pic.exif_data.clone(),
         )
         .await?;
 

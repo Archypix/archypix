@@ -24,8 +24,10 @@
         one-time `claim_token` per claim to prevent stale workers from corrupting re-claimed jobs.
       - In-process task queue: lightweight Tokio-based queue (`infra/tasks.rs`) for DB-only tasks (tag-rename cascade, tagging pipeline evaluation)
         that do not require external compute.
-      - Job watchdog: background Tokio task (`infra/job_watchdog.rs`) that periodically resets jobs stuck in `processing` for longer than
-        `JOB_PROCESSING_TIMEOUT_SECS` (default 600 s), incrementing `retry_count` and clearing `claim_token`.
+      - Recurring task scheduler: a small framework (`infra/scheduler.rs`) runs all periodic loops — the job watchdog
+        (resets jobs stuck in `processing` longer than `JOB_PROCESSING_TIMEOUT_SECS`, default 600 s, incrementing `retry_count`
+        and clearing `claim_token`), the job cleanup task (prunes terminal jobs older than `JOB_RETENTION_SECS`, default 30 days),
+        and the tagging-pipeline recovery sweep. The pipeline loop itself is event-driven (its poll fallback is now this sweep).
       - Local caches: Redis for sessions, presigned URLs, federation tokens, and backend domain mappings.
 
 - Workers (`archypix-worker`, one or more Rust processes)
@@ -43,8 +45,9 @@
 
 - MinIO (S3-compatible object storage)
     - Purpose: durable blob store for original images, derivatives, version snapshots, and exports.
-    - Buckets: staging (short-lived; auto-expires via lifecycle rule), pictures (confirmed originals), versions (version snapshots),
-      small/medium/large (thumbnails).
+  - Buckets: staging (short-lived; auto-expires via lifecycle rule), pictures (the current/latest
+    file — mutable: overwritten in place on edit), versions (previous versions plus the preserved
+    original), small/medium/large (thumbnails).
     - S3 keys are derived deterministically and never stored in the database:
         - Originals and thumbnails: `{user_id}/{picture_id}`.
         - Version snapshots: `{user_id}/{picture_id}/{version_id}`. The `version_id` is generated before the S3 copy and used as the

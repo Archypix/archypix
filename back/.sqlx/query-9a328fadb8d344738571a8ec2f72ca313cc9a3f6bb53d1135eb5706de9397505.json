@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT picture_id, picture_token\n               FROM share_announcements\n               WHERE outgoing_share_id = $1\n                 AND ($2::uuid[] IS NULL OR picture_id = ANY($2::uuid[]))",
+  "query": "SELECT picture_id, picture_token, announced_updated_at\n               FROM share_announcements\n               WHERE outgoing_share_id = $1\n                 AND ($2::uuid[] IS NULL OR picture_id = ANY($2::uuid[]))",
   "describe": {
     "columns": [
       {
@@ -24,6 +24,17 @@
             "name": "picture_token"
           }
         }
+      },
+      {
+        "ordinal": 2,
+        "name": "announced_updated_at",
+        "type_info": "Timestamp",
+        "origin": {
+          "Table": {
+            "table": "share_announcements",
+            "name": "announced_updated_at"
+          }
+        }
       }
     ],
     "parameters": {
@@ -34,8 +45,9 @@
     },
     "nullable": [
       false,
-      false
+      false,
+      true
     ]
   },
-  "hash": "9c499f770b950f73ffaf975b586a0a8483ca5714cdabfc9235e60203a3c85c72"
+  "hash": "9a328fadb8d344738571a8ec2f72ca313cc9a3f6bb53d1135eb5706de9397505"
 }

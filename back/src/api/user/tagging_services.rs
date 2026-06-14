@@ -411,6 +411,7 @@ pub async fn delete_service(
     if !deleted {
         return Err(AppError::NotFound);
     }
+    state.pipeline_waker.wake(user_id);
     Ok(Json(serde_json::json!({ "deleted": true })))
 }
 

@@ -14,6 +14,7 @@ CREATE TYPE federation_direction AS ENUM ('inbound', 'outbound');
 CREATE TYPE federation_status AS ENUM ('pending', 'sent', 'delivered', 'failed');
 CREATE TYPE safe_delete_mode AS ENUM ('singleBranch', 'fullDelete');
 CREATE TYPE service_type AS ENUM ('shared_tag_mapping', 'rule', 'segmentation');
+CREATE TYPE picture_exif_sync_status AS ENUM ('synced', 'pending', 'unsupported');
 
 
 -- ============================================================================
@@ -126,7 +127,12 @@ CREATE TABLE pictures
 
     -- Tagging pipeline: NULL means the picture has never been processed (dirty by default).
     -- Set to NOW() after a successful pipeline run; reset to NULL on manual tag changes.
-    last_pipeline_run_at TIMESTAMP
+    last_pipeline_run_at TIMESTAMP,
+
+    -- Convergence of the S3 original's embedded EXIF versus this row (the source of truth).
+    -- 'pending' while an edit_picture job rewrites the file; 'unsupported' when the format
+    -- cannot embed EXIF (DB-only edit, no job); 'synced' otherwise.
+    exif_sync_status     picture_exif_sync_status NOT NULL DEFAULT 'synced'
 );
 
 CREATE INDEX idx_pictures_local_user ON pictures (local_user_id);
@@ -241,6 +247,9 @@ CREATE TABLE share_announcements
     outgoing_share_id UUID NOT NULL REFERENCES outgoing_shares (id) ON DELETE CASCADE,
     picture_id        UUID NOT NULL, -- sender's local picture.id
     picture_token     UUID NOT NULL DEFAULT gen_random_uuid(),
+    -- The pictures.updated_at value captured at the last successful (re-)announce of this picture.
+    -- Gates metadata re-announce: a picture is re-announced when pictures.updated_at moves past it.
+    announced_updated_at TIMESTAMP,
     PRIMARY KEY (outgoing_share_id, picture_id)
 );
 
@@ -495,10 +504,16 @@ CREATE INDEX idx_jobs_created ON jobs (created_at);
 CREATE INDEX idx_jobs_pending_claim ON jobs (job_type, created_at) WHERE status = 'pending';
 -- Index for looking up jobs by picture
 CREATE INDEX idx_jobs_picture ON jobs (picture_id) WHERE picture_id IS NOT NULL;
+-- At most one in-flight edit_picture reconcile per picture (the concurrency rule for EXIF edits):
+-- a second concurrent edit folds into the pending job or waits for the in-flight one to complete.
+CREATE UNIQUE INDEX uq_edit_picture_inflight ON jobs (picture_id)
+    WHERE job_type = 'edit_picture' AND status IN ('pending', 'processing');
 -- Index for GPS bbox queries (used by rule-based tagging)
 CREATE INDEX idx_pictures_gps ON pictures (gps_lat, gps_lng) WHERE gps_lat IS NOT NULL;
 -- Index for efficient dirty-picture queries (pipeline loop)
 CREATE INDEX idx_pictures_pipeline ON pictures (local_user_id, last_pipeline_run_at);
+-- Partial index for the stuck-`pending` EXIF resync sweep (pictures awaiting file reconcile).
+CREATE INDEX idx_pictures_exif_pending ON pictures (id) WHERE exif_sync_status = 'pending';
 
 -- Config JSONB structure examples:
 -- gen_thumbnail: {"picture_ids": ["uuid1", "uuid2"], "sizes": ["thumb", "medium"]}

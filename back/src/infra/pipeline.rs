@@ -163,51 +163,35 @@ impl Scheduler {
 ///
 /// Returns a future that runs forever (until the process exits). Spawn it with `tokio::spawn`.
 /// `rx` comes from [`channel`]; the matching [`PipelineWaker`] is what producers call.
-#[allow(clippy::too_many_arguments)]
+///
+/// The loop is purely event-driven: the recovery/poll fallback now lives in
+/// [`PipelineRecoverySweepTask`], a [`RecurringTask`] that pushes dirty users back through the
+/// waker.
 pub fn create(
     db: PgPool,
     rx: mpsc::UnboundedReceiver<Uuid>,
-    poll_interval: Duration,
     config: Config,
     concurrency: usize,
     federation: FederationClient,
     cache: Arc<dyn Cache>,
     waker: PipelineWaker,
 ) -> impl Future<Output = ()> {
-    async move {
-        run(
-            db,
-            rx,
-            poll_interval,
-            config,
-            concurrency,
-            federation,
-            cache,
-            waker,
-        )
-        .await
-    }
+    async move { run(db, rx, config, concurrency, federation, cache, waker).await }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run(
     db: PgPool,
     mut rx: mpsc::UnboundedReceiver<Uuid>,
-    poll_interval: Duration,
     config: Config,
     concurrency: usize,
     federation: FederationClient,
     cache: Arc<dyn Cache>,
     waker: PipelineWaker,
 ) {
-    tracing::info!(
-        poll_interval_secs = poll_interval.as_secs(),
-        concurrency,
-        "tagging pipeline loop started"
-    );
+    tracing::info!(concurrency, "tagging pipeline loop started");
 
     let scheduler = Arc::new(Scheduler {
-        db: db.clone(),
+        db,
         federation,
         cache,
         config,
@@ -216,36 +200,55 @@ async fn run(
         state: Arc::new(Mutex::new(HashMap::new())),
     });
 
-    // Startup recovery sweep: pick up everything dirty from before this process started.
-    recovery_sweep(&db, &scheduler).await;
-
     loop {
-        tokio::select! {
-            maybe = rx.recv() => {
-                match maybe {
-                    Some(user_id) => scheduler.schedule(user_id),
-                    None => break, // all wakers dropped — process shutting down
-                }
-            }
-            _ = tokio::time::sleep(poll_interval) => {
-                tracing::debug!("pipeline: recovery sweep");
-                recovery_sweep(&db, &scheduler).await;
-            }
+        match rx.recv().await {
+            Some(user_id) => scheduler.schedule(user_id),
+            None => break, // all wakers dropped — process shutting down
         }
     }
 
     tracing::info!("tagging pipeline loop stopped");
 }
 
-/// Enqueue every user that currently has dirty pictures or a share awaiting (re)announcement.
-async fn recovery_sweep(db: &PgPool, scheduler: &Arc<Scheduler>) {
-    match PipelineRepository::find_users_with_dirty_pictures(db).await {
-        Ok(users) => {
-            for user_id in users {
-                scheduler.schedule(user_id);
-            }
+/// Recovery/poll fallback for the pipeline: periodically (and once at startup) re-wakes every user
+/// that currently has dirty pictures or a share awaiting (re)announcement. Covers crash/lost-wake
+/// recovery, so a missed wake is only a latency issue, never a correctness one.
+pub struct PipelineRecoverySweepTask {
+    db: PgPool,
+    waker: PipelineWaker,
+    interval: Duration,
+}
+
+impl PipelineRecoverySweepTask {
+    pub fn new(db: PgPool, waker: PipelineWaker, interval: Duration) -> Self {
+        Self {
+            db,
+            waker,
+            interval,
         }
-        Err(e) => tracing::error!(error = ?e, "pipeline recovery sweep error"),
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::infra::scheduler::RecurringTask for PipelineRecoverySweepTask {
+    fn name(&self) -> &'static str {
+        "pipeline_recovery_sweep"
+    }
+
+    fn interval(&self) -> Duration {
+        self.interval
+    }
+
+    fn run_on_startup(&self) -> bool {
+        true
+    }
+
+    async fn tick(&self) -> anyhow::Result<()> {
+        let users = PipelineRepository::find_users_with_dirty_pictures(&self.db).await?;
+        for user_id in users {
+            self.waker.wake(user_id);
+        }
+        Ok(())
     }
 }
 

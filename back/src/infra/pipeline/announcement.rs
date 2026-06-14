@@ -128,11 +128,15 @@ async fn reconcile_share(
     .collect();
 
     let tracking = ShareAnnouncementRepository::tracking_for_share(db, share.id, scope_ids).await?;
-    let tracking_map: HashMap<Uuid, Uuid> = tracking.iter().copied().collect();
+    // picture_id → (token, announced_updated_at) — the last value at which it was (re-)announced.
+    let tracking_map: HashMap<Uuid, (Uuid, Option<chrono::NaiveDateTime>)> = tracking
+        .iter()
+        .map(|(pic, tok, at)| (*pic, (*tok, *at)))
+        .collect();
 
     // Picture metadata + upstream tokens for everything involved.
     let mut involved: HashSet<Uuid> = covered.iter().copied().collect();
-    for (pic, _) in &tracking {
+    for (pic, _, _) in &tracking {
         involved.insert(*pic);
     }
     let involved_ids: Vec<Uuid> = involved.into_iter().collect();
@@ -143,9 +147,9 @@ async fn reconcile_share(
         .collect();
     let upstream = TagRepository::active_picture_tokens_for(db, &involved_ids).await?;
 
-    // ── Compute the announce set (with the token to record on success) ────────
+    // ── Compute the announce set (with the token + updated_at to record on success) ────────
     let mut announce_items: Vec<AnnouncedPicture> = Vec::new();
-    let mut announce_tokens: Vec<(Uuid, Uuid)> = Vec::new();
+    let mut announce_tokens: Vec<(Uuid, Uuid, chrono::NaiveDateTime)> = Vec::new();
     for pic in &covered {
         let Some(meta) = meta_by_id.get(pic) else {
             continue;
@@ -157,10 +161,18 @@ async fn reconcile_share(
                 None if meta.is_owned() => Uuid::new_v4(), // owned: mint a fresh token
                 None => continue, // received but no active upstream token yet
             },
-            Some(existing) => match desired_upstream {
-                Some(up) if up != *existing => up, // received whose upstream token moved → re-announce
-                _ => continue,                     // already announced, token stable → skip
-            },
+            Some((existing, announced_at)) => {
+                let token_moved = matches!(desired_upstream, Some(up) if up != *existing);
+                // Metadata re-announce (§10.3): owner's EXIF/geo changed since the last announce.
+                let metadata_changed = announced_at.map_or(true, |a| meta.updated_at > a);
+                if token_moved {
+                    desired_upstream.unwrap() // received whose upstream token moved → re-announce
+                } else if metadata_changed {
+                    *existing // same token, deliver refreshed metadata
+                } else {
+                    continue; // already announced, token + metadata stable → skip
+                }
+            }
         };
         announce_items.push(AnnouncedPicture::from_picture(
             meta,
@@ -168,13 +180,13 @@ async fn reconcile_share(
             sender_username,
             &run.config.global_domain,
         ));
-        announce_tokens.push((*pic, token));
+        announce_tokens.push((*pic, token, meta.updated_at));
     }
 
     // ── Compute the unannounce set (tracked but no longer covered) ────────────
     let mut unannounce_ids: Vec<String> = Vec::new();
     let mut unannounce_pics: Vec<Uuid> = Vec::new();
-    for (pic, _tok) in &tracking {
+    for (pic, _tok, _at) in &tracking {
         if covered.contains(pic) {
             continue;
         }
@@ -211,9 +223,13 @@ async fn reconcile_share(
         match deliver_announce(run, share, sender_username, same_backend, announce_items).await {
             Ok(()) => {
                 let mut tx = db.begin().await.map_err(map_sqlx_error)?;
-                for (pic, token) in &announce_tokens {
+                for (pic, token, updated_at) in &announce_tokens {
                     ShareAnnouncementRepository::insert_with_token(
-                        &mut *tx, share.id, *pic, *token,
+                        &mut *tx,
+                        share.id,
+                        *pic,
+                        *token,
+                        Some(*updated_at),
                     )
                     .await?;
                 }

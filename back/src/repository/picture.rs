@@ -1,5 +1,5 @@
-use crate::domain::job::ExifOverrides;
-use crate::domain::picture::Picture;
+use crate::domain::job::ExifSnapshot;
+use crate::domain::picture::{ExifSyncStatus, Picture};
 use crate::infra::error::{AppError, map_sqlx_error};
 use chrono::NaiveDateTime;
 use serde::Deserialize;
@@ -65,7 +65,7 @@ impl PictureRepository {
                          exif_data as "exif_data: _", metadata as "metadata: _",
                          deleted_at, captured_at, ingested_at, updated_at,
                          blurhash, gps_lat, gps_lng, gps_alt, orientation, thumbnails_generated_at,
-                         file_hash"#,
+                         file_hash, exif_sync_status as "exif_sync_status: _""#,
             id,
             local_user_id,
             filename,
@@ -86,6 +86,7 @@ impl PictureRepository {
     /// `remote_picture_id` is the sender's picture UUID (stored as string for cross-instance compat).
     /// Deduplication is handled by the `uq_received_picture` unique index: on conflict the existing
     /// row is returned unchanged.
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_received<'e, E>(
         ex: E,
         recipient_id: Uuid,
@@ -98,16 +99,24 @@ impl PictureRepository {
         width: Option<i32>,
         height: Option<i32>,
         captured_at: Option<NaiveDateTime>,
+        gps_lat: Option<f64>,
+        gps_lng: Option<f64>,
+        gps_alt: Option<i32>,
+        orientation: Option<i16>,
+        exif_data: Option<serde_json::Value>,
     ) -> Result<Picture, AppError>
     where
         E: Executor<'e, Database = Postgres>,
     {
+        let exif_json = exif_data.unwrap_or_else(|| serde_json::json!({}));
         sqlx::query_as!(
             Picture,
             r#"INSERT INTO pictures
                    (local_user_id, remote_picture_id, owner_username, owner_instance_domain,
-                    filename, mime_type, file_size, width, height, exif_data, metadata, captured_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, '{}'::jsonb, '{}'::jsonb, $10)
+                    filename, mime_type, file_size, width, height, exif_data, metadata, captured_at,
+                    gps_lat, gps_lng, gps_alt, orientation)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $11, '{}'::jsonb, $10,
+                       $12, $13, $14, $15)
                ON CONFLICT (local_user_id, remote_picture_id)
                WHERE remote_picture_id IS NOT NULL
                DO UPDATE SET
@@ -116,13 +125,18 @@ impl PictureRepository {
                    file_size = COALESCE(EXCLUDED.file_size, pictures.file_size),
                    width     = COALESCE(EXCLUDED.width,     pictures.width),
                    height    = COALESCE(EXCLUDED.height,    pictures.height),
-                   captured_at = COALESCE(EXCLUDED.captured_at, pictures.captured_at)
+                   captured_at = COALESCE(EXCLUDED.captured_at, pictures.captured_at),
+                   gps_lat     = COALESCE(EXCLUDED.gps_lat,     pictures.gps_lat),
+                   gps_lng     = COALESCE(EXCLUDED.gps_lng,     pictures.gps_lng),
+                   gps_alt     = COALESCE(EXCLUDED.gps_alt,     pictures.gps_alt),
+                   orientation = COALESCE(EXCLUDED.orientation, pictures.orientation),
+                   exif_data   = EXCLUDED.exif_data
                RETURNING id, local_user_id, remote_picture_id, owner_username, owner_instance_domain,
                          filename, mime_type, file_size, width, height,
                          exif_data as "exif_data: _", metadata as "metadata: _",
                          deleted_at, captured_at, ingested_at, updated_at,
                          blurhash, gps_lat, gps_lng, gps_alt, orientation, thumbnails_generated_at,
-                         file_hash"#,
+                         file_hash, exif_sync_status as "exif_sync_status: _""#,
             recipient_id,
             remote_picture_id,
             owner_username,
@@ -133,6 +147,11 @@ impl PictureRepository {
             width,
             height,
             captured_at,
+            exif_json as serde_json::Value,
+            gps_lat,
+            gps_lng,
+            gps_alt,
+            orientation,
         )
             .fetch_one(ex)
             .await
@@ -287,7 +306,8 @@ impl PictureRepository {
                       p.width, p.height, p.exif_data as "exif_data: _", p.metadata as "metadata: _",
                       p.deleted_at, p.captured_at, p.ingested_at, p.updated_at,
                       p.blurhash, p.gps_lat, p.gps_lng, p.gps_alt, p.orientation,
-                      p.thumbnails_generated_at, p.file_hash
+                      p.thumbnails_generated_at, p.file_hash,
+                      p.exif_sync_status as "exif_sync_status: _"
                FROM pictures p
                JOIN tags t ON t.picture_id = p.id
                WHERE p.local_user_id = $1
@@ -318,7 +338,7 @@ impl PictureRepository {
                       exif_data as "exif_data: _", metadata as "metadata: _",
                       deleted_at, captured_at, ingested_at, updated_at,
                       blurhash, gps_lat, gps_lng, gps_alt, orientation, thumbnails_generated_at,
-                      file_hash
+                      file_hash, exif_sync_status as "exif_sync_status: _"
                FROM pictures WHERE id = ANY($1::uuid[])"#,
             ids as &[Uuid],
         )
@@ -338,7 +358,7 @@ impl PictureRepository {
                       exif_data as "exif_data: _", metadata as "metadata: _",
                       deleted_at, captured_at, ingested_at, updated_at,
                       blurhash, gps_lat, gps_lng, gps_alt, orientation, thumbnails_generated_at,
-                      file_hash
+                      file_hash, exif_sync_status as "exif_sync_status: _"
                FROM pictures WHERE id = $1"#,
             id
         )
@@ -382,7 +402,7 @@ impl PictureRepository {
                           p.width, p.height, p.exif_data, p.metadata,
                           p.deleted_at, p.captured_at, p.ingested_at, p.updated_at,
                           p.blurhash, p.gps_lat, p.gps_lng, p.gps_alt, p.orientation,
-                          p.thumbnails_generated_at, p.file_hash
+                          p.thumbnails_generated_at, p.file_hash, p.exif_sync_status
                    FROM pictures p WHERE p.local_user_id = "#,
             );
             q.push_bind(local_user_id);
@@ -453,7 +473,7 @@ impl PictureRepository {
                          exif_data as "exif_data: _", metadata as "metadata: _",
                          deleted_at, captured_at, ingested_at, updated_at,
                          blurhash, gps_lat, gps_lng, gps_alt, orientation, thumbnails_generated_at,
-                         file_hash"#,
+                         file_hash, exif_sync_status as "exif_sync_status: _""#,
             id,
             mime_type,
             file_size,
@@ -511,7 +531,7 @@ impl PictureRepository {
                          exif_data as "exif_data: _", metadata as "metadata: _",
                          deleted_at, captured_at, ingested_at, updated_at,
                          blurhash, gps_lat, gps_lng, gps_alt, orientation, thumbnails_generated_at,
-                         file_hash"#,
+                         file_hash, exif_sync_status as "exif_sync_status: _""#,
             id,
             width,
             height,
@@ -568,70 +588,125 @@ impl PictureRepository {
         Ok(())
     }
 
-    /// Apply user-requested EXIF overrides to the picture row.
+    /// Write a complete editable-EXIF snapshot onto the picture row (write-through model).
     ///
-    /// Only non-`None` fields in `overrides` are written; existing values are kept for
-    /// fields left as `None`. Camera/lens metadata (brand, model, focal length, etc.) are
-    /// merged into the `exif_data` JSONB column.
-    pub async fn apply_exif_overrides<'e, E>(
+    /// Every editable field is set to its `snapshot` value (`None` → NULL / JSONB key removed),
+    /// the camera/lens keys in `exif_data` are rebuilt (other JSONB keys preserved), `updated_at`
+    /// is bumped, `last_pipeline_run_at` is reset (the edit re-dirties the picture so date/GPS
+    /// rules re-evaluate), and `exif_sync_status` is set to `status`.
+    ///
+    /// Used for both the forward edit (snapshot = previous applied with set/clear) and a value-gated
+    /// revert (snapshot = previous), so the row state always reflects a full, coherent EXIF set.
+    pub async fn write_exif_snapshot<'e, E>(
         ex: E,
         id: Uuid,
-        overrides: &ExifOverrides,
+        snapshot: &ExifSnapshot,
+        status: ExifSyncStatus,
     ) -> Result<(), AppError>
     where
         E: Executor<'e, Database = Postgres>,
     {
         let mut patch = serde_json::Map::new();
-        if let Some(ref v) = overrides.camera_brand {
+        if let Some(ref v) = snapshot.camera_brand {
             patch.insert("camera_brand".to_string(), serde_json::json!(v));
         }
-        if let Some(ref v) = overrides.camera_model {
+        if let Some(ref v) = snapshot.camera_model {
             patch.insert("camera_model".to_string(), serde_json::json!(v));
         }
-        if let Some(v) = overrides.focal_length_mm {
+        if let Some(v) = snapshot.focal_length_mm {
             patch.insert("focal_length_mm".to_string(), serde_json::json!(v));
         }
-        if let Some(v) = overrides.f_number {
+        if let Some(v) = snapshot.f_number {
             patch.insert("f_number".to_string(), serde_json::json!(v));
         }
-        if let Some(v) = overrides.iso_speed {
+        if let Some(v) = snapshot.iso_speed {
             patch.insert("iso_speed".to_string(), serde_json::json!(v));
         }
-        if let Some(v) = overrides.exposure_time_num {
+        if let Some(v) = snapshot.exposure_time_num {
             patch.insert("exposure_time_num".to_string(), serde_json::json!(v));
         }
-        if let Some(v) = overrides.exposure_time_den {
+        if let Some(v) = snapshot.exposure_time_den {
             patch.insert("exposure_time_den".to_string(), serde_json::json!(v));
         }
-        let exif_patch = if patch.is_empty() {
-            None
-        } else {
-            Some(serde_json::Value::Object(patch))
-        };
+        let patch = serde_json::Value::Object(patch);
+        const CAMERA_KEYS: [&str; 7] = [
+            "camera_brand",
+            "camera_model",
+            "focal_length_mm",
+            "f_number",
+            "iso_speed",
+            "exposure_time_num",
+            "exposure_time_den",
+        ];
+        let camera_keys: Vec<String> = CAMERA_KEYS.iter().map(|s| s.to_string()).collect();
 
         sqlx::query!(
             r#"UPDATE pictures
-               SET captured_at = COALESCE($2, captured_at),
-                   gps_lat     = COALESCE($3, gps_lat),
-                   gps_lng     = COALESCE($4, gps_lng),
-                   gps_alt     = COALESCE($5, gps_alt),
-                   orientation = COALESCE($6, orientation),
-                   exif_data   = CASE WHEN $7::jsonb IS NOT NULL
-                                      THEN exif_data || $7::jsonb
-                                      ELSE exif_data
-                                 END
+               SET captured_at = $2,
+                   gps_lat     = $3,
+                   gps_lng     = $4,
+                   gps_alt     = $5,
+                   orientation = $6,
+                   exif_data   = (exif_data - $7::text[]) || $8::jsonb,
+                   exif_sync_status     = $9,
+                   updated_at           = (now() AT TIME ZONE 'utc'),
+                   last_pipeline_run_at = NULL
                WHERE id = $1"#,
             id,
-            overrides.captured_at,
-            overrides.gps_lat,
-            overrides.gps_lng,
-            overrides.gps_alt,
-            overrides.orientation,
-            exif_patch as Option<serde_json::Value>,
+            snapshot.captured_at,
+            snapshot.gps_lat,
+            snapshot.gps_lng,
+            snapshot.gps_alt,
+            snapshot.orientation,
+            &camera_keys as &[String],
+            patch as serde_json::Value,
+            status as ExifSyncStatus,
         )
         .execute(ex)
         .await
         .map_err(map_sqlx_error)?;
         Ok(())
+    }
+
+    /// Set only the `exif_sync_status` column (e.g. flip to `synced` once a reconcile succeeds).
+    pub async fn set_exif_sync_status<'e, E>(
+        ex: E,
+        id: Uuid,
+        status: ExifSyncStatus,
+    ) -> Result<(), AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query!(
+            "UPDATE pictures SET exif_sync_status = $2 WHERE id = $1",
+            id,
+            status as ExifSyncStatus,
+        )
+        .execute(ex)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(())
+    }
+
+    /// Picture ids in `pending` EXIF sync that have no in-flight `edit_picture` job — the
+    /// crash-mid-completion case the optional resync sweep / manual resync recovers.
+    pub async fn find_exif_pending_without_job<'e, E>(ex: E) -> Result<Vec<Uuid>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query_scalar!(
+            r#"SELECT p.id
+               FROM pictures p
+               WHERE p.exif_sync_status = 'pending'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM jobs j
+                     WHERE j.picture_id = p.id
+                       AND j.job_type = 'edit_picture'
+                       AND j.status IN ('pending', 'processing')
+                 )"#,
+        )
+        .fetch_all(ex)
+        .await
+        .map_err(map_sqlx_error)
     }
 }

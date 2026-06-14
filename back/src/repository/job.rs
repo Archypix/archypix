@@ -244,6 +244,60 @@ impl JobRepository {
         .map_err(map_sqlx_error)
     }
 
+    /// Find the in-flight (`pending` / `processing`) `edit_picture` job for a picture, if any.
+    /// At most one can exist (enforced by `uq_edit_picture_inflight`). Drives the §5 concurrency
+    /// rule: fold into a `pending` job, or defer enqueue past a `processing` one.
+    pub async fn find_inflight_edit<'e, E>(ex: E, picture_id: Uuid) -> Result<Option<Job>, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        sqlx::query_as!(
+            Job,
+            r#"SELECT id, owner_id,
+                      job_type    AS "job_type: JobType",
+                      status      AS "status: JobStatus",
+                      config      AS "config: _",
+                      result      AS "result: _",
+                      error_message,
+                      retry_count, max_retries,
+                      idempotency_key,
+                      picture_id, claimed_by, claim_token,
+                      created_at, started_at, completed_at
+               FROM   jobs
+               WHERE  picture_id = $1
+                 AND  job_type = 'edit_picture'
+                 AND  status IN ('pending', 'processing')
+               LIMIT 1"#,
+            picture_id,
+        )
+        .fetch_optional(ex)
+        .await
+        .map_err(map_sqlx_error)
+    }
+
+    /// Replace the `config` JSONB of a still-`pending` job (the fold path). Only updates while the
+    /// job is `pending` so a job that started processing mid-fold is not silently mutated.
+    pub async fn update_config_if_pending<'e, E>(
+        ex: E,
+        job_id: Uuid,
+        config: &JobConfig,
+    ) -> Result<bool, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        let config_value = serde_json::to_value(config)
+            .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+        let res = sqlx::query!(
+            "UPDATE jobs SET config = $2 WHERE id = $1 AND status = 'pending'",
+            job_id,
+            config_value as serde_json::Value,
+        )
+        .execute(ex)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(res.rows_affected() > 0)
+    }
+
     pub async fn find_by_id<'e, E>(ex: E, id: Uuid) -> Result<Option<Job>, AppError>
     where
         E: Executor<'e, Database = Postgres>,
@@ -330,6 +384,29 @@ impl JobRepository {
         .await
         .map_err(map_sqlx_error)?;
         Ok(result.rows_affected())
+    }
+
+    /// Delete terminal jobs (`completed` / `failed`) whose `completed_at` is older than
+    /// `retention_secs`. Never touches `pending` / `processing`. Returns rows deleted.
+    ///
+    /// Both `completed` and permanently-`failed` jobs set `completed_at` (see [`Self::fail`] /
+    /// [`Self::reset_stale`]), so it is the correct retention anchor; rows with a NULL
+    /// `completed_at` fall back to `created_at`.
+    pub async fn delete_terminal_older_than(
+        db: &PgPool,
+        retention_secs: i64,
+    ) -> Result<u64, AppError> {
+        let res = sqlx::query!(
+            r#"DELETE FROM jobs
+               WHERE status IN ('completed', 'failed')
+                 AND COALESCE(completed_at, created_at)
+                     < (now() AT TIME ZONE 'utc') - make_interval(secs => $1)"#,
+            retention_secs as f64
+        )
+        .execute(db)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(res.rows_affected())
     }
 }
 

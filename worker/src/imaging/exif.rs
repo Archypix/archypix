@@ -1,5 +1,6 @@
 use crate::error::{Result, WorkerError};
-use archypix_common::job::{ExifOverrides, ExtractedExif};
+use archypix_common::job::{ExifField, ExifOverrides, ExtractedExif};
+use num_rational::Ratio;
 use rexiv2::{GpsInfo, Metadata};
 use std::path::Path;
 use tracing::debug;
@@ -101,19 +102,20 @@ pub fn extract_exif(path: &Path) -> Result<ExtractedExif> {
     })
 }
 
-/// Write EXIF overrides into the file at `path` (in-place via rexiv2).
+/// Apply an EXIF edit (`set` writes, `clear` deletes) into the file at `path` (in-place via rexiv2).
 ///
-/// Only fields that are `Some` in `overrides` are written; existing values are
-/// left untouched for `None` fields.  Must run inside
-/// `tokio::task::spawn_blocking`.
-pub fn write_exif_overrides(path: &Path, overrides: &ExifOverrides) -> Result<()> {
+/// Every editable field is covered so the file converges to the DB row (the source of truth): the
+/// promoted columns (date, GPS, orientation) and the camera/lens fields (make, model, focal length,
+/// f-number, ISO, exposure time). Fields not named in either `set` or `clear` are left untouched.
+/// Must run inside `tokio::task::spawn_blocking`.
+pub fn write_exif_overrides(path: &Path, set: &ExifOverrides, clear: &[ExifField]) -> Result<()> {
     let metadata = Metadata::new_from_path(path)
         .map_err(|e| WorkerError::Exif(format!("failed to open file for EXIF write: {e}")))?;
 
-    if let Some(dt) = overrides.captured_at {
+    // ── Set ────────────────────────────────────────────────────────────────────
+    if let Some(dt) = set.captured_at {
         let s = dt.format("%Y:%m:%d %H:%M:%S").to_string();
-        // Write to all three common date/time tags; ignore individual failures
-        // (not every format supports every tag).
+        // Write all three common date/time tags; ignore per-tag failures (format-dependent).
         for tag in &[
             "Exif.Photo.DateTimeOriginal",
             "Exif.Photo.DateTimeDigitized",
@@ -122,29 +124,83 @@ pub fn write_exif_overrides(path: &Path, overrides: &ExifOverrides) -> Result<()
             let _ = metadata.set_tag_string(tag, &s);
         }
     }
-
-    if let Some(orientation) = overrides.orientation {
+    if let Some(orientation) = set.orientation {
         let _ = metadata.set_tag_numeric("Exif.Image.Orientation", orientation as i32);
     }
-
-    // GPS: only touch GPS tags when at least one coordinate is supplied.
-    if overrides.gps_lat.is_some() || overrides.gps_lng.is_some() {
+    // GPS: write when at least one coordinate is supplied.
+    if set.gps_lat.is_some() || set.gps_lng.is_some() {
         let gps = GpsInfo {
-            longitude: overrides.gps_lng.unwrap_or(0.0),
-            latitude: overrides.gps_lat.unwrap_or(0.0),
-            altitude: overrides.gps_alt.unwrap_or(0) as f64,
+            longitude: set.gps_lng.unwrap_or(0.0),
+            latitude: set.gps_lat.unwrap_or(0.0),
+            altitude: set.gps_alt.unwrap_or(0) as f64,
         };
         let _ = metadata.set_gps_info(&gps);
     }
-
-    if let Some(ref brand) = overrides.camera_brand {
+    if let Some(ref brand) = set.camera_brand {
         let _ = metadata.set_tag_string("Exif.Image.Make", brand);
     }
-    if let Some(ref model) = overrides.camera_model {
+    if let Some(ref model) = set.camera_model {
         let _ = metadata.set_tag_string("Exif.Image.Model", model);
     }
-    if let Some(iso) = overrides.iso_speed {
+    if let Some(iso) = set.iso_speed {
         let _ = metadata.set_tag_numeric("Exif.Photo.ISOSpeedRatings", iso);
+    }
+    if let Some(focal) = set.focal_length_mm {
+        let _ = metadata.set_tag_rational(
+            "Exif.Photo.FocalLengthIn35mmFilm",
+            &Ratio::new((focal * 100.0).round() as i32, 100),
+        );
+    }
+    if let Some(fnum) = set.f_number {
+        let _ = metadata.set_tag_rational(
+            "Exif.Photo.FNumber",
+            &Ratio::new((fnum * 10.0).round() as i32, 10),
+        );
+    }
+    if set.exposure_time_num.is_some() || set.exposure_time_den.is_some() {
+        let num = set.exposure_time_num.unwrap_or(0);
+        let den = set.exposure_time_den.unwrap_or(1).max(1);
+        let _ = metadata.set_tag_rational("Exif.Photo.ExposureTime", &Ratio::new(num, den));
+    }
+
+    // ── Clear ──────────────────────────────────────────────────────────────────
+    for field in clear {
+        match field {
+            ExifField::CapturedAt => {
+                for tag in &[
+                    "Exif.Photo.DateTimeOriginal",
+                    "Exif.Photo.DateTimeDigitized",
+                    "Exif.Image.DateTime",
+                ] {
+                    let _ = metadata.clear_tag(tag);
+                }
+            }
+            ExifField::GpsLat | ExifField::GpsLng | ExifField::GpsAlt => {
+                metadata.delete_gps_info();
+            }
+            ExifField::Orientation => {
+                let _ = metadata.clear_tag("Exif.Image.Orientation");
+            }
+            ExifField::CameraBrand => {
+                let _ = metadata.clear_tag("Exif.Image.Make");
+            }
+            ExifField::CameraModel => {
+                let _ = metadata.clear_tag("Exif.Image.Model");
+            }
+            ExifField::FocalLengthMm => {
+                let _ = metadata.clear_tag("Exif.Photo.FocalLengthIn35mmFilm");
+            }
+            ExifField::FNumber => {
+                let _ = metadata.clear_tag("Exif.Photo.FNumber");
+            }
+            ExifField::IsoSpeed => {
+                let _ = metadata.clear_tag("Exif.Photo.ISOSpeedRatings");
+                let _ = metadata.clear_tag("Exif.Photo.PhotographicSensitivity");
+            }
+            ExifField::ExposureTimeNum | ExifField::ExposureTimeDen => {
+                let _ = metadata.clear_tag("Exif.Photo.ExposureTime");
+            }
+        }
     }
 
     metadata

@@ -6,4 +6,5 @@ pub mod job_watchdog;
 pub mod pipeline;
 pub mod redis;
 pub mod s3;
+pub mod scheduler;
 pub mod tasks;

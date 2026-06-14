@@ -14,6 +14,25 @@ const PicturesTab = {
                 pictureId: '', filename: '', tags: [], sources: null,
                 showSources: false, newTag: '', busy: false, msg: '', err: false,
             },
+            // Inline EXIF editor for the selected picture (write-through edit).
+            exifFields: [
+                {key: 'captured_at', label: 'Captured at', type: 'text', placeholder: 'YYYY-MM-DDTHH:MM:SS'},
+                {key: 'gps_lat', label: 'GPS lat', type: 'number'},
+                {key: 'gps_lng', label: 'GPS lng', type: 'number'},
+                {key: 'gps_alt', label: 'GPS alt (m)', type: 'number', int: true},
+                {key: 'orientation', label: 'Orientation (1-8)', type: 'number', int: true},
+                {key: 'camera_brand', label: 'Camera brand', type: 'text'},
+                {key: 'camera_model', label: 'Camera model', type: 'text'},
+                {key: 'focal_length_mm', label: 'Focal length (mm)', type: 'number'},
+                {key: 'f_number', label: 'f-number', type: 'number'},
+                {key: 'iso_speed', label: 'ISO', type: 'number', int: true},
+            ],
+            exifPane: {
+                pictureId: '', syncStatus: '', set: {}, clear: {},
+                busy: false, msg: '', err: false, jobId: '',
+            },
+            // Batch EXIF edit (comma/space-separated ids + a single GPS set/clear).
+            batchExif: {ids: '', gpsLat: '', gpsLng: '', clearGps: false, busy: false},
             out: {
                 upload: {text: '', err: false}, list: {text: '', err: false},
                 detail: {text: '', err: false}, picUrl: {text: '', err: false}
@@ -123,7 +142,92 @@ const PicturesTab = {
             this.picUrl.id = id;
             const pic = this.picGrid.find(p => p.id === id);
             this.openTagPane(id, pic ? pic.filename : '');
+            this.openExifPane(id);
             this.doGetPicture();
+        },
+
+        // ── Inline EXIF editor (write-through) ────────────────────────────────
+        async openExifPane(id){
+            this.exifPane = {
+                pictureId: id, syncStatus: '', set: {}, clear: {},
+                busy: false, msg: '', err: false, jobId: '',
+            };
+            const r = await this.api(`/api/authenticated/pictures/${encodeURIComponent(id)}`);
+            if(!r.ok) return;
+            const d = r.data;
+            this.exifPane.syncStatus = d.exif_sync_status || '';
+            const exif = d.exif_data || {};
+            for(const f of this.exifFields){
+                let v = '';
+                if(f.key === 'captured_at') v = d.captured_at || '';
+                else if(f.key === 'gps_lat') v = d.gps_lat ?? '';
+                else if(f.key === 'gps_lng') v = d.gps_lng ?? '';
+                else if(f.key === 'gps_alt') v = d.gps_alt ?? '';
+                else if(f.key === 'orientation') v = d.orientation ?? '';
+                else v = exif[f.key] ?? '';
+                this.exifPane.set[f.key] = v === null ? '' : String(v);
+                this.exifPane.clear[f.key] = false;
+            }
+        },
+
+        async saveExif(){
+            const set = {}, clear = [];
+            for(const f of this.exifFields){
+                if(this.exifPane.clear[f.key]){
+                    clear.push(f.key);
+                    continue;
+                }
+                const raw = (this.exifPane.set[f.key] ?? '').toString().trim();
+                if(raw === '') continue;
+                set[f.key] = (f.type === 'number') ? (f.int ? parseInt(raw, 10) : parseFloat(raw)) : raw;
+            }
+            this.exifPane.busy = true;
+            this.exifPane.msg = '';
+            this.exifPane.err = false;
+            const r = await this.api(`/api/authenticated/pictures/${encodeURIComponent(this.exifPane.pictureId)}/edit`, {
+                method: 'POST', body: JSON.stringify({set, clear}),
+            });
+            this.exifPane.busy = false;
+            if(!r.ok){
+                this.exifPane.err = true;
+                this.exifPane.msg = `❌ ${typeof r.data === 'string' ? r.data : JSON.stringify(r.data)}`;
+                return;
+            }
+            this.exifPane.syncStatus = r.data.exif_sync_status || '';
+            this.exifPane.jobId = r.data.job_id || '';
+            this.exifPane.msg = `✅ Saved — status: ${this.exifPane.syncStatus}` +
+                (r.data.job_id ? ` (reconcile job ${String(r.data.job_id).slice(0, 8)})` : ' (no job)');
+        },
+
+        async resyncExif(){
+            const r = await this.api(`/api/authenticated/pictures/${encodeURIComponent(this.exifPane.pictureId)}/exif/resync`, {method: 'POST'});
+            this.exifPane.err = !r.ok;
+            this.exifPane.msg = r.ok ? `✅ Re-enqueued job ${String(r.data.id).slice(0, 8)}` :
+                `❌ ${typeof r.data === 'string' ? r.data : JSON.stringify(r.data)}`;
+        },
+
+        async doBatchExif(){
+            const ids = this.batchExif.ids.split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+            if(!ids.length) return this.show('list', 'No picture ids for batch edit.', true);
+            const body = {picture_ids: ids, set: {}, clear: []};
+            if(this.batchExif.clearGps){
+                body.clear = ['gps_lat', 'gps_lng', 'gps_alt'];
+            }else{
+                if(this.batchExif.gpsLat !== '') body.set.gps_lat = parseFloat(this.batchExif.gpsLat);
+                if(this.batchExif.gpsLng !== '') body.set.gps_lng = parseFloat(this.batchExif.gpsLng);
+            }
+            this.batchExif.busy = true;
+            const r = await this.api('/api/authenticated/pictures/exif', {method: 'PATCH', body: JSON.stringify(body)});
+            this.batchExif.busy = false;
+            this.show('list', r.data, !r.ok);
+        },
+
+        syncBadgeClass(status){
+            return {
+                synced: 'bg-green-100 text-green-700',
+                pending: 'bg-amber-100 text-amber-700',
+                unsupported: 'bg-gray-200 text-gray-600',
+            }[status] || 'bg-gray-100 text-gray-500';
         },
 
         // ── Inline tag pane ──────────────────────────────────────────────────
@@ -314,6 +418,51 @@ const PicturesTab = {
             </div>
             <p :class="tagPane.err ? 'text-red-600' : 'text-green-700'" class="text-xs mt-2" v-if="tagPane.msg">{{ tagPane.msg }}</p>
             <p class="text-[11px] text-gray-400 mt-1">× removes manual tags only — pipeline tags reappear unless their rule/segment is changed.</p>
+        </div>
+
+        <!-- Inline EXIF editor: write-through edit for the selected picture -->
+        <div class="card" v-if="exifPane.pictureId">
+            <div class="flex items-center justify-between border-b pb-2 mb-3">
+                <h2 class="font-bold text-base">
+                    📷 EXIF
+                    <span class="text-gray-400 font-normal text-xs">— {{ exifPane.pictureId.slice(0, 8) }}</span>
+                </h2>
+                <div class="flex items-center gap-2">
+                    <span :class="syncBadgeClass(exifPane.syncStatus)" class="rounded px-2 py-0.5 text-[11px] font-medium" v-if="exifPane.syncStatus">{{ exifPane.syncStatus }}</span>
+                    <button @click="resyncExif" v-if="exifPane.syncStatus === 'pending'"
+                            class="btn bg-gray-100 text-gray-700 hover:bg-gray-200" title="Re-enqueue a stuck reconcile">resync</button>
+                </div>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
+                <div :key="f.key" v-for="f in exifFields" class="flex items-center gap-2">
+                    <label class="text-xs text-gray-600 w-32 shrink-0">{{ f.label }}</label>
+                    <input class="input flex-1 disabled:bg-gray-100" :type="f.type" :placeholder="f.placeholder || ''"
+                           :disabled="exifPane.clear[f.key]" v-model="exifPane.set[f.key]"/>
+                    <label class="text-[11px] text-gray-500 flex items-center gap-1" title="Clear this field">
+                        <input type="checkbox" v-model="exifPane.clear[f.key]"/> clear
+                    </label>
+                </div>
+            </div>
+            <div class="flex items-center gap-2 border-t pt-3 mt-3">
+                <button @click="saveExif" :disabled="exifPane.busy"
+                        class="btn bg-green-600 hover:bg-green-700 text-white disabled:opacity-50">Save EXIF</button>
+                <span :class="exifPane.err ? 'text-red-600' : 'text-green-700'" class="text-xs" v-if="exifPane.msg">{{ exifPane.msg }}</span>
+            </div>
+            <p class="text-[11px] text-gray-400 mt-1">Write-through: the DB updates immediately; a worker rewrites the file's embedded EXIF (status → synced). Clearing GPS clears lat/lng/alt together.</p>
+        </div>
+
+        <div class="card">
+            <h2 class="font-bold text-base mb-3 border-b pb-2">Batch EXIF edit</h2>
+            <textarea class="input w-full mb-2 font-mono text-xs" rows="2"
+                      placeholder="Picture IDs (space or comma separated)" v-model="batchExif.ids"></textarea>
+            <div class="flex gap-2 flex-wrap items-center">
+                <input class="input w-28 disabled:bg-gray-100" type="number" placeholder="gps_lat" :disabled="batchExif.clearGps" v-model="batchExif.gpsLat"/>
+                <input class="input w-28 disabled:bg-gray-100" type="number" placeholder="gps_lng" :disabled="batchExif.clearGps" v-model="batchExif.gpsLng"/>
+                <label class="text-xs text-gray-600 flex items-center gap-1"><input type="checkbox" v-model="batchExif.clearGps"/> clear GPS</label>
+                <button @click="doBatchExif" :disabled="batchExif.busy"
+                        class="btn bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50">Apply to all</button>
+            </div>
+            <p class="text-[11px] text-gray-400 mt-1">Owned pictures only. Result (updated / jobs / unsupported) appears in the List output above.</p>
         </div>
 
         <div class="card">

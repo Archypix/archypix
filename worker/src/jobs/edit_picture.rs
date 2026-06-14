@@ -9,16 +9,16 @@ use uuid::Uuid;
 
 /// Handle an `edit_picture` job.
 ///
-/// Processing order:
+/// Processing order — the modified-original upload is the **last** fallible step, so a permanent
+/// failure implies the S3 original was never overwritten (the backend's revert model relies on this
+/// file-untouched-on-failure invariant):
 /// 1. Download the original file.
-/// 2. If `exif_overrides` is set: write them into the file's embedded EXIF.
-///    A write failure is a permanent error — the file format may not support
-///    embedded metadata (e.g. some raw formats). MIME screening will be added
-///    server-side to prevent creating such jobs in the first place.
-/// 3. Compute file_size and file_hash from the (possibly modified) file.
-/// 4. Upload the file to the `output` presigned URL.
-/// 5. If the backend provided thumbnail presigned URLs (visual edit): regenerate
-///    and upload all three variants plus a new BlurHash.
+/// 2. If `exif` is set: apply its `set`/`clear` delta into the file's embedded EXIF. A write failure
+///    is permanent — the backend's MIME preflight prevents enqueuing doomed jobs, so a failure here
+///    is genuinely unrecoverable.
+/// 3. Regenerate + upload thumbnails (and BlurHash) from the local edited file (visual edits only).
+/// 4. Compute file_size and file_hash from the (modified) file.
+/// 5. Upload the modified original to the `output` presigned URL — the last fallible step.
 pub async fn handle(
     client: &BackendClient,
     job_id: Uuid,
@@ -52,11 +52,12 @@ pub async fn handle(
         "edit_picture: original downloaded"
     );
 
-    // ── Write EXIF overrides into the file ───────────────────────────────────
-    if let Some(ref overrides) = config.exif_overrides {
+    // ── Apply the EXIF edit (set/clear) into the file ─────────────────────────
+    if let Some(ref edit) = config.exif {
         let path = file_path.clone();
-        let overrides = overrides.clone();
-        tokio::task::spawn_blocking(move || exif_mod::write_exif_overrides(&path, &overrides))
+        let set = edit.set.clone();
+        let clear = edit.clear.clone();
+        tokio::task::spawn_blocking(move || exif_mod::write_exif_overrides(&path, &set, &clear))
             .await
             .map_err(|e| WorkerError::Imaging(format!("spawn_blocking panicked: {e}")))??;
     }
@@ -66,6 +67,10 @@ pub async fn handle(
     if config.visual.is_some() {
         warn!(job_id = %job_id, "visual transforms not yet implemented; uploading original");
     }
+
+    // ── Regenerate thumbnails (visual edits only) BEFORE the original upload ──
+    // Keeping the original upload last preserves the file-untouched-on-failure invariant.
+    let thumb = thumbnailer::run(client, &file_path, &presigned_writes, tmp.path()).await?;
 
     // ── File size + hash (after EXIF write, so values match what is uploaded) ─
     let file_size = std::fs::metadata(&file_path).map(|m| m.len() as i64).ok();
@@ -82,12 +87,9 @@ pub async fn handle(
         }
     };
 
-    // ── Upload modified original ─────────────────────────────────────────────
+    // ── Upload modified original (last fallible step) ────────────────────────
     info!(job_id = %job_id, "edit_picture: uploading modified original");
     client.upload_presigned(&output_url, &file_path).await?;
-
-    // ── Regenerate thumbnails (visual edits only) ────────────────────────────
-    let thumb = thumbnailer::run(client, &file_path, &presigned_writes, tmp.path()).await?;
 
     client
         .complete_job(

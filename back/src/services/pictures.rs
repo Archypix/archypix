@@ -121,6 +121,8 @@ pub struct PictureListItem {
     /// for owned pictures.
     pub owner_username: Option<String>,
     pub owner_instance: Option<String>,
+    /// Convergence of the file's embedded EXIF vs the DB row.
+    pub exif_sync_status: crate::domain::picture::ExifSyncStatus,
 }
 
 #[derive(Debug, Serialize)]
@@ -315,6 +317,7 @@ pub async fn list_pictures(
                 .and_then(|m| m.get(&pic.id))
                 .cloned(),
             owned: pic.remote_picture_id.is_none(),
+            exif_sync_status: pic.exif_sync_status,
             owner_username: pic.owner_username,
             owner_instance: pic.owner_instance_domain,
         })

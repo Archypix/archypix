@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM jobs\n               WHERE status IN ('completed', 'failed')\n                 AND COALESCE(completed_at, created_at)\n                     < (now() AT TIME ZONE 'utc') - make_interval(secs => $1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "de18d0cdc80a6a4112103a203f7b094517e29923744e5370a2d7da6e1947a75b"
+}

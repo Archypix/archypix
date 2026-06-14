@@ -72,22 +72,37 @@ async fn main() -> anyhow::Result<()> {
     );
     tokio::spawn(task_runner);
 
-    // Start the job watchdog — resets stuck `processing` jobs to `pending`.
-    tokio::spawn(infra::job_watchdog::run(
-        db.clone(),
-        config.job_processing_timeout_secs,
-        config.job_watchdog_interval_secs,
-    ));
-
     // Cache handle, shared by the pipeline (same-backend resolution) and request handlers.
     let cache: Arc<dyn infra::redis::Cache> = Arc::new(redis);
+
+    // Periodic background tasks: stale-job watchdog, terminal-job cleanup, and the pipeline
+    // recovery sweep (the pipeline loop itself is event-driven only). `shutdown_tx` is kept alive
+    // for the lifetime of `main`; graceful shutdown is out of scope, so it is never signalled.
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let mut scheduler = infra::scheduler::Scheduler::new();
+    scheduler
+        .register(Arc::new(infra::job_watchdog::JobWatchdogTask::new(
+            db.clone(),
+            config.job_processing_timeout_secs,
+            Duration::from_secs(config.job_watchdog_interval_secs),
+        )))
+        .register(Arc::new(infra::job_watchdog::JobCleanupTask::new(
+            db.clone(),
+            config.job_retention_secs,
+            Duration::from_secs(config.job_cleanup_interval_secs),
+        )))
+        .register(Arc::new(infra::pipeline::PipelineRecoverySweepTask::new(
+            db.clone(),
+            pipeline_waker.clone(),
+            Duration::from_secs(config.pipeline_poll_interval_secs),
+        )));
+    tokio::spawn(scheduler.run(shutdown_rx));
 
     // Start the tagging pipeline loop. Delivery is inline, so it holds the federation client, the
     // cache, and the waker (to wake same-backend recipients).
     tokio::spawn(infra::pipeline::create(
         db.clone(),
         pipeline_rx,
-        Duration::from_secs(config.pipeline_poll_interval_secs),
         config.clone(),
         config.pipeline_concurrency,
         federation.clone(),

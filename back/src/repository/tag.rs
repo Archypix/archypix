@@ -346,15 +346,22 @@ impl TagRepository {
     }
 
     /// Remove every pipeline tag (`rule`/`segment`/`share_mapping`) produced by a service.
-    /// Called when a service is disabled — its tags are no longer live.
+    /// Called when a service is disabled or deleted without tag promotion — its tags are no longer
+    /// live. Also resets `last_pipeline_run_at = NULL` on every affected picture so the pipeline
+    /// re-evaluates their coverage and unannounces them from any active share they no longer cover.
     pub async fn remove_service_tags<'e, E>(ex: E, service_id: Uuid) -> Result<(), AppError>
     where
         E: Executor<'e, Database = Postgres>,
     {
         sqlx::query!(
-            r#"DELETE FROM tags
-               WHERE source_id = $1
-                 AND source IN ('rule'::tag_source, 'segment'::tag_source, 'share_mapping'::tag_source)"#,
+            r#"WITH removed AS (
+                   DELETE FROM tags
+                   WHERE source_id = $1
+                     AND source IN ('rule'::tag_source, 'segment'::tag_source, 'share_mapping'::tag_source)
+                   RETURNING picture_id
+               )
+               UPDATE pictures SET last_pipeline_run_at = NULL
+               WHERE id IN (SELECT DISTINCT picture_id FROM removed)"#,
             service_id,
         )
             .execute(ex)

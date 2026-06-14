@@ -55,6 +55,22 @@ impl PictureVersionRepository {
         .map_err(map_sqlx_error)
     }
 
+    /// Whether the picture already has at least one stored version. Drives the versioning
+    /// snapshot predicate (§9): `OriginalCopy` keeps only the first snapshot.
+    pub async fn has_versions<'e, E>(ex: E, picture_id: Uuid) -> Result<bool, AppError>
+    where
+        E: Executor<'e, Database = Postgres>,
+    {
+        let exists: Option<bool> = sqlx::query_scalar!(
+            "SELECT EXISTS(SELECT 1 FROM picture_versions WHERE picture_id = $1)",
+            picture_id
+        )
+        .fetch_one(ex)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(exists.unwrap_or(false))
+    }
+
     /// Returns MAX(version_number) + 1 for the given picture, defaulting to 1 if no versions exist.
     pub async fn next_version_number<'e, E>(ex: E, picture_id: Uuid) -> Result<i32, AppError>
     where

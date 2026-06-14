@@ -64,6 +64,11 @@ pub struct Config {
     pub job_processing_timeout_secs: i64,
     /// How often (seconds) the watchdog runs its stale-job scan.
     pub job_watchdog_interval_secs: u64,
+    /// Age (seconds) after a terminal job's `completed_at` at which it is deleted by the cleanup
+    /// task. Default: 2592000 (30 days).
+    pub job_retention_secs: i64,
+    /// How often (seconds) the terminal-job cleanup task runs. Default: 86400 (24 h).
+    pub job_cleanup_interval_secs: u64,
     /// How often (seconds) the tagging pipeline loop runs a recovery sweep,
     /// catching pictures missed due to restarts. Event-driven wakes happen immediately.
     /// Default: 3600 (1 hour).
@@ -161,6 +166,8 @@ impl Config {
             task_queue_concurrency: env_usize("TASK_QUEUE_CONCURRENCY", 4)?,
             job_processing_timeout_secs: env_i64("JOB_PROCESSING_TIMEOUT_SECS", 600)?,
             job_watchdog_interval_secs: env_u64("JOB_WATCHDOG_INTERVAL_SECS", 60)?,
+            job_retention_secs: env_i64("JOB_RETENTION_SECS", 2_592_000)?,
+            job_cleanup_interval_secs: env_u64("JOB_CLEANUP_INTERVAL_SECS", 86_400)?,
             pipeline_poll_interval_secs: env_u64("PIPELINE_POLL_INTERVAL_SECS", 3600)?,
             pipeline_batch_sleep_ms: env_u64("PIPELINE_BATCH_SLEEP_MS", 0)?,
             pipeline_concurrency: env_usize("PIPELINE_CONCURRENCY", 4)?,
@@ -296,6 +303,8 @@ impl Config {
             task_queue_concurrency: 1,
             job_processing_timeout_secs: 600,
             job_watchdog_interval_secs: 60,
+            job_retention_secs: 2_592_000,
+            job_cleanup_interval_secs: 86_400,
             pipeline_poll_interval_secs: 3600,
             pipeline_batch_sleep_ms: 0,
             pipeline_concurrency: 4,

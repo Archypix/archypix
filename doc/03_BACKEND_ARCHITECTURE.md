@@ -76,11 +76,13 @@ api/
 infra/
   config.rs / error.rs / redis.rs / crypto.rs / db.rs / s3.rs
   tasks.rs           # in-process Tokio task queue (tag rename, revocation-cascade unannounce)
-  pipeline.rs        # tagging pipeline: loop, sweep
+  scheduler.rs       # RecurringTask trait + Scheduler: runs all periodic loops (one spawned loop each)
+  pipeline.rs        # tagging pipeline: event-driven loop + PipelineRecoverySweepTask (poll fallback)
   pipeline/
     evaluation.rs    # per-user tag service evaluation + reconciliation, then announcement
-    announcement.rs  # inline reconcile_share: PFA/errored full pass + active dirty-delta (deliver-then-record)
-  job_watchdog.rs    # periodic reset of stale processing jobs
+    announcement.rs  # inline reconcile_share: PFA/errored full pass + active dirty-delta (deliver-then-record);
+                     #   re-announces tracked pictures whose metadata changed (gated on pictures.updated_at)
+  job_watchdog.rs    # JobWatchdogTask (reset stale processing jobs) + JobCleanupTask (prune terminal jobs)
 ```
 
 ## D) AppState
@@ -136,8 +138,11 @@ only on success). Two entry points in `pipeline::announcement` wrap an internal 
   (failure recovery) share whose `next_retry_at` backoff has elapsed: diffs **full** coverage against
   the tracking table, delivers, and flips to `active` once fully delivered.
 - `reconcile_active_batch` — after reconciliation: diffs `active` + `future=true` shares over the
-  batch's **dirty** pictures, announcing new coverage, unannouncing lost coverage, and re-announcing
-  received pictures whose upstream token moved.
+  batch's **dirty** pictures, announcing new coverage, unannouncing lost coverage, re-announcing
+  received pictures whose upstream token moved, and re-announcing tracked pictures whose owner
+  metadata changed (gated on `pictures.updated_at > share_announcements.announced_updated_at`, so an
+  EXIF edit propagates to recipients but a tag-only change does not). Announced pictures carry the
+  owner's gps/orientation/exif_data so recipients converge on the same metadata.
 
 A failed delivery demotes an `active` share to `errored` and sets a `next_retry_at` backoff
 (`PIPELINE_RETRY_BACKOFF_SECS`); the next pass is then a full reconcile. Same-backend vs cross-instance
@@ -261,10 +266,12 @@ via WebFinger and cached.
 
 **Pictures — editing**
 
-| Method | Path                                    | Description                                                                                                          |
-|--------|-----------------------------------------|----------------------------------------------------------------------------------------------------------------------|
-| `POST` | `/api/authenticated/pictures/{id}/edit` | Enqueue an `edit_picture` job. Body: `{ exif_overrides?, visual?, regenerate_thumbnails }`. Only for owned pictures. |
-| `GET`  | `/api/authenticated/pictures/{id}/jobs` | List all processing jobs for a picture.                                                                              |
+| Method  | Path                                           | Description                                                                                                                                                                                             |
+|---------|------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `POST`  | `/api/authenticated/pictures/{id}/edit`        | Edit one owned picture's EXIF (write-through). Body: `{ set?, clear? }`. Applies the DB change synchronously; returns the updated row, `exif_sync_status`, and `job_id` (or `null` when `unsupported`). |
+| `PATCH` | `/api/authenticated/pictures/exif`             | Batch EXIF edit. Body: `{ picture_ids, set?, clear? }` (owned only, no cap). Returns `{ updated, jobs, unsupported }`.                                                                                  |
+| `POST`  | `/api/authenticated/pictures/{id}/exif/resync` | Re-enqueue a reconcile for a picture stuck in `pending` with no in-flight job.                                                                                                                          |
+| `GET`   | `/api/authenticated/pictures/{id}/jobs`        | List all processing jobs for a picture.                                                                                                                                                                 |
 
 **Jobs**
 
